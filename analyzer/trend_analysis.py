@@ -1,7 +1,7 @@
 import pandas as pd
 
 
-# ── 均線排列 ──────────────────────────────────────────────────────────────────
+# --- Moving-average alignment ------------------------------------------------
 
 def calc_ma_alignment(df: pd.DataFrame) -> dict:
     close = pd.to_numeric(df["close"], errors="coerce")
@@ -13,14 +13,14 @@ def calc_ma_alignment(df: pd.DataFrame) -> dict:
     m5, m10, m20, m60 = ma5.iloc[-1], ma10.iloc[-1], ma20.iloc[-1], ma60.iloc[-1]
     cur = close.iloc[-1]
 
-    # 均線糾結：5/10/20MA 彼此差距 < 3%，且收盤站上三線
+    # MA convergence: 5/10/20MA within 3% of each other, close above all three
     vals = [v for v in [m5, m10, m20] if pd.notna(v)]
     ma_squeeze = False
     if len(vals) == 3:
         spread = (max(vals) - min(vals)) / min(vals)
         ma_squeeze = bool(spread < 0.03 and pd.notna(cur) and float(cur) > min(vals))
 
-    # 多頭排列：5MA > 10MA > 20MA > 60MA
+    # Bullish alignment: 5MA > 10MA > 20MA > 60MA
     ma_bull = bool(
         pd.notna(m5) and pd.notna(m10) and pd.notna(m20) and pd.notna(m60)
         and float(m5) > float(m10) > float(m20) > float(m60)
@@ -34,7 +34,7 @@ def calc_ma_alignment(df: pd.DataFrame) -> dict:
     }
 
 
-# ── Donchian 通道突破（取代 W 底型態偵測）────────────────────────────────────
+# --- Donchian channel breakout (replaces W-bottom pattern detection) ---------
 
 def calc_donchian_break(df: pd.DataFrame,
                         window: int = 40,
@@ -65,18 +65,18 @@ def calc_donchian_break(df: pd.DataFrame,
         return {"Donchian_Break": False}
 
     h, l = float(h_win), float(l_win)
-    compressed = (h - l) / l < max_range_pct   # 振幅 < 15%
-    near_top   = cur >= h * 0.97               # 收盤在前 40 日高點 97% 以上
+    compressed = (h - l) / l < max_range_pct   # range < 15%
+    near_top   = cur >= h * 0.97               # close >= 97% of prior 40-day high
 
     return {"Donchian_Break": bool(compressed and near_top)}
 
 
-# ── 52 週高點位置 ─────────────────────────────────────────────────────────────
+# --- 52-week-high position ---------------------------------------------------
 
 def calc_52w_position(df: pd.DataFrame, window: int = 252) -> dict:
     """
-    計算收盤距 52 週最高點的百分比距離。
-    距高點 ≤ 15%（Near_52W_High = True）是大波段飆股的先決條件。
+    Percentage distance of the close below the 52-week high.
+    Within 15% (Near_52W_High = True) is a precondition for a major-run stock.
     """
     close = pd.to_numeric(df["close"], errors="coerce")
     min_p = max(60, window // 4)
@@ -94,28 +94,45 @@ def calc_52w_position(df: pd.DataFrame, window: int = 252) -> dict:
     }
 
 
-# ── 相對強弱（RS vs 加權指數）────────────────────────────────────────────────
+# --- Relative strength (RS vs. the TAIEX index) ------------------------------
 
 def calc_rs(stock_df: pd.DataFrame,
             taiex_df: pd.DataFrame = None,
             window: int = 63) -> dict:
     """
-    個股近 3 個月報酬率 − 加權指數近 3 個月報酬率（單位：百分點）。
-    RS_Score > 0 = 跑贏大盤；RS_Strong = 超額報酬 > 10%。
+    Stock ~3-month return minus TAIEX ~3-month return (in percentage points).
+    RS_Score > 0 = outperforming the market; RS_Strong = excess return > 10%.
+
+    Stock and index are aligned on common trading dates first; otherwise the
+    63-bar lookback would land on different calendar days when the two series
+    have different coverage, distorting the comparison.
     """
     result = {"RS_Score": None, "RS_Strong": False}
     if taiex_df is None or taiex_df.empty or stock_df.empty:
         return result
 
     try:
-        sc = pd.to_numeric(stock_df["close"], errors="coerce").dropna()
-        tc = pd.to_numeric(taiex_df["close"], errors="coerce").dropna()
+        s = stock_df[["date", "close"]].copy()
+        t = taiex_df[["date", "close"]].copy()
+        s["date"] = pd.to_datetime(s["date"], errors="coerce")
+        t["date"] = pd.to_datetime(t["date"], errors="coerce")
+        s["close"] = pd.to_numeric(s["close"], errors="coerce")
+        t["close"] = pd.to_numeric(t["close"], errors="coerce")
 
-        if len(sc) < window or len(tc) < window:
+        merged = (
+            s.dropna()
+            .merge(t.dropna(), on="date", suffixes=("_s", "_t"))
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
+        # window bars back -> need window+1 aligned rows
+        if len(merged) < window + 1:
             return result
 
-        s_ret = float(sc.iloc[-1]) / float(sc.iloc[-window]) - 1
-        t_ret = float(tc.iloc[-1]) / float(tc.iloc[-window]) - 1
+        sc = merged["close_s"]
+        tc = merged["close_t"]
+        s_ret = float(sc.iloc[-1]) / float(sc.iloc[-window - 1]) - 1
+        t_ret = float(tc.iloc[-1]) / float(tc.iloc[-window - 1]) - 1
         rs    = round((s_ret - t_ret) * 100, 2)
 
         result["RS_Score"]  = rs
@@ -126,7 +143,7 @@ def calc_rs(stock_df: pd.DataFrame,
     return result
 
 
-# ── 下降趨勢線突破（保留作詳細面板輔助）─────────────────────────────────────
+# --- Descending trendline breakout (kept as a detail-panel helper) -----------
 
 def calc_trend_breakout(df: pd.DataFrame) -> dict:
     df = df.copy().sort_values("date").reset_index(drop=True)
@@ -164,7 +181,7 @@ def calc_trend_breakout(df: pd.DataFrame) -> dict:
     return result
 
 
-# ── MACD ─────────────────────────────────────────────────────────────────────
+# --- MACD ---------------------------------------------------------------------
 
 def calc_macd(df: pd.DataFrame) -> dict:
     close = pd.to_numeric(df["close"], errors="coerce").dropna().reset_index(drop=True)
@@ -191,7 +208,7 @@ def calc_macd(df: pd.DataFrame) -> dict:
     return result
 
 
-# ── 統一入口 ──────────────────────────────────────────────────────────────────
+# --- Unified entry point ------------------------------------------------------
 
 def calc_trend_analysis(df: pd.DataFrame,
                         taiex_df: pd.DataFrame = None) -> dict:

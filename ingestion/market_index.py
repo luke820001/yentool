@@ -1,11 +1,13 @@
 import pandas as pd
+import yfinance as yf
+from datetime import datetime, timedelta
 from ingestion.base_fetcher import BaseFetcher, FetchError
 from storage.data_store import load_sheet, upsert_and_trim
-from config.settings import TAIEX_FILE
+from config.settings import TAIEX_FILE, ROLLING_DAYS
 
-# FinMind 台灣加權指數代碼
-TAIEX_ID = "IR0001"
-DATASET  = "TaiwanStockPrice"
+TAIEX_ID   = "IR0001"
+DATASET    = "TaiwanStockPrice"
+TAIEX_YF   = "^TWII"       # yfinance ticker for Taiwan Weighted Index
 
 
 class MarketIndexFetcher(BaseFetcher):
@@ -20,6 +22,22 @@ class MarketIndexFetcher(BaseFetcher):
         if raw.empty:
             return pd.DataFrame()
         return self._transform(raw)
+
+    def _fetch_yfinance(self) -> pd.DataFrame:
+        """Fallback: fetch TAIEX via yfinance (no token required)."""
+        try:
+            start = (datetime.today() - timedelta(days=ROLLING_DAYS)).strftime("%Y-%m-%d")
+            raw = yf.download(TAIEX_YF, start=start, progress=False, auto_adjust=True)
+            if raw.empty:
+                return pd.DataFrame()
+            df = raw[["Close"]].reset_index()
+            df.columns = ["date", "close"]
+            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+            df["close"] = pd.to_numeric(df["close"], errors="coerce")
+            return df.dropna().sort_values("date").reset_index(drop=True)
+        except Exception as e:
+            print("  [TAIEX] yfinance fallback error: {}".format(e))
+            return pd.DataFrame()
 
     def _transform(self, raw: pd.DataFrame) -> pd.DataFrame:
         df = raw.copy()
@@ -47,7 +65,7 @@ class MarketIndexFetcher(BaseFetcher):
         return df.sort_values("date").dropna(subset=["close"]).reset_index(drop=True)
 
     def get(self) -> pd.DataFrame:
-        """先嘗試拉最新資料並快取，失敗時回傳本機快取。"""
+        """1. FinMind  2. yfinance fallback  3. local cache"""
         try:
             df = self.fetch()
             if not df.empty:
@@ -55,4 +73,11 @@ class MarketIndexFetcher(BaseFetcher):
                 return df
         except Exception:
             pass
+
+        df = self._fetch_yfinance()
+        if not df.empty:
+            print("  [TAIEX] loaded via yfinance ({} rows)".format(len(df)))
+            self._cache(df)
+            return df
+
         return self.load_cached()

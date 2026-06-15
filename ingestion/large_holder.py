@@ -6,14 +6,14 @@ from config.settings import LARGE_HOLDER_FILE
 
 DATASET = "TaiwanStockShareholding"
 
-# 400張 = 400,000 股（適用所有規模個股）
+# 400 lots = 400,000 shares (applies to stocks of every size) -> "large holder"
 LARGE_SHARES = 400_000
-# 50張以下 = 50,000 股（散戶定義）
+# <= 50 lots = 50,000 shares -> "retail" definition
 RETAIL_SHARES = 50_000
 
 
 def _lower_bound(level_str: str):
-    """從集保分層字串取出下限股數（整數或 None）。"""
+    """Extract the lower-bound share count from a TDCC level string (int or None)."""
     cleaned = re.sub(r"[,\s]", "", str(level_str))
     m = re.match(r"(\d+)", cleaned)
     return int(m.group(1)) if m else None
@@ -47,7 +47,7 @@ class LargeHolderFetcher(BaseFetcher):
 
         base = df.groupby("date")["stock_id"].first().reset_index()
 
-        # 大戶（400張以上）持股比例合計
+        # Large holders (>= 400 lots): total holding percentage
         large_pct = (
             df[df["HoldingSharesLevel"].apply(_is_large)]
             .groupby("date")["percent"]
@@ -56,7 +56,7 @@ class LargeHolderFetcher(BaseFetcher):
             .rename(columns={"percent": "Large_Holder_Pct"})
         )
 
-        # 散戶（50張以下）持股比例合計
+        # Retail holders (<= 50 lots): total holding percentage
         retail_pct = (
             df[df["HoldingSharesLevel"].apply(_is_retail)]
             .groupby("date")["percent"]
@@ -69,11 +69,12 @@ class LargeHolderFetcher(BaseFetcher):
         weekly = weekly.merge(retail_pct, on="date", how="left")
         weekly = weekly.sort_values("date").reset_index(drop=True)
 
-        # 週環比變化
+        # Week-over-week change
         weekly["Large_Pct_Change"]  = weekly["Large_Holder_Pct"].diff().round(4)
         weekly["Retail_Pct_Change"] = weekly["Retail_Pct"].diff().round(4)
 
-        # Cond_B：大戶比例上升（若散戶同步下降則訊號更強，但非必要）
+        # Cond_B: large-holder percentage rising (a simultaneous retail drop
+        # strengthens the signal but is not required).
         weekly["Cond_B"] = weekly["Large_Pct_Change"] > 0
 
         return weekly

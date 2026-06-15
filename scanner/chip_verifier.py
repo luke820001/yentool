@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 from ingestion.price_volume_multi import multi_fetch_and_save
 from ingestion.large_holder import LargeHolderFetcher
@@ -6,12 +7,23 @@ from ingestion.market_index import MarketIndexFetcher
 from analyzer.signal_evaluator import _evaluate_conditions
 from analyzer.support_resistance import calc_all
 from analyzer.trend_analysis import calc_trend_analysis
-from storage.data_store import load_sheet, batch_latest_dates, bulk_load_stocks
+from storage.data_store import (
+    load_sheet, batch_latest_dates, batch_row_counts, bulk_load_stocks,
+)
 from config.settings import LARGE_HOLDER_FILE, PRICE_VOLUME_FILE
 
-# re-fetch price only when the latest cached row is older than this many days
-PRICE_CACHE_DAYS = 1   # 1 = re-fetch only if we don't have today's (or yesterday's) bar
-CHIP_CACHE_DAYS  = 8   # chip is weekly; 8 days covers one full cycle
+# 2 = covers weekends (Fri data is 2 days old on Sunday — no re-fetch needed)
+PRICE_CACHE_DAYS = 2
+CHIP_CACHE_DAYS  = 8
+
+# Below this many stored bars, a stock cannot support the 52-week-high (252) or
+# RS (63) calculations, so we force a full backfill instead of a 7-day top-up.
+MIN_HISTORY_BARS = 240
+
+_PV_NUMERIC_COLS = (
+    "close", "high", "low", "open", "Volume_Lot",
+    "Min_Price_20", "Max_Price_20", "Min_Volume_20", "MA5_Volume",
+)
 
 
 def _age_from_dict(ages: dict, stock_id: str):
@@ -156,29 +168,56 @@ def verify_candidates(
     if progress_callback:
         progress_callback(0, total, "Checking cache ages...")
     pv_ages   = batch_latest_dates(PRICE_VOLUME_FILE, candidate_ids)
+    pv_counts = batch_row_counts(PRICE_VOLUME_FILE, candidate_ids)
     chip_ages = batch_latest_dates(LARGE_HOLDER_FILE, candidate_ids)
 
-    # ── Phase 2: fetch only what is stale or missing ─────────────────────────
-    for rank, stock_id in enumerate(candidate_ids, start=1):
-        market = id_to_market[stock_id]
-        if progress_callback:
-            progress_callback(rank, total,
-                              "Fetching {} ({}/{})".format(stock_id, rank, total))
+    # A stock needs a (re)fetch if it is stale OR its stored history is too
+    # short for the long-window indicators (52-week high, RS).
+    def _needs_full(sid):
+        return pv_counts.get(sid, 0) < MIN_HISTORY_BARS
 
+    # ── Phase 2a: parallel pv fetch (I/O-bound → ThreadPoolExecutor) ─────────
+    stale_pv = [
+        sid for sid in candidate_ids
+        if pv_ages.get(sid) is None
+        or pv_ages.get(sid) > PRICE_CACHE_DAYS
+        or _needs_full(sid)
+    ]
+    fresh_pv = total - len(stale_pv)
+    print("  pv cache hits: {}/{}  fetching: {}".format(fresh_pv, total, len(stale_pv)))
+
+    if progress_callback:
+        progress_callback(0, total, "Fetching price data (0/{})...".format(len(stale_pv)))
+
+    def _fetch_pv(stock_id):
         pv_age = pv_ages.get(stock_id)
-        if pv_age is None:
-            try:
-                multi_fetch_and_save(stock_id, market=market, incremental=False)
-            except Exception as e:
-                print("  [{}] pv error: {}".format(stock_id, e))
-        elif pv_age > PRICE_CACHE_DAYS:
-            try:
-                multi_fetch_and_save(stock_id, market=market, incremental=True)
-            except Exception as e:
-                print("  [{}] pv error: {}".format(stock_id, e))
-        else:
-            print("  [{}] pv cache hit ({} days)".format(stock_id, pv_age))
+        # Incremental top-up only when we already hold enough history; otherwise
+        # pull the full window so long-lookback indicators have data to work on.
+        incremental = pv_age is not None and not _needs_full(stock_id)
+        try:
+            multi_fetch_and_save(
+                stock_id,
+                market=id_to_market[stock_id],
+                incremental=incremental,
+            )
+        except Exception as e:
+            print("  [{}] pv error: {}".format(stock_id, e))
 
+    _done_count = [0]
+    def _fetch_pv_tracked(stock_id):
+        _fetch_pv(stock_id)
+        _done_count[0] += 1
+        if progress_callback:
+            progress_callback(
+                _done_count[0], len(stale_pv),
+                "Fetching price data ({}/{})...".format(_done_count[0], len(stale_pv)),
+            )
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(_fetch_pv_tracked, stale_pv))
+
+    # ── Phase 2b: sequential chip fetch (quota-limited; keep serial) ─────────
+    for stock_id in candidate_ids:
         if not _is_fresh(chip_ages, stock_id, CHIP_CACHE_DAYS):
             _fetch_chip_safe(lh_fetcher, stock_id)
         else:
@@ -201,9 +240,17 @@ def verify_candidates(
             progress_callback(rank, total,
                               "Analyzing {} ({}/{})".format(stock_id, rank, total))
 
-        merged = pv_store.get(stock_id, pd.DataFrame())
-        if merged.empty:
+        raw = pv_store.get(stock_id, pd.DataFrame())
+        if raw.empty:
             continue
+
+        # Single copy + sort + numeric conversion; all sub-functions receive clean data
+        merged = raw.copy()
+        for _c in _PV_NUMERIC_COLS:
+            if _c in merged.columns:
+                merged[_c] = pd.to_numeric(merged[_c], errors="coerce")
+        merged.sort_values("date", inplace=True)
+        merged.reset_index(drop=True, inplace=True)
 
         _t0 = _time.perf_counter()
         evaluated = _evaluate_conditions(merged)
@@ -211,7 +258,7 @@ def verify_candidates(
         if evaluated.empty:
             continue
 
-        evaluated = evaluated.sort_values("date").reset_index(drop=True)
+        # already sorted (merged is sorted; _evaluate_conditions preserves order)
         latest    = evaluated.iloc[-1]
         recent    = evaluated.tail(5)
 

@@ -24,16 +24,16 @@ def calc_horizontal_sr(df: pd.DataFrame) -> dict:
         tail60.get("high", pd.Series(dtype=float)), errors="coerce"
     )
     # Resistance = prior 59 bars only (exclude today).
-    # When today's close > prior high → already broken out → Res_Gap_Pct < 0.
+    # When today's close > prior high -> already broken out -> Res_Gap_Pct < 0.
     prior_high = high.iloc[:-1] if len(high) > 1 else high
 
-    # Support = 20-day low (more relevant to current price structure).
-    low20 = pd.to_numeric(
-        df.tail(20).get("low", pd.Series(dtype=float)), errors="coerce"
+    # Support = 60-day low (matches the Support_60L name and the UI label).
+    low60 = pd.to_numeric(
+        tail60.get("low", pd.Series(dtype=float)), errors="coerce"
     )
     return {
         "Resist_60H":  _to_float(prior_high.max()),
-        "Support_60L": _to_float(low20.min()),
+        "Support_60L": _to_float(low60.min()),
     }
 
 
@@ -65,33 +65,19 @@ def calc_volume_profile(df: pd.DataFrame, top_n: int = 3) -> dict:
 
 
 def calc_gaps(df: pd.DataFrame) -> dict:
-    df = df.copy().sort_values("date").reset_index(drop=True)
-    for col in ["open", "close", "high", "low"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    high = pd.to_numeric(df.get("high", pd.Series(dtype=float)), errors="coerce")
+    low  = pd.to_numeric(df.get("low",  pd.Series(dtype=float)), errors="coerce")
 
-    up_gap_support = None
-    dn_gap_resist = None
+    prev_high = high.shift(1)
+    prev_low  = low.shift(1)
 
-    for i in range(1, len(df)):
-        prev_high = df.loc[i - 1, "high"]
-        prev_low = df.loc[i - 1, "low"]
-        curr_low = df.loc[i, "low"]
-        curr_high = df.loc[i, "high"]
+    up_mask = (low > prev_high) & prev_high.notna() & low.notna()
+    dn_mask = (high < prev_low) & prev_low.notna() & high.notna()
 
-        if pd.isna(prev_high) or pd.isna(prev_low) or pd.isna(curr_low) or pd.isna(curr_high):
-            continue
+    up_gap_support = round(float(prev_high[up_mask].iloc[-1]), 2) if up_mask.any() else None
+    dn_gap_resist  = round(float(prev_low[dn_mask].iloc[-1]),  2) if dn_mask.any() else None
 
-        if curr_low > prev_high:
-            up_gap_support = round(float(prev_high), 2)
-
-        if curr_high < prev_low:
-            dn_gap_resist = round(float(prev_low), 2)
-
-    return {
-        "Gap_Up_Sup": up_gap_support,
-        "Gap_Dn_Res": dn_gap_resist,
-    }
+    return {"Gap_Up_Sup": up_gap_support, "Gap_Dn_Res": dn_gap_resist}
 
 
 def calc_round_level(close: float) -> float:

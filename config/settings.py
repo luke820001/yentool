@@ -16,7 +16,10 @@ SIGNAL_LOG_FILE = DATA_DIR / "signal_log.db"
 TAIEX_FILE      = DATA_DIR / "taiex.db"
 
 # --- Rolling Window ---
-ROLLING_DAYS = 90
+# ~400 calendar days => ~270 trading bars. Required so the 52-week-high
+# (252-bar) and RS (63-bar) calculations have enough history; 90 days only
+# yields ~62 bars, which silently zeroes out both metrics.
+ROLLING_DAYS = 400
 
 # --- FinMind API ---
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"

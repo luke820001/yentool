@@ -69,13 +69,13 @@ def get_latest_date(file_path: Path, stock_id: str):
 
 def save_sheet(df: pd.DataFrame, file_path: Path, sheet_name: str) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(file_path) as conn:
+    with sqlite3.connect(file_path, timeout=30) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")  # allows concurrent readers during write
         if _is_stock_keyed(file_path):
-            # Remove existing rows for this stock then append new ones.
             try:
                 conn.execute("DELETE FROM data WHERE stock_id = ?", (sheet_name,))
             except Exception:
-                pass  # table doesn't exist yet; to_sql will create it
+                pass
             df.to_sql("data", conn, if_exists="append", index=False)
             _ensure_index(conn)
         else:
@@ -137,6 +137,30 @@ def batch_latest_dates(file_path: Path, stock_ids: list) -> dict:
                     result[sid] = (today - d).days
                 except Exception:
                     pass
+    except Exception:
+        pass
+    return result
+
+
+def batch_row_counts(file_path: Path, stock_ids: list) -> dict:
+    """
+    One query: return {stock_id: bar_count} for every stock_id that has data.
+    Stocks with no rows are absent (caller treats as 0). Used to detect
+    stocks whose stored history is too short for long-window indicators.
+    """
+    if not file_path.exists() or not stock_ids:
+        return {}
+    placeholders = ",".join("?" for _ in stock_ids)
+    result = {}
+    try:
+        with sqlite3.connect(file_path) as conn:
+            rows = conn.execute(
+                "SELECT stock_id, COUNT(*) FROM data "
+                "WHERE stock_id IN ({}) GROUP BY stock_id".format(placeholders),
+                stock_ids,
+            ).fetchall()
+        for sid, cnt in rows:
+            result[sid] = int(cnt)
     except Exception:
         pass
     return result

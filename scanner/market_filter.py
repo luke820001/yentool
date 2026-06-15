@@ -101,7 +101,7 @@ def _is_valid_stock_id(sid: str) -> bool:
     if not sid.isdigit():
         return False
     # regular stocks: 4 digits (TSE) or 5 digits (OTC small caps)
-    # 6-digit codes are warrants/derivatives (認購/認售權證) — exclude
+    # 6-digit codes are warrants/derivatives (call/put warrants) -- exclude
     if not (4 <= len(sid) <= 5):
         return False
     # exclude ETFs / leveraged ETFs: codes starting with "00"
@@ -114,17 +114,17 @@ def _is_valid_stock_id(sid: str) -> bool:
 # Price action on these is driven by policy, not market supply/demand,
 # so chip signals are misleading.
 _GOVT_STOCKS = {
-    "2412",   # 中華電信  — Ministry of Transportation majority
-    "2002",   # 中鋼      — NDRC / government significant stake
-    "2886",   # 兆豐金    — Ministry of Finance ~22%
-    "2892",   # 第一金    — Ministry of Finance ~19%
-    "5880",   # 合庫金    — Ministry of Finance ~24%
-    "2834",   # 臺企銀    — Ministry of Finance majority
-    "2801",   # 彰銀      — Ministry of Finance ~13%
-    "2812",   # 台中銀    — Taichung City Government
-    "2836",   # 高雄銀    — Kaohsiung City Government
-    "2889",   # 國票金    — Ministry of Finance stake
-    "1314",   # 中石化    — state-linked
+    "2412",   # Chunghwa Telecom    -- Ministry of Transportation majority
+    "2002",   # China Steel         -- NDRC / government significant stake
+    "2886",   # Mega Financial      -- Ministry of Finance ~22%
+    "2892",   # First Financial     -- Ministry of Finance ~19%
+    "5880",   # Taiwan Cooperative  -- Ministry of Finance ~24%
+    "2834",   # Taiwan Business Bank -- Ministry of Finance majority
+    "2801",   # Chang Hwa Bank      -- Ministry of Finance ~13%
+    "2812",   # Taichung Bank       -- Taichung City Government
+    "2836",   # Bank of Kaohsiung   -- Kaohsiung City Government
+    "2889",   # Waterland Financial -- Ministry of Finance stake
+    "1314",   # China Petrochemical  -- state-linked
 }
 
 
