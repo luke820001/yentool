@@ -54,20 +54,63 @@ def _row_to_line(row: pd.Series) -> str:
     )
 
 
+MAX_STOCKS_IN_PROMPT = 10   # keep token cost low on free tier
+
+
 def build_prompt(df: pd.DataFrame) -> str:
     if df is None or df.empty:
         return ""
 
-    lines = [_row_to_line(row) for _, row in df.iterrows()]
+    top = df.head(MAX_STOCKS_IN_PROMPT)
+    lines = [_row_to_line(row) for _, row in top.iterrows()]
     table_text = "\n".join(lines)
 
     prompt = (
         SYSTEM_INSTRUCTION
-        + "\n\n=== Screened Stocks ("
-        + str(len(df))
-        + " rows) ===\n"
+        + "\n\n=== Screened Stocks (top {} of {}) ===\n".format(len(top), len(df))
         + table_text
         + "\n\n=== End of Data ===\n"
         + "Now produce the report in Traditional Chinese."
     )
     return prompt
+
+
+def build_local_report(df: pd.DataFrame) -> str:
+    """Fallback plain-text report generated locally without any API call."""
+    if df is None or df.empty:
+        return "（本次掃描無符合條件標的）"
+
+    lines = ["【本地報告 — Gemini API 不可用時自動產生】\n"]
+    for rank, (_, row) in enumerate(df.head(MAX_STOCKS_IN_PROMPT).iterrows(), 1):
+        def g(k, d="-"):
+            v = row.get(k)
+            return d if (v is None or (isinstance(v, float) and __import__("math").isnan(v))) else str(v)
+
+        buy  = g("Suggested_Buy_Price")
+        stop = g("Strict_Stop_Loss")
+        score = g("Explosion_Score")
+        cond_flags = []
+        if row.get("Cond_A"):      cond_flags.append("箱縮")
+        if row.get("Cond_C"):      cond_flags.append("吸籌")
+        if row.get("Cond_B"):      cond_flags.append("大戶加碼")
+        if row.get("MA_Bull_Align"): cond_flags.append("MA多頭")
+        if row.get("Donchian_Break"): cond_flags.append("Donchian突破")
+        if row.get("MACD_Cross"):   cond_flags.append("MACD金叉")
+        if row.get("Near_52W_High"): cond_flags.append("近52週高點")
+        if row.get("RS_Strong"):    cond_flags.append("RS強勢")
+        flags_str = "、".join(cond_flags) if cond_flags else "無明顯訊號"
+
+        lines.append(
+            "#{rank} {sid} {name}  收盤 {close}\n"
+            "   爆發分={score}  建議買入={buy}  停損={stop}\n"
+            "   訊號：{flags}\n"
+            "   支撐={sup}  壓力={res}  距支撐={sgp}%  距壓力={rgp}%\n".format(
+                rank=rank,
+                sid=g("Stock_ID"), name=g("Stock_Name"),
+                close=g("Close_Price"), score=score,
+                buy=buy, stop=stop, flags=flags_str,
+                sup=g("Support_60L"), res=g("Resist_60H"),
+                sgp=g("Sup_Gap_Pct"), rgp=g("Res_Gap_Pct"),
+            )
+        )
+    return "\n".join(lines)

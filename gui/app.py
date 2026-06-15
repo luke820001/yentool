@@ -45,20 +45,22 @@ BOOL_FALSE = "-"
 
 # ── 主列表欄位（比例權重）────────────────────────────────────────────────────
 MAIN_COLUMNS = [
-    ("Stock_ID",           "代號",      3),
-    ("Stock_Name",         "名稱",      5.5),
-    ("Close_Price",        "收盤價",    3.5),
-    ("Explosion_Score",    "爆發分",    3),
-    ("RS_Score",           "RS超額%",   3.5),
-    ("Dist_52W_High_Pct",  "距高點%",   3),
-    ("Sup_Gap_Pct",        "距支撐%",   3),
-    ("Res_Gap_Pct",        "距壓力%",   3),
-    ("Cond_A",             "箱縮",      2.5),
-    ("Cond_C",             "吸籌",      2.5),
-    ("Cond_B",             "B:大戶",    2.5),
-    ("MA_Bull_Align",      "MA多頭",    3),
-    ("Donchian_Break",     "Donchian",  3.5),
-    ("MACD_Cross",         "MACD叉",    3),
+    ("Stock_ID",             "代號",      3),
+    ("Stock_Name",           "名稱",      5.5),
+    ("Close_Price",          "收盤價",    3.5),
+    ("Suggested_Buy_Price",  "建議買入",  3.5),
+    ("Strict_Stop_Loss",     "停損價",    3.5),
+    ("Explosion_Score",      "爆發分",    3),
+    ("RS_Score",             "RS超額%",   3.5),
+    ("Dist_52W_High_Pct",    "距高點%",   3),
+    ("Sup_Gap_Pct",          "距支撐%",   3),
+    ("Res_Gap_Pct",          "距壓力%",   3),
+    ("Cond_A",               "箱縮",      2.5),
+    ("Cond_C",               "吸籌",      2.5),
+    ("Cond_B",               "B:大戶",    2.5),
+    ("MA_Bull_Align",        "MA多頭",    3),
+    ("Donchian_Break",       "Donchian",  3.5),
+    ("MACD_Cross",           "MACD叉",    3),
 ]
 _TOTAL_WEIGHT = sum(w for _, _, w in MAIN_COLUMNS)
 
@@ -106,6 +108,21 @@ DETAIL_SECTIONS = [
 
 def _fmt_bool(val) -> str:
     return BOOL_TRUE if val else BOOL_FALSE
+
+
+def _fmt_gap(val, is_resist=False) -> str:
+    """Format Sup_Gap_Pct / Res_Gap_Pct.
+    Negative Res_Gap_Pct means price already above prior resistance (breakout).
+    """
+    if val is None:
+        return "-"
+    try:
+        f = float(val)
+        if is_resist and f <= 0:
+            return "已突破"
+        return "{:.1f}%".format(f)
+    except Exception:
+        return "-"
 
 
 def _fmt_rs(val) -> str:
@@ -476,15 +493,17 @@ class ScannerApp(tk.Tk):
                 tag = ("alt" if i % 2 else "alt0") if base_tag == "alt" else base_tag
 
                 item = self._tree.insert("", tk.END, tags=(tag,), values=(
-                    row.get("Stock_ID",          ""),
-                    row.get("Stock_Name",         ""),
-                    row.get("Close_Price",        ""),
-                    row.get("Explosion_Score",    ""),
+                    row.get("Stock_ID",            ""),
+                    row.get("Stock_Name",           ""),
+                    row.get("Close_Price",          ""),
+                    row.get("Suggested_Buy_Price")  if row.get("Suggested_Buy_Price") else "-",
+                    row.get("Strict_Stop_Loss")     if row.get("Strict_Stop_Loss")    else "-",
+                    row.get("Explosion_Score",      ""),
                     _fmt_rs(row.get("RS_Score")),
                     "{}%".format(row.get("Dist_52W_High_Pct"))
                         if row.get("Dist_52W_High_Pct") is not None else "-",
-                    row.get("Sup_Gap_Pct") if row.get("Sup_Gap_Pct") is not None else "-",
-                    row.get("Res_Gap_Pct") if row.get("Res_Gap_Pct") is not None else "-",
+                    _fmt_gap(row.get("Sup_Gap_Pct")),
+                    _fmt_gap(row.get("Res_Gap_Pct"), is_resist=True),
                     _fmt_bool(row.get("Cond_A")),
                     _fmt_bool(row.get("Cond_C")),
                     _fmt_bool(row.get("Cond_B")),

@@ -74,13 +74,15 @@ def apply_scan_mode(df, selected_mode):
         return df[mask].reset_index(drop=True)
 
     if selected_mode == "mode_bottom":
-        # Bottom Accumulation: price below 60MA, MACD hist turned positive, big-holder buying
-        # base:    close < MA60
-        # trigger: MACD histogram negative-to-positive in last 3 days  AND  Cond_B
+        # Bottom Accumulation: price below 60MA, MACD hist turned positive, big-holder buying.
+        # Cond_B (chip data) is primary; falls back to pure-technical when chip is unavailable.
+        ma10 = _safe_num(df, "MA10", _INF)
+        # tech fallback: warm volume + price reclaims MA10 (no chip data needed)
+        tech_fallback = (vol_now > vol_ma5 * 1.5) & (close > ma10)
         mask = (
             (close < ma60) &
             hist_turn &
-            cond_b
+            (cond_b | tech_fallback)
         )
         return df[mask].reset_index(drop=True)
 
@@ -130,4 +132,48 @@ def apply_scan_mode(df, selected_mode):
         return df[mask].reset_index(drop=True)
 
     # Unknown mode: return unfiltered
+    return df
+
+
+def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
+    """
+    Append Suggested_Buy_Price and Strict_Stop_Loss to the result DataFrame.
+
+    Suggested_Buy_Price
+      breakout / short_explosion : MA5  (buy the pullback to 5-day line)
+      squeeze  / bottom          : min(Close_Price, MA20)  (enter in the safe zone)
+
+    Strict_Stop_Loss
+      max(Min_Price_3, MA10)  — break below = momentum destroyed
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    close = _safe_num(df, "Close_Price", 0.0)
+    ma5   = _safe_num(df, "MA5",         0.0)
+    ma10  = _safe_num(df, "MA10",        0.0)
+    ma20  = _safe_num(df, "MA20",        0.0)
+    min3  = _safe_num(df, "Min_Price_3", 0.0)
+
+    if scan_mode in ("mode_breakout", "mode_short_explosion"):
+        buy = ma5.where(ma5 > 0, close)
+    else:
+        # take the lower of close and MA20; fall back to close when MA20 is 0
+        stacked = pd.concat(
+            [close, ma20.replace(0, float("nan"))], axis=1
+        )
+        stacked.columns = ["c", "m"]
+        buy = stacked.min(axis=1).fillna(close)
+
+    # stop = max(Min_Price_3, MA10); if either is 0/NaN use the other
+    stacked_stop = pd.concat(
+        [min3.replace(0, float("nan")), ma10.replace(0, float("nan"))], axis=1
+    )
+    stacked_stop.columns = ["a", "b"]
+    stop = stacked_stop.max(axis=1).fillna(0)
+
+    df["Suggested_Buy_Price"] = buy.round(2)
+    df["Strict_Stop_Loss"]    = stop.round(2)
     return df

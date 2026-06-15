@@ -9,11 +9,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # --- Data Storage ---
 DATA_DIR = PROJECT_ROOT / "data"
-PRICE_VOLUME_FILE = DATA_DIR / "price_volume.xlsx"
-LARGE_HOLDER_FILE = DATA_DIR / "large_holder.xlsx"
-BROKER_BRANCH_FILE = DATA_DIR / "broker_branch.xlsx"
-SIGNAL_LOG_FILE = DATA_DIR / "signal_log.xlsx"
-TAIEX_FILE      = DATA_DIR / "taiex.xlsx"
+PRICE_VOLUME_FILE = DATA_DIR / "price_volume.db"
+LARGE_HOLDER_FILE = DATA_DIR / "large_holder.db"
+BROKER_BRANCH_FILE = DATA_DIR / "broker_branch.db"
+SIGNAL_LOG_FILE = DATA_DIR / "signal_log.db"
+TAIEX_FILE      = DATA_DIR / "taiex.db"
 
 # --- Rolling Window ---
 ROLLING_DAYS = 90
@@ -22,10 +22,10 @@ ROLLING_DAYS = 90
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN", "")
 
-# --- Gemini API ---
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.0-flash"
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+# --- Groq API (replaces Gemini) ---
+GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL     = "llama-3.3-70b-versatile"
+GROQ_API_URL   = "https://api.groq.com/openai/v1/chat/completions"
 GEMINI_REPORT_FILE = PROJECT_ROOT / "data" / "ai_report.txt"
 
 # --- Watchlist ---

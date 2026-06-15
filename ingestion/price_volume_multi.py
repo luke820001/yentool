@@ -13,6 +13,15 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+}
+
 from ingestion.price_volume import PriceVolumeFetcher
 from storage.data_store import upsert_and_trim
 from config.settings import PRICE_VOLUME_FILE, ROLLING_DAYS
@@ -69,6 +78,7 @@ def _twse_one_month(stock_id, year, month):
                 "date": "{:04d}{:02d}01".format(year, month),
                 "stockNo": stock_id,
             },
+            headers=_HEADERS,
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
@@ -138,6 +148,7 @@ def _tpex_one_month(stock_id, year, month):
                 "stkno": stock_id,
                 "o":     "json",
             },
+            headers=_HEADERS,
             timeout=REQUEST_TIMEOUT,
             verify=False,
         )

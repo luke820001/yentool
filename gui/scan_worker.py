@@ -2,7 +2,7 @@ import threading
 import pandas as pd
 from scanner.market_filter import get_candidate_list
 from scanner.chip_verifier import verify_candidates
-from scanner.scan_mode import apply_scan_mode
+from scanner.scan_mode import apply_scan_mode, add_trade_columns
 
 
 class ScanWorker:
@@ -37,6 +37,7 @@ class ScanWorker:
 
             result_df = verify_candidates(candidates, progress_callback=progress_callback)
             result_df = apply_scan_mode(result_df, self._scan_mode)
+            result_df = add_trade_columns(result_df, self._scan_mode)
             self._on_result(result_df)
 
         except Exception as e:

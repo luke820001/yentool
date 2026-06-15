@@ -19,24 +19,38 @@ def calc_moving_averages(df: pd.DataFrame) -> dict:
 
 
 def calc_horizontal_sr(df: pd.DataFrame) -> dict:
-    tail = df.tail(60)
-    high = pd.to_numeric(tail.get("high", pd.Series(dtype=float)), errors="coerce")
-    low = pd.to_numeric(tail.get("low", pd.Series(dtype=float)), errors="coerce")
+    tail60 = df.tail(60)
+    high = pd.to_numeric(
+        tail60.get("high", pd.Series(dtype=float)), errors="coerce"
+    )
+    # Resistance = prior 59 bars only (exclude today).
+    # When today's close > prior high → already broken out → Res_Gap_Pct < 0.
+    prior_high = high.iloc[:-1] if len(high) > 1 else high
+
+    # Support = 20-day low (more relevant to current price structure).
+    low20 = pd.to_numeric(
+        df.tail(20).get("low", pd.Series(dtype=float)), errors="coerce"
+    )
     return {
-        "Resist_60H": _to_float(high.max()),
-        "Support_60L": _to_float(low.min()),
+        "Resist_60H":  _to_float(prior_high.max()),
+        "Support_60L": _to_float(low20.min()),
     }
 
 
 def calc_volume_profile(df: pd.DataFrame, top_n: int = 3) -> dict:
-    close = pd.to_numeric(df["close"], errors="coerce")
-    vol = pd.to_numeric(df["Volume_Lot"], errors="coerce")
+    # Use only the most recent 60 bars so VP reflects current price structure,
+    # not a historical range that may be far from today's price.
+    recent = df.tail(60)
+    close = pd.to_numeric(recent["close"], errors="coerce")
+    vol   = pd.to_numeric(recent["Volume_Lot"], errors="coerce")
 
-    price_min = close.min()
-    if pd.isna(price_min) or price_min <= 0:
+    # Derive bucket_size from the recent price range (not all-time min).
+    cur_close = close.iloc[-1] if len(close) > 0 else float("nan")
+    if pd.isna(cur_close) or cur_close <= 0:
         return {"VP_Zone{}".format(i): None for i in range(1, top_n + 1)}
 
-    bucket_size = max(round(price_min * 0.02, 1), 0.5)
+    # 1% of current price per bucket, floored at 0.5
+    bucket_size = max(round(cur_close * 0.01, 1), 0.5)
     buckets = ((close / bucket_size).round() * bucket_size).round(2)
 
     vp = pd.DataFrame({"price": buckets, "vol": vol}).dropna()
@@ -109,7 +123,9 @@ def calc_squeeze_score(close: float, support: float, resist: float) -> dict:
     res_gap = round((resist - close) / close * 100, 2)
     result["Sup_Gap_Pct"] = sup_gap
     result["Res_Gap_Pct"] = res_gap
-    result["Squeeze"] = (sup_gap < 5.0) and (res_gap < 2.0)
+    # Squeeze only makes sense when price is still BELOW resistance (res_gap > 0).
+    # Negative res_gap means price has already broken above the reference high.
+    result["Squeeze"] = (sup_gap < 5.0) and (0 < res_gap < 2.0)
     return result
 
 

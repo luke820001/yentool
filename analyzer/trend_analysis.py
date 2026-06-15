@@ -40,21 +40,25 @@ def calc_donchian_break(df: pd.DataFrame,
                         window: int = 40,
                         max_range_pct: float = 0.15) -> dict:
     """
-    近 window 日：
-      1. 高低點振幅 < max_range_pct（壓縮整理）
-      2. 收盤價 ≥ window 日最高價 × 97%（逼近突破點）
-    兩者同時成立 → 視為 Donchian 突破前夕。
-    比 W 底型態偵測穩健，不受 K 棒形狀影響。
+    Prior window-1 bars (excluding today):
+      1. High-low range < max_range_pct  (compressed consolidation)
+      2. Today's close >= that prior high * 97%  (approaching / breaking out)
+    Excluding today prevents today's own high from trivially satisfying near_top.
     """
     close = pd.to_numeric(df["close"], errors="coerce")
     high  = pd.to_numeric(df["high"],  errors="coerce")
     low   = pd.to_numeric(df["low"],   errors="coerce")
 
-    if len(close) < window:
+    # Need at least window+1 bars so we can exclude today and still have 'window' bars
+    if len(close) < window + 1:
         return {"Donchian_Break": False}
 
-    h_win = high.rolling(window).max().iloc[-1]
-    l_win = low.rolling(window).min().iloc[-1]
+    # Exclude today (iloc[:-1]) before computing the rolling window
+    prior_high = high.iloc[:-1]
+    prior_low  = low.iloc[:-1]
+
+    h_win = prior_high.rolling(window).max().iloc[-1]
+    l_win = prior_low.rolling(window).min().iloc[-1]
     cur   = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else 0.0
 
     if pd.isna(h_win) or pd.isna(l_win) or float(l_win) <= 0:
@@ -62,7 +66,7 @@ def calc_donchian_break(df: pd.DataFrame,
 
     h, l = float(h_win), float(l_win)
     compressed = (h - l) / l < max_range_pct   # 振幅 < 15%
-    near_top   = cur >= h * 0.97               # 在最高點 97% 以上
+    near_top   = cur >= h * 0.97               # 收盤在前 40 日高點 97% 以上
 
     return {"Donchian_Break": bool(compressed and near_top)}
 

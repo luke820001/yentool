@@ -1,59 +1,73 @@
 import time
 import requests
 from config.settings import (
-    GEMINI_API_KEY,
-    GEMINI_MODEL,
-    GEMINI_API_URL,
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    GROQ_API_URL,
     GEMINI_REPORT_FILE,
 )
-from gemini_hook.prompt_builder import build_prompt
+from gemini_hook.prompt_builder import (
+    build_prompt, build_local_report, SYSTEM_INSTRUCTION
+)
 
 REQUEST_TIMEOUT = 60
-RETRY_ATTEMPTS = 3
-RETRY_BASE_WAIT = 15  # seconds; doubles each attempt: 15 → 30 → 60
+RETRY_ATTEMPTS  = 3
+RETRY_BASE_WAIT = 10  # seconds; doubles each attempt on rate-limit
 
 
-class GeminiError(Exception):
+class AIReportError(Exception):
     pass
 
-
-def _build_endpoint() -> str:
-    return "{base}/{model}:generateContent?key={key}".format(
-        base=GEMINI_API_URL, model=GEMINI_MODEL, key=GEMINI_API_KEY)
+# keep old name as alias so any existing import of GeminiError still works
+GeminiError = AIReportError
 
 
-def _call_gemini(prompt: str) -> str:
-    if not GEMINI_API_KEY:
-        raise GeminiError("GEMINI_API_KEY is empty. Set it in the .env file.")
+def _call_groq(prompt: str) -> str:
+    if not GROQ_API_KEY:
+        raise AIReportError("GROQ_API_KEY is empty. Set it in the .env file.")
 
-    url = _build_endpoint()
-    body = {"contents": [{"parts": [{"text": prompt}]}]}
+    headers = {
+        "Authorization": "Bearer {}".format(GROQ_API_KEY),
+        "Content-Type":  "application/json",
+    }
+    body = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "user",   "content": prompt},
+        ],
+        "temperature": 0.3,
+    }
 
     wait = RETRY_BASE_WAIT
+    resp = None
     for attempt in range(1, RETRY_ATTEMPTS + 1):
-        resp = requests.post(url, json=body, timeout=REQUEST_TIMEOUT)
+        resp = requests.post(GROQ_API_URL, headers=headers,
+                             json=body, timeout=REQUEST_TIMEOUT)
         if resp.status_code == 429:
+            txt = resp.text
+            # daily quota exhausted — no point retrying
+            if "rate_limit_exceeded" not in txt.lower():
+                raise AIReportError("HTTP 429: quota exhausted")
             if attempt < RETRY_ATTEMPTS:
-                print("  [Gemini] 429 rate limit — waiting {}s (attempt {}/{})".format(
+                print("  [Groq] 429 rate limit — waiting {}s ({}/{})".format(
                     wait, attempt, RETRY_ATTEMPTS))
                 time.sleep(wait)
                 wait *= 2
                 continue
-            raise GeminiError("HTTP 429: quota exceeded after {} retries".format(RETRY_ATTEMPTS))
+            raise AIReportError("HTTP 429: rate limit after {} retries".format(RETRY_ATTEMPTS))
         if resp.status_code != 200:
-            raise GeminiError("HTTP {}: {}".format(resp.status_code, resp.text[:300]))
+            raise AIReportError("HTTP {}: {}".format(resp.status_code, resp.text[:300]))
         break
 
     payload = resp.json()
     try:
-        candidates = payload["candidates"]
-        parts = candidates[0]["content"]["parts"]
-        text = "".join(p.get("text", "") for p in parts)
+        text = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError):
-        raise GeminiError("Unexpected response shape: {}".format(str(payload)[:300]))
+        raise AIReportError("Unexpected response: {}".format(str(payload)[:300]))
 
     if not text.strip():
-        raise GeminiError("Gemini returned empty text.")
+        raise AIReportError("Groq returned empty text.")
     return text
 
 
@@ -66,7 +80,12 @@ def _save_report(text: str) -> None:
 def generate_report(df) -> str:
     prompt = build_prompt(df)
     if not prompt:
-        raise GeminiError("No data to summarize. Run a scan first.")
-    report = _call_gemini(prompt)
+        raise AIReportError("No data to summarize. Run a scan first.")
+    try:
+        report = _call_groq(prompt)
+        print("  [Groq] report generated OK")
+    except AIReportError as e:
+        print("  [Groq] API failed: {} — falling back to local report".format(e))
+        report = build_local_report(df)
     _save_report(report)
     return report

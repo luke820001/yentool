@@ -15,10 +15,22 @@ RETRY_LIMIT = 3
 RETRY_SLEEP = 5
 
 
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+}
+
+
 def _fetch_json(url: str, verify_ssl: bool = True) -> list:
     for attempt in range(1, RETRY_LIMIT + 1):
         try:
-            resp = requests.get(url, timeout=REQUEST_TIMEOUT, verify=verify_ssl)
+            resp = requests.get(
+                url, headers=_HEADERS, timeout=REQUEST_TIMEOUT, verify=verify_ssl
+            )
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
@@ -86,15 +98,34 @@ def _clean_numeric(df: pd.DataFrame) -> pd.DataFrame:
 def _is_valid_stock_id(sid: str) -> bool:
     if not isinstance(sid, str):
         return False
-    digits_only = sid.isdigit()
-    if not digits_only:
+    if not sid.isdigit():
         return False
-    if not (4 <= len(sid) <= 6):
+    # regular stocks: 4 digits (TSE) or 5 digits (OTC small caps)
+    # 6-digit codes are warrants/derivatives (認購/認售權證) — exclude
+    if not (4 <= len(sid) <= 5):
         return False
-    # exclude ETFs: codes starting with "00" are funds/ETFs
+    # exclude ETFs / leveraged ETFs: codes starting with "00"
     if sid.startswith("00"):
         return False
     return True
+
+
+# State-owned / government-controlled listed companies.
+# Price action on these is driven by policy, not market supply/demand,
+# so chip signals are misleading.
+_GOVT_STOCKS = {
+    "2412",   # 中華電信  — Ministry of Transportation majority
+    "2002",   # 中鋼      — NDRC / government significant stake
+    "2886",   # 兆豐金    — Ministry of Finance ~22%
+    "2892",   # 第一金    — Ministry of Finance ~19%
+    "5880",   # 合庫金    — Ministry of Finance ~24%
+    "2834",   # 臺企銀    — Ministry of Finance majority
+    "2801",   # 彰銀      — Ministry of Finance ~13%
+    "2812",   # 台中銀    — Taichung City Government
+    "2836",   # 高雄銀    — Kaohsiung City Government
+    "2889",   # 國票金    — Ministry of Finance stake
+    "1314",   # 中石化    — state-linked
+}
 
 
 def fetch_full_market() -> pd.DataFrame:
@@ -112,6 +143,7 @@ def fetch_full_market() -> pd.DataFrame:
     combined = _clean_numeric(combined)
     combined = combined.dropna(subset=["close", "volume"])
     combined = combined[combined["stock_id"].apply(_is_valid_stock_id)]
+    combined = combined[~combined["stock_id"].isin(_GOVT_STOCKS)]
     combined = combined[combined["close"] > 0]
 
     return combined

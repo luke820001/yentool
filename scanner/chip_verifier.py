@@ -1,39 +1,26 @@
-import time
-from datetime import date
+from datetime import date, datetime
 import pandas as pd
-from ingestion.price_volume import PriceVolumeFetcher
 from ingestion.price_volume_multi import multi_fetch_and_save
 from ingestion.large_holder import LargeHolderFetcher
 from ingestion.market_index import MarketIndexFetcher
-from analyzer.signal_evaluator import _load_stock_data, _evaluate_conditions
+from analyzer.signal_evaluator import _evaluate_conditions
 from analyzer.support_resistance import calc_all
 from analyzer.trend_analysis import calc_trend_analysis
-from storage.data_store import load_sheet
+from storage.data_store import load_sheet, batch_latest_dates, bulk_load_stocks
 from config.settings import LARGE_HOLDER_FILE, PRICE_VOLUME_FILE
-
-INTER_STOCK_SLEEP = 0
 
 # re-fetch price only when the latest cached row is older than this many days
 PRICE_CACHE_DAYS = 1   # 1 = re-fetch only if we don't have today's (or yesterday's) bar
 CHIP_CACHE_DAYS  = 8   # chip is weekly; 8 days covers one full cycle
 
 
-def _cache_age_days(file_path, stock_id):
-    """
-    Return how many calendar days have elapsed since the most recent cached row.
-    Returns None when there is no cached data at all.
-    """
-    df = load_sheet(file_path, stock_id)
-    if df.empty or "date" not in df.columns:
-        return None
-    latest = pd.to_datetime(df["date"], errors="coerce").max()
-    if pd.isna(latest):
-        return None
-    return (date.today() - latest.date()).days
+def _age_from_dict(ages: dict, stock_id: str):
+    """Look up pre-fetched age dict. Returns None when stock has no cached data."""
+    return ages.get(stock_id)  # None if absent
 
 
-def _is_cache_fresh(file_path, stock_id, max_age_days):
-    age = _cache_age_days(file_path, stock_id)
+def _is_fresh(ages: dict, stock_id: str, max_age_days: int) -> bool:
+    age = _age_from_dict(ages, stock_id)
     return age is not None and age <= max_age_days
 
 
@@ -67,6 +54,7 @@ def _get_volume_stats(merged: pd.DataFrame) -> dict:
         "High_Today":        None,
         "Low_Today":         None,
         "Close_Prev":        None,
+        "Min_Price_3":       None,
     }
     if merged.empty or "Volume_Lot" not in merged.columns:
         return defaults
@@ -94,8 +82,12 @@ def _get_volume_stats(merged: pd.DataFrame) -> dict:
         result["High_Today"] = round(float(h), 2) if pd.notna(h) else None
 
     if "low" in merged.columns:
-        l = pd.to_numeric(merged["low"], errors="coerce").iloc[-1]
+        low_s = pd.to_numeric(merged["low"], errors="coerce")
+        l = low_s.iloc[-1]
         result["Low_Today"] = round(float(l), 2) if pd.notna(l) else None
+        if len(low_s) >= 3:
+            min3 = low_s.iloc[-3:].min()
+            result["Min_Price_3"] = round(float(min3), 2) if pd.notna(min3) else None
 
     if "close" in merged.columns and len(merged) >= 2:
         prev_c = pd.to_numeric(merged["close"], errors="coerce").iloc[-2]
@@ -104,30 +96,29 @@ def _get_volume_stats(merged: pd.DataFrame) -> dict:
     return result
 
 
-def _get_chip_data(stock_id: str) -> dict:
-    """讀取最新一週集保資料，回傳 Cond_B 相關欄位。"""
-    df = load_sheet(LARGE_HOLDER_FILE, stock_id)
+def _get_chip_data(df: pd.DataFrame) -> dict:
+    """Parse pre-loaded chip DataFrame; return Cond_B related fields."""
     defaults = {
-        "Cond_B":           False,
-        "Cond_B_Available": False,
-        "Large_Holder_Pct": None,
-        "Large_Pct_Change": None,
-        "Retail_Pct":       None,
+        "Cond_B":            False,
+        "Cond_B_Available":  False,
+        "Large_Holder_Pct":  None,
+        "Large_Pct_Change":  None,
+        "Retail_Pct":        None,
         "Retail_Pct_Change": None,
     }
-    if df.empty or "Cond_B" not in df.columns:
+    if df is None or df.empty or "Cond_B" not in df.columns:
         return defaults
 
+    df = df.copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.sort_values("date").reset_index(drop=True)
 
-    # 需要至少兩週才能算出週差值
     if len(df) < 2:
         return defaults
 
     latest = df.iloc[-1]
 
-    def _safe_float(key):
+    def _sf(key):
         v = latest.get(key)
         return round(float(v), 4) if pd.notna(v) else None
 
@@ -135,10 +126,10 @@ def _get_chip_data(stock_id: str) -> dict:
         "Cond_B":            bool(str(latest.get("Cond_B", "False")).strip()
                                   in ("True", "1", "true")),
         "Cond_B_Available":  True,
-        "Large_Holder_Pct":  _safe_float("Large_Holder_Pct"),
-        "Large_Pct_Change":  _safe_float("Large_Pct_Change"),
-        "Retail_Pct":        _safe_float("Retail_Pct"),
-        "Retail_Pct_Change": _safe_float("Retail_Pct_Change"),
+        "Large_Holder_Pct":  _sf("Large_Holder_Pct"),
+        "Large_Pct_Change":  _sf("Large_Pct_Change"),
+        "Retail_Pct":        _sf("Retail_Pct"),
+        "Retail_Pct_Change": _sf("Retail_Pct_Change"),
     }
 
 
@@ -147,148 +138,165 @@ def verify_candidates(
     progress_callback=None,
 ) -> pd.DataFrame:
     global _chip_quota_exhausted
-    _chip_quota_exhausted = False   # reset at the start of every scan run
-    lh_fetcher = LargeHolderFetcher()
+    _chip_quota_exhausted = False
 
-    # TAIEX 資料在迴圈外只拉一次
-    taiex_df = MarketIndexFetcher().get()
+    lh_fetcher  = LargeHolderFetcher()
+    taiex_df    = MarketIndexFetcher().get()
     if taiex_df.empty:
         print("  [WARN] TAIEX data unavailable — RS calculation skipped.")
 
-    total   = len(candidates)
-    results = []
+    total        = len(candidates)
+    candidate_ids = [str(r["stock_id"]) for _, r in candidates.iterrows()]
+    id_to_market  = {str(r["stock_id"]): str(r.get("market", "TSE"))
+                     for _, r in candidates.iterrows()}
+    id_to_name    = {str(r["stock_id"]): str(r.get("stock_name", ""))
+                     for _, r in candidates.iterrows()}
 
-    for rank, (_, row) in enumerate(candidates.iterrows(), start=1):
-        stock_id   = str(row["stock_id"])
-        stock_name = str(row.get("stock_name", ""))
-        market     = str(row.get("market", "TSE"))
+    # ── Phase 1: single query to find stale/missing stocks ───────────────────
+    if progress_callback:
+        progress_callback(0, total, "Checking cache ages...")
+    pv_ages   = batch_latest_dates(PRICE_VOLUME_FILE, candidate_ids)
+    chip_ages = batch_latest_dates(LARGE_HOLDER_FILE, candidate_ids)
 
+    # ── Phase 2: fetch only what is stale or missing ─────────────────────────
+    for rank, stock_id in enumerate(candidate_ids, start=1):
+        market = id_to_market[stock_id]
         if progress_callback:
-            progress_callback(rank, total, "Scanning {} ({}/{})".format(stock_id, rank, total))
+            progress_callback(rank, total,
+                              "Fetching {} ({}/{})".format(stock_id, rank, total))
 
-        # 1. price-volume
-        pv_age = _cache_age_days(PRICE_VOLUME_FILE, stock_id)
+        pv_age = pv_ages.get(stock_id)
         if pv_age is None:
-            # no history at all: fetch full rolling window
             try:
                 multi_fetch_and_save(stock_id, market=market, incremental=False)
             except Exception as e:
                 print("  [{}] pv error: {}".format(stock_id, e))
         elif pv_age > PRICE_CACHE_DAYS:
-            # have history but missing recent days: top-up only
             try:
                 multi_fetch_and_save(stock_id, market=market, incremental=True)
             except Exception as e:
                 print("  [{}] pv error: {}".format(stock_id, e))
         else:
-            print("  [{}] pv cache hit".format(stock_id))
+            print("  [{}] pv cache hit ({} days)".format(stock_id, pv_age))
 
-        # 2. chip: skip API when local cache is fresh or quota is exhausted
-        if not _is_cache_fresh(LARGE_HOLDER_FILE, stock_id, CHIP_CACHE_DAYS):
+        if not _is_fresh(chip_ages, stock_id, CHIP_CACHE_DAYS):
             _fetch_chip_safe(lh_fetcher, stock_id)
         else:
             print("  [{}] chip cache hit".format(stock_id))
 
-        merged = _load_stock_data(stock_id)
+    # ── Phase 3: bulk load — two queries for all stocks ───────────────────────
+    if progress_callback:
+        progress_callback(total, total, "Loading all price data...")
+    pv_store   = bulk_load_stocks(PRICE_VOLUME_FILE, candidate_ids)
+    chip_store = bulk_load_stocks(LARGE_HOLDER_FILE, candidate_ids)
+
+    # ── Phase 4: analysis loop (no DB I/O) ───────────────────────────────────
+    import time as _time
+    _t_eval = _t_sr = _t_ta = _t_vs = 0.0
+    results = []
+    for rank, stock_id in enumerate(candidate_ids, start=1):
+        stock_name = id_to_name[stock_id]
+
+        if progress_callback:
+            progress_callback(rank, total,
+                              "Analyzing {} ({}/{})".format(stock_id, rank, total))
+
+        merged = pv_store.get(stock_id, pd.DataFrame())
         if merged.empty:
-            if rank < total:
-                time.sleep(INTER_STOCK_SLEEP)
             continue
 
+        _t0 = _time.perf_counter()
         evaluated = _evaluate_conditions(merged)
+        _t_eval += _time.perf_counter() - _t0
         if evaluated.empty:
-            if rank < total:
-                time.sleep(INTER_STOCK_SLEEP)
             continue
 
         evaluated = evaluated.sort_values("date").reset_index(drop=True)
         latest    = evaluated.iloc[-1]
         recent    = evaluated.tail(5)
 
-        # signals are now informational columns only — no longer used as a gate
         raw_golden  = bool(recent["Is_Golden_Signal"].any())
         is_breakout = bool(recent["Is_Breakout_Signal"].any())
 
-        chip   = _get_chip_data(stock_id)
+        chip   = _get_chip_data(chip_store.get(stock_id))
         cond_b = chip["Cond_B"]
+        is_golden = (raw_golden and cond_b) if chip["Cond_B_Available"] else raw_golden
 
-        if chip["Cond_B_Available"]:
-            is_golden = raw_golden and cond_b
-        else:
-            is_golden = raw_golden
-
-        # compute full metrics for every candidate; apply_scan_mode is the sole filter
+        _t0 = _time.perf_counter()
         sr = calc_all(merged)
+        _t_sr += _time.perf_counter() - _t0
+
+        _t0 = _time.perf_counter()
         ta = calc_trend_analysis(merged, taiex_df=taiex_df if not taiex_df.empty else None)
+        _t_ta += _time.perf_counter() - _t0
+
+        _t0 = _time.perf_counter()
         vs = _get_volume_stats(merged)
+        _t_vs += _time.perf_counter() - _t0
 
         def _lr(key):
             v = latest.get(key)
             return round(float(v), 4) if pd.notna(v) else None
 
         results.append({
-                # ── 主列表核心欄位 ──
-                "Stock_ID":          stock_id,
-                "Stock_Name":        stock_name,
-                "Close_Price":       round(float(latest.get("close", 0)), 2),
-                "Explosion_Score":   round(float(latest.get("Explosion_Score", 0)), 1)
-                                     if pd.notna(latest.get("Explosion_Score")) else 0.0,
-                "RS_Score":          ta.get("RS_Score"),
-                "Dist_52W_High_Pct": ta.get("Dist_52W_High_Pct"),
-                "Sup_Gap_Pct":       sr.get("Sup_Gap_Pct"),
-                "Res_Gap_Pct":       sr.get("Res_Gap_Pct"),
-                # ── 訊號條件 ──
-                "Cond_A":            bool(latest.get("Cond_A", False)),
-                "Cond_C":            bool(latest.get("Cond_C", False)),
-                "Cond_B":            cond_b,
-                "Squeeze":           bool(sr.get("Squeeze", False)),
-                "Is_Golden_Signal":  is_golden,
-                "Is_Breakout_Signal": is_breakout,
-                # ── 線型評估（主列表） ──
-                "MA_Bull_Align":     bool(ta.get("MA_Bull_Align", False)),
-                "Donchian_Break":    bool(ta.get("Donchian_Break", False)),
-                "MACD_Cross":        bool(ta.get("MACD_Cross", False)),
-                # ── 詳細面板：線型輔助 ──
-                "MA_Squeeze":        bool(ta.get("MA_Squeeze", False)),
-                "Trend_Breakout":    bool(ta.get("Trend_Breakout", False)),
-                "MACD_Hist_Turn":    bool(ta.get("MACD_Hist_Turn", False)),
-                "Near_52W_High":     bool(ta.get("Near_52W_High", False)),
-                "RS_Strong":         bool(ta.get("RS_Strong", False)),
-                # ── 詳細面板：集保籌碼 ──
-                "Large_Holder_Pct":  chip["Large_Holder_Pct"],
-                "Large_Pct_Change":  chip["Large_Pct_Change"],
-                "Retail_Pct":        chip["Retail_Pct"],
-                "Retail_Pct_Change": chip["Retail_Pct_Change"],
-                # ── 詳細面板：均線與支撐 ──
-                "MA5":               ta.get("MA5"),
-                "MA10":              ta.get("MA10"),
-                "MA20":              sr.get("MA20"),
-                "MA60":              sr.get("MA60"),
-                "Resist_60H":        sr.get("Resist_60H"),
-                "Support_60L":       sr.get("Support_60L"),
-                "VP_Zone1":          sr.get("VP_Zone1"),
-                "VP_Zone2":          sr.get("VP_Zone2"),
-                "VP_Zone3":          sr.get("VP_Zone3"),
-                "Gap_Up_Sup":        sr.get("Gap_Up_Sup"),
-                "Gap_Dn_Res":        sr.get("Gap_Dn_Res"),
-                "Round_Level":       sr.get("Round_Level"),
-                # ── 詳細面板：原始指標 ──
-                "Range_Tightness":   _lr("Range_Tightness"),
-                "Volume_Dryup":      _lr("Volume_Dryup_Ratio"),
-                "Volume_Bias":       _lr("Volume_Bias"),
-                # scan mode filter columns
-                "Vol_MA20":          vs["Vol_MA20"],
-                "Vol_MA5":           vs["Vol_MA5"],
-                "Vol_Today":         vs["Vol_Today"],
-                "Max_Price_20_Prev": vs["Max_Price_20_Prev"],
-                "High_Today":        vs["High_Today"],
-                "Low_Today":         vs["Low_Today"],
-                "Close_Prev":        vs["Close_Prev"],
-                "Cond_A_5D":         bool(recent["Cond_A"].any()),
-            })
+            "Stock_ID":           stock_id,
+            "Stock_Name":         stock_name,
+            "Close_Price":        round(float(latest.get("close", 0)), 2),
+            "Explosion_Score":    round(float(latest.get("Explosion_Score", 0)), 1)
+                                  if pd.notna(latest.get("Explosion_Score")) else 0.0,
+            "RS_Score":           ta.get("RS_Score"),
+            "Dist_52W_High_Pct":  ta.get("Dist_52W_High_Pct"),
+            "Sup_Gap_Pct":        sr.get("Sup_Gap_Pct"),
+            "Res_Gap_Pct":        sr.get("Res_Gap_Pct"),
+            "Cond_A":             bool(latest.get("Cond_A", False)),
+            "Cond_C":             bool(latest.get("Cond_C", False)),
+            "Cond_B":             cond_b,
+            "Squeeze":            bool(sr.get("Squeeze", False)),
+            "Is_Golden_Signal":   is_golden,
+            "Is_Breakout_Signal": is_breakout,
+            "MA_Bull_Align":      bool(ta.get("MA_Bull_Align", False)),
+            "Donchian_Break":     bool(ta.get("Donchian_Break", False)),
+            "MACD_Cross":         bool(ta.get("MACD_Cross", False)),
+            "MA_Squeeze":         bool(ta.get("MA_Squeeze", False)),
+            "Trend_Breakout":     bool(ta.get("Trend_Breakout", False)),
+            "MACD_Hist_Turn":     bool(ta.get("MACD_Hist_Turn", False)),
+            "Near_52W_High":      bool(ta.get("Near_52W_High", False)),
+            "RS_Strong":          bool(ta.get("RS_Strong", False)),
+            "Large_Holder_Pct":   chip["Large_Holder_Pct"],
+            "Large_Pct_Change":   chip["Large_Pct_Change"],
+            "Retail_Pct":         chip["Retail_Pct"],
+            "Retail_Pct_Change":  chip["Retail_Pct_Change"],
+            "MA5":                ta.get("MA5"),
+            "MA10":               ta.get("MA10"),
+            "MA20":               sr.get("MA20"),
+            "MA60":               sr.get("MA60"),
+            "Resist_60H":         sr.get("Resist_60H"),
+            "Support_60L":        sr.get("Support_60L"),
+            "VP_Zone1":           sr.get("VP_Zone1"),
+            "VP_Zone2":           sr.get("VP_Zone2"),
+            "VP_Zone3":           sr.get("VP_Zone3"),
+            "Gap_Up_Sup":         sr.get("Gap_Up_Sup"),
+            "Gap_Dn_Res":         sr.get("Gap_Dn_Res"),
+            "Round_Level":        sr.get("Round_Level"),
+            "Range_Tightness":    _lr("Range_Tightness"),
+            "Volume_Dryup":       _lr("Volume_Dryup_Ratio"),
+            "Volume_Bias":        _lr("Volume_Bias"),
+            "Vol_MA20":           vs["Vol_MA20"],
+            "Vol_MA5":            vs["Vol_MA5"],
+            "Vol_Today":          vs["Vol_Today"],
+            "Max_Price_20_Prev":  vs["Max_Price_20_Prev"],
+            "High_Today":         vs["High_Today"],
+            "Low_Today":          vs["Low_Today"],
+            "Close_Prev":         vs["Close_Prev"],
+            "Min_Price_3":        vs["Min_Price_3"],
+            "Cond_A_5D":          bool(recent["Cond_A"].any()),
+        })
 
-        if rank < total:
-            time.sleep(INTER_STOCK_SLEEP)
+    n = max(len(results), 1)
+    print("[TIMING] eval={:.0f}ms  sr={:.0f}ms  ta={:.0f}ms  vs={:.0f}ms  per_stock={:.0f}ms".format(
+        _t_eval * 1000, _t_sr * 1000, _t_ta * 1000, _t_vs * 1000,
+        (_t_eval + _t_sr + _t_ta + _t_vs) * 1000 / n,
+    ))
 
     if not results:
         return pd.DataFrame()

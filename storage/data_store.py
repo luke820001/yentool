@@ -1,8 +1,16 @@
+import sqlite3
 import pandas as pd
-import openpyxl
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_cls
 from config.settings import ROLLING_DAYS
+
+# Files where sheet_name argument = stock_id (one logical "sheet" per stock).
+# All other files treat sheet_name as the SQLite table name.
+_STOCK_KEYED_STEMS = {"price_volume", "large_holder", "broker_branch"}
+
+
+def _is_stock_keyed(file_path: Path) -> bool:
+    return file_path.stem in _STOCK_KEYED_STEMS
 
 
 def _get_cutoff_date() -> str:
@@ -10,87 +18,68 @@ def _get_cutoff_date() -> str:
     return cutoff.strftime("%Y-%m-%d")
 
 
+def _ensure_index(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_data_sid_date ON data(stock_id, date)"
+        )
+    except Exception:
+        pass
+
+
+# ── public read API ───────────────────────────────────────────────────────────
+
 def load_sheet(file_path: Path, sheet_name: str) -> pd.DataFrame:
     if not file_path.exists():
         return pd.DataFrame()
     try:
-        df = pd.read_excel(file_path, sheet_name=sheet_name, dtype=str)
-        return df
+        with sqlite3.connect(file_path) as conn:
+            if _is_stock_keyed(file_path):
+                return pd.read_sql_query(
+                    "SELECT * FROM data WHERE stock_id = ?",
+                    conn, params=(sheet_name,),
+                )
+            else:
+                return pd.read_sql_query(
+                    "SELECT * FROM [{}]".format(sheet_name), conn
+                )
     except Exception:
         return pd.DataFrame()
 
 
-def _recover_workbook(file_path: Path, skip_sheet: str) -> dict:
+def get_latest_date(file_path: Path, stock_id: str):
     """
-    Best-effort recovery of sheets from a corrupted Excel file.
-    Returns {sheet_name: DataFrame} for every sheet that could be read.
+    Return the most recent date string for stock_id (index scan only — fast).
+    Returns None when no data exists.
     """
-    recovered = {}
-    wb = None
+    if not file_path.exists():
+        return None
     try:
-        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-        for sname in wb.sheetnames:
-            if sname == skip_sheet:
-                continue
-            try:
-                rows = list(wb[sname].values)
-                if rows:
-                    headers = [str(c) if c is not None else "" for c in rows[0]]
-                    recovered[sname] = pd.DataFrame(
-                        [list(r) for r in rows[1:]], columns=headers
-                    )
-            except Exception:
-                pass
+        with sqlite3.connect(file_path) as conn:
+            cur = conn.execute(
+                "SELECT MAX(date) FROM data WHERE stock_id = ?", (stock_id,)
+            )
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
     except Exception:
-        pass
-    finally:
-        if wb is not None:
-            try:
-                wb.close()
-            except Exception:
-                pass
-    return recovered
+        return None
 
+
+# ── public write API ──────────────────────────────────────────────────────────
 
 def save_sheet(df: pd.DataFrame, file_path: Path, sheet_name: str) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    if file_path.exists():
-        # Manage ExcelWriter manually so we can force-close the handle on failure
-        # before attempting unlink (avoids WinError 32 on Windows).
-        ew = None
-        append_ok = False
-        try:
-            ew = pd.ExcelWriter(
-                file_path, engine="openpyxl", mode="a", if_sheet_exists="replace"
-            )
-            df.to_excel(ew, sheet_name=sheet_name, index=False)
-            ew.close()
-            append_ok = True
-        except Exception:
+    with sqlite3.connect(file_path) as conn:
+        if _is_stock_keyed(file_path):
+            # Remove existing rows for this stock then append new ones.
             try:
-                if ew is not None:
-                    ew.close()
+                conn.execute("DELETE FROM data WHERE stock_id = ?", (sheet_name,))
             except Exception:
-                pass
-
-        if append_ok:
-            return
-
-        # workbook is corrupted — recover intact sheets then rewrite
-        recovered = _recover_workbook(file_path, skip_sheet=sheet_name)
-        print("  [WARN] {} corrupted — rebuilding ({} sheets recovered)".format(
-            file_path.name, len(recovered)))
-        file_path.unlink(missing_ok=True)
-        with pd.ExcelWriter(file_path, engine="openpyxl", mode="w") as writer:
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-            for sname, sdf in recovered.items():
-                try:
-                    sdf.to_excel(writer, sheet_name=sname, index=False)
-                except Exception:
-                    pass
-    else:
-        with pd.ExcelWriter(file_path, engine="openpyxl", mode="w") as writer:
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+                pass  # table doesn't exist yet; to_sql will create it
+            df.to_sql("data", conn, if_exists="append", index=False)
+            _ensure_index(conn)
+        else:
+            df.to_sql(sheet_name, conn, if_exists="replace", index=False)
 
 
 def apply_rolling_window(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
@@ -120,3 +109,65 @@ def upsert_and_trim(
     combined = combined.sort_values(by=key_cols).reset_index(drop=True)
     save_sheet(combined, file_path, sheet_name)
     return combined
+
+
+# ── batch helpers (replace per-stock queries with single round-trips) ────────
+
+def batch_latest_dates(file_path: Path, stock_ids: list) -> dict:
+    """
+    One query: return {stock_id: age_days} for every stock_id that has data.
+    Stocks with no rows are absent from the result (caller treats as None).
+    """
+    if not file_path.exists() or not stock_ids:
+        return {}
+    placeholders = ",".join("?" for _ in stock_ids)
+    today = date_cls.today()
+    result = {}
+    try:
+        with sqlite3.connect(file_path) as conn:
+            rows = conn.execute(
+                "SELECT stock_id, MAX(date) FROM data "
+                "WHERE stock_id IN ({}) GROUP BY stock_id".format(placeholders),
+                stock_ids,
+            ).fetchall()
+        for sid, max_date in rows:
+            if max_date:
+                try:
+                    d = datetime.strptime(max_date[:10], "%Y-%m-%d").date()
+                    result[sid] = (today - d).days
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return result
+
+
+def bulk_load_stocks(file_path: Path, stock_ids: list) -> dict:
+    """
+    One query: return {stock_id: DataFrame} for every stock_id.
+    """
+    if not file_path.exists() or not stock_ids:
+        return {}
+    placeholders = ",".join("?" for _ in stock_ids)
+    try:
+        with sqlite3.connect(file_path) as conn:
+            df = pd.read_sql_query(
+                "SELECT * FROM data WHERE stock_id IN ({})".format(placeholders),
+                conn,
+                params=stock_ids,
+            )
+        if df.empty:
+            return {}
+        return {sid: grp.reset_index(drop=True) for sid, grp in df.groupby("stock_id")}
+    except Exception:
+        return {}
+
+
+# ── backward-compat stubs (no-ops) ───────────────────────────────────────────
+
+def warm_workbook_cache(file_path: Path) -> None:
+    pass
+
+
+def invalidate_workbook_cache(file_path: Path) -> None:
+    pass
