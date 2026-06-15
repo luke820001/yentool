@@ -1,0 +1,20 @@
+{
+  "modes": [
+    {
+      "key": "mode_squeeze",
+      "label": "Classic Squeeze - 經典爆發蓄勢"
+    },
+    {
+      "key": "mode_breakout",
+      "label": "Momentum Breakout - 動能突破發動"
+    },
+    {
+      "key": "mode_bottom",
+      "label": "Bottom Accumulation - 跌深大戶建倉"
+    },
+    {
+      "key": "mode_short_explosion",
+      "label": "Short-Term Explosion - 短線動能爆發"
+    }
+  ]
+}
