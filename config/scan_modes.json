@@ -15,6 +15,10 @@
     {
       "key": "mode_short_explosion",
       "label": "Short-Term Explosion - 短線動能爆發"
+    },
+    {
+      "key": "mode_momentum_leader",
+      "label": "Pre-Launch Momentum - 起漲前動能(找未來)"
     }
   ]
 }

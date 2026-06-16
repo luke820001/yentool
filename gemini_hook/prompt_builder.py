@@ -10,6 +10,7 @@ SYSTEM_INSTRUCTION = (
     "Each row contains technical and chip indicators. "
     "Explanation of the columns:\n"
     "- Explosion_Score: 0 to 100, higher means closer to a breakout.\n"
+    "- gain3m: price change percent over the last ~3 months (momentum already realized).\n"
     "- Range_Tightness: 20-day box width ratio, smaller means tighter consolidation.\n"
     "- Volume_Dryup: today volume divided by 20-day average volume, "
     "smaller means volume is drying up.\n"
@@ -37,14 +38,14 @@ def _row_to_line(row: pd.Series) -> str:
         return str(val)
 
     return (
-        "{sid} {name} | close={close} | score={score} | "
+        "{sid} {name} | close={close} | score={score} | gain3m={gain3m} | "
         "tightness={tight} | dryup={dry} | bias={bias} | "
         "MA20={ma20} MA60={ma60} | resist={res} support={sup} | "
         "VP=[{vp1},{vp2},{vp3}] | gapSup={gsup} gapRes={gres} | "
         "round={rnd} | supGap%={sgp} resGap%={rgp} | squeeze={sq}"
     ).format(
         sid=g("Stock_ID"), name=g("Stock_Name"), close=g("Close_Price"),
-        score=g("Explosion_Score"), tight=g("Range_Tightness"),
+        score=g("Explosion_Score"), gain3m=g("Gain_3M_Pct"), tight=g("Range_Tightness"),
         dry=g("Volume_Dryup"), bias=g("Volume_Bias"),
         ma20=g("MA20"), ma60=g("MA60"), res=g("Resist_60H"), sup=g("Support_60L"),
         vp1=g("VP_Zone1"), vp2=g("VP_Zone2"), vp3=g("VP_Zone3"),

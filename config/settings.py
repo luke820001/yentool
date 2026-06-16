@@ -54,6 +54,14 @@ EXHAUSTION_VOLUME_LOOKBACK = 20
 # --- Signal Thresholds: Condition B ---
 LARGE_HOLDER_WEEKS = 3
 
+# Cond_B uses FinMind shareholding data: weekly, optional, and throttled to
+# ~1 request / 1.5s. Fetching it for every full-market candidate (100-250
+# stocks) serially adds minutes to a scan, so it is OFF by default — the scan
+# uses whatever chip data is already cached and never blocks on the network.
+# Populate the cache out of band (e.g. main.py on the watchlist) or export
+# CHIP_FETCH_IN_SCAN=1 to fetch inline.
+CHIP_FETCH_IN_SCAN = os.environ.get("CHIP_FETCH_IN_SCAN", "0") == "1"
+
 # --- Signal Thresholds: Condition C ---
 BROKER_NET_SELLER_DAYS = 5
 BROKER_CONCENTRATION_PCT = 0.15

@@ -1,20 +1,43 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
-from ingestion.price_volume_multi import multi_fetch_and_save
+from ingestion.price_volume_multi import multi_fetch_and_save, multi_fetch_and_save_batch
 from ingestion.large_holder import LargeHolderFetcher
 from ingestion.market_index import MarketIndexFetcher
 from analyzer.signal_evaluator import _evaluate_conditions
 from analyzer.support_resistance import calc_all
 from analyzer.trend_analysis import calc_trend_analysis
 from storage.data_store import (
-    load_sheet, batch_latest_dates, batch_row_counts, bulk_load_stocks,
+    load_sheet, batch_latest_dates, batch_latest_date_strings,
+    batch_row_counts, bulk_load_stocks,
 )
-from config.settings import LARGE_HOLDER_FILE, PRICE_VOLUME_FILE
+from config.settings import (
+    LARGE_HOLDER_FILE, PRICE_VOLUME_FILE, FINMIND_TOKEN, CHIP_FETCH_IN_SCAN,
+)
 
-# 2 = covers weekends (Fri data is 2 days old on Sunday — no re-fetch needed)
-PRICE_CACHE_DAYS = 2
 CHIP_CACHE_DAYS  = 8
+
+# Taiwan session closes 13:30; the consolidated end-of-day quote is published by
+# ~14:00. Before then "today" has no official close yet, so the latest usable
+# trading session is the previous trading day. A stock is stale (needs a fetch)
+# whenever its newest stored bar predates this date -- this is what makes a scan
+# pick up TODAY's bar instead of lagging a day.
+_EOD_HOUR = 14
+
+
+def _latest_trading_day() -> str:
+    """Most recent trading session date as 'YYYY-MM-DD' (weekends/pre-close
+    rolled back; holidays self-correct -- a stale fetch just finds nothing new)."""
+    now = datetime.now()
+    d = now.date()
+    if now.hour < _EOD_HOUR:        # today's close not published yet
+        d = d - timedelta(days=1)
+    wd = d.weekday()                # Mon=0 .. Sun=6
+    if wd == 5:                     # Saturday -> Friday
+        d = d - timedelta(days=1)
+    elif wd == 6:                   # Sunday -> Friday
+        d = d - timedelta(days=2)
+    return d.strftime("%Y-%m-%d")
 
 # Below this many stored bars, a stock cannot support the 52-week-high (252) or
 # RS (63) calculations, so we force a full backfill instead of a 7-day top-up.
@@ -42,18 +65,20 @@ _chip_quota_exhausted = False
 
 
 def _fetch_chip_safe(lh_fetcher, stock_id):
-    """Fetch chip data; set session flag on first 402 and skip all subsequent calls."""
+    """Fetch chip data; on the FIRST failure of any kind, stop trying for the
+    rest of this scan run. Chip data (Cond_B) is weekly, optional, and requires
+    a paid FinMind plan, so a single failed probe is enough to conclude the
+    source is unavailable. Without this, the 1.5s-throttled serial loop would
+    grind through every candidate (100+ * 1.5s) and appear to hang."""
     global _chip_quota_exhausted
     if _chip_quota_exhausted:
         return
     try:
         lh_fetcher.fetch_and_save(stock_id)
     except Exception as e:
-        msg = str(e)
-        print("  [{}] chip error: {}".format(stock_id, msg))
-        if "402" in msg:
-            _chip_quota_exhausted = True
-            print("  [WARN] chip quota exhausted — skipping chip fetch for rest of scan")
+        _chip_quota_exhausted = True
+        print("  [{}] chip unavailable ({}) -- skipping chip fetch for rest of scan"
+              .format(stock_id, str(e)[:80]))
 
 
 def _get_volume_stats(merged: pd.DataFrame) -> dict:
@@ -78,7 +103,14 @@ def _get_volume_stats(merged: pd.DataFrame) -> dict:
     last_ma20 = vol_ma20.iloc[-1]
     result["Vol_MA20"] = round(float(last_ma20), 0) if pd.notna(last_ma20) else None
 
-    if "MA5_Volume" in merged.columns:
+    # Prior 5-day average volume EXCLUDING today. The scan-mode "today vol > 5d
+    # avg * N" surge test must compare against the baseline BEFORE today; the
+    # stored MA5_Volume includes today, so today's own spike inflates the
+    # denominator and silently makes the surge threshold harder to clear.
+    if len(vol) >= 6:
+        prior5 = vol.iloc[-6:-1].mean()
+        result["Vol_MA5"] = round(float(prior5), 0) if pd.notna(prior5) else None
+    elif "MA5_Volume" in merged.columns:
         ma5v = pd.to_numeric(merged["MA5_Volume"], errors="coerce").iloc[-1]
         result["Vol_MA5"] = round(float(ma5v), 0) if pd.notna(ma5v) else None
 
@@ -155,7 +187,7 @@ def verify_candidates(
     lh_fetcher  = LargeHolderFetcher()
     taiex_df    = MarketIndexFetcher().get()
     if taiex_df.empty:
-        print("  [WARN] TAIEX data unavailable — RS calculation skipped.")
+        print("  [WARN] TAIEX data unavailable -- RS calculation skipped.")
 
     total        = len(candidates)
     candidate_ids = [str(r["stock_id"]) for _, r in candidates.iterrows()]
@@ -167,61 +199,85 @@ def verify_candidates(
     # ── Phase 1: single query to find stale/missing stocks ───────────────────
     if progress_callback:
         progress_callback(0, total, "Checking cache ages...")
-    pv_ages   = batch_latest_dates(PRICE_VOLUME_FILE, candidate_ids)
+    pv_dates  = batch_latest_date_strings(PRICE_VOLUME_FILE, candidate_ids)
     pv_counts = batch_row_counts(PRICE_VOLUME_FILE, candidate_ids)
     chip_ages = batch_latest_dates(LARGE_HOLDER_FILE, candidate_ids)
 
-    # A stock needs a (re)fetch if it is stale OR its stored history is too
-    # short for the long-window indicators (52-week high, RS).
+    target_day = _latest_trading_day()
+
+    # A stock needs a (re)fetch if its newest bar predates the latest trading day
+    # (so we pick up today's close) OR its stored history is too short for the
+    # long-window indicators (52-week high, RS).
     def _needs_full(sid):
         return pv_counts.get(sid, 0) < MIN_HISTORY_BARS
 
-    # ── Phase 2a: parallel pv fetch (I/O-bound → ThreadPoolExecutor) ─────────
+    def _is_stale(sid):
+        d = pv_dates.get(sid)
+        return d is None or d < target_day
+
+    # ── Phase 2a: batch pv fetch (one threaded yfinance call per ~50 stocks) ──
     stale_pv = [
         sid for sid in candidate_ids
-        if pv_ages.get(sid) is None
-        or pv_ages.get(sid) > PRICE_CACHE_DAYS
-        or _needs_full(sid)
+        if _is_stale(sid) or _needs_full(sid)
     ]
     fresh_pv = total - len(stale_pv)
     print("  pv cache hits: {}/{}  fetching: {}".format(fresh_pv, total, len(stale_pv)))
 
     if progress_callback:
-        progress_callback(0, total, "Fetching price data (0/{})...".format(len(stale_pv)))
+        progress_callback(0, total,
+                          "Fetching price data (batch {})...".format(len(stale_pv)))
 
-    def _fetch_pv(stock_id):
-        pv_age = pv_ages.get(stock_id)
-        # Incremental top-up only when we already hold enough history; otherwise
-        # pull the full window so long-lookback indicators have data to work on.
-        incremental = pv_age is not None and not _needs_full(stock_id)
-        try:
-            multi_fetch_and_save(
-                stock_id,
-                market=id_to_market[stock_id],
-                incremental=incremental,
-            )
-        except Exception as e:
-            print("  [{}] pv error: {}".format(stock_id, e))
+    # Fast path: bulk yfinance + single-transaction write. Most stocks resolve here.
+    fetched = multi_fetch_and_save_batch(stale_pv, id_to_market)
+    missing = [sid for sid in stale_pv if sid not in fetched]
+    print("  pv batch yfinance: {}/{}  fallback: {}".format(
+        len(fetched), len(stale_pv), len(missing)))
 
-    _done_count = [0]
-    def _fetch_pv_tracked(stock_id):
-        _fetch_pv(stock_id)
-        _done_count[0] += 1
-        if progress_callback:
-            progress_callback(
-                _done_count[0], len(stale_pv),
-                "Fetching price data ({}/{})...".format(_done_count[0], len(stale_pv)),
-            )
+    # Slow path: only the tickers yfinance could not return (TWSE/TPEX/FinMind).
+    if missing:
+        _done_count = [0]
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        list(pool.map(_fetch_pv_tracked, stale_pv))
+        def _fetch_pv_fallback(stock_id):
+            try:
+                multi_fetch_and_save(
+                    stock_id,
+                    market=id_to_market[stock_id],
+                    incremental=False,
+                    skip_yfinance=True,
+                )
+            except Exception as e:
+                print("  [{}] pv error: {}".format(stock_id, e))
+            _done_count[0] += 1
+            if progress_callback:
+                progress_callback(
+                    _done_count[0], len(missing),
+                    "Fetching price data fallback ({}/{})...".format(
+                        _done_count[0], len(missing)),
+                )
 
-    # ── Phase 2b: sequential chip fetch (quota-limited; keep serial) ─────────
-    for stock_id in candidate_ids:
-        if not _is_fresh(chip_ages, stock_id, CHIP_CACHE_DAYS):
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            list(pool.map(_fetch_pv_fallback, missing))
+
+    # ── Phase 2b: chip fetch (OPTIONAL, off by default — see settings) ───────
+    # FinMind shareholding is throttled to ~1 req/1.5s; fetching it for every
+    # candidate serially adds minutes and used to make the scan appear frozen
+    # (this phase emits no progress). Cond_B is optional, so by default we use
+    # only cached chip data and never block the scan on the network.
+    if not (CHIP_FETCH_IN_SCAN and FINMIND_TOKEN):
+        reason = "no FINMIND_TOKEN" if not FINMIND_TOKEN else "inline fetch disabled"
+        print("  [chip] {} -- using cached chip only".format(reason))
+    else:
+        stale_chip = [sid for sid in candidate_ids
+                      if not _is_fresh(chip_ages, sid, CHIP_CACHE_DAYS)]
+        print("  chip cache hits: {}/{}  fetching: {}".format(
+            total - len(stale_chip), total, len(stale_chip)))
+        for i, stock_id in enumerate(stale_chip, 1):
+            if _chip_quota_exhausted:
+                break
+            if progress_callback:
+                progress_callback(i, len(stale_chip),
+                                  "Fetching chip {} ({}/{})".format(stock_id, i, len(stale_chip)))
             _fetch_chip_safe(lh_fetcher, stock_id)
-        else:
-            print("  [{}] chip cache hit".format(stock_id))
 
     # ── Phase 3: bulk load — two queries for all stocks ───────────────────────
     if progress_callback:
@@ -281,6 +337,20 @@ def verify_candidates(
         vs = _get_volume_stats(merged)
         _t_vs += _time.perf_counter() - _t0
 
+        # 1-month (~20 bars) and 3-month (~63 bars) price change. Both drive the
+        # pre-launch momentum mode and expose how much each name has already run.
+        close_series = pd.to_numeric(merged["close"], errors="coerce").dropna().reset_index(drop=True)
+        gain_3m = gain_1m = None
+        cur_c = float(close_series.iloc[-1]) if len(close_series) else 0.0
+        if len(close_series) >= 64:
+            base_c = float(close_series.iloc[-64])
+            if base_c > 0:
+                gain_3m = round((cur_c / base_c - 1.0) * 100, 1)
+        if len(close_series) >= 21:
+            base_20 = float(close_series.iloc[-21])
+            if base_20 > 0:
+                gain_1m = round((cur_c / base_20 - 1.0) * 100, 1)
+
         def _lr(key):
             v = latest.get(key)
             return round(float(v), 4) if pd.notna(v) else None
@@ -292,6 +362,8 @@ def verify_candidates(
             "Explosion_Score":    round(float(latest.get("Explosion_Score", 0)), 1)
                                   if pd.notna(latest.get("Explosion_Score")) else 0.0,
             "RS_Score":           ta.get("RS_Score"),
+            "Gain_3M_Pct":        gain_3m,
+            "Gain_1M_Pct":        gain_1m,
             "Dist_52W_High_Pct":  ta.get("Dist_52W_High_Pct"),
             "Sup_Gap_Pct":        sr.get("Sup_Gap_Pct"),
             "Res_Gap_Pct":        sr.get("Res_Gap_Pct"),

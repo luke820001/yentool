@@ -3,6 +3,7 @@ Multi-source price/volume fetcher.
 Priority per stock: yfinance -> TWSE/TPEX official API -> FinMind (existing).
 All Python strings are ASCII; no Chinese characters in this file.
 """
+import logging
 import time
 import warnings
 from datetime import date, timedelta
@@ -12,6 +13,11 @@ import pandas as pd
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# yfinance logs "possibly delisted / 404" to console when a probed ticker has no
+# data (e.g. trying the .TW suffix on an OTC stock before falling back to .TWO).
+# That probe is expected and harmless, so silence the noise.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 _HEADERS = {
     "User-Agent": (
@@ -23,7 +29,7 @@ _HEADERS = {
 }
 
 from ingestion.price_volume import PriceVolumeFetcher
-from storage.data_store import upsert_and_trim
+from storage.data_store import upsert_and_trim, bulk_upsert_stocks
 from config.settings import PRICE_VOLUME_FILE, ROLLING_DAYS
 
 _FINMIND = PriceVolumeFetcher()
@@ -265,6 +271,124 @@ def fetch_yfinance(stock_id, market="TSE", lookback_days=90):
     return df[required].dropna().reset_index(drop=True)
 
 
+# ── yfinance batch (one threaded request for many tickers) ───────────────────
+
+YF_BATCH_SIZE = 50   # tickers per yfinance.download call
+
+
+def _normalize_yf_single(sub, stock_id):
+    """Normalise one ticker's slice of a yfinance frame to the storage schema."""
+    sub = sub.reset_index()
+    sub.columns = [str(c).lower() for c in sub.columns]
+    if "date" not in sub.columns:
+        if "datetime" in sub.columns:
+            sub = sub.rename(columns={"datetime": "date"})
+        else:
+            return pd.DataFrame()
+    dt_s = pd.to_datetime(sub["date"], errors="coerce")
+    if getattr(dt_s.dt, "tz", None) is not None:
+        dt_s = dt_s.dt.tz_convert(None)
+    sub["date"] = dt_s.dt.strftime("%Y-%m-%d")
+    sub = sub.rename(columns={"volume": "volume_share"})
+    sub["stock_id"] = stock_id
+    required = ["date", "stock_id", "open", "high", "low", "close", "volume_share"]
+    if any(c not in sub.columns for c in required):
+        return pd.DataFrame()
+    return sub[required].dropna().reset_index(drop=True)
+
+
+def fetch_yfinance_batch(ticker_map, lookback_days=ROLLING_DAYS):
+    """
+    Download OHLCV for many stocks in a single yfinance call (internally threaded).
+
+    ticker_map : {stock_id: market}
+    Returns {stock_id: normalised df} only for stocks yfinance actually returned.
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        return {}
+    if not ticker_map:
+        return {}
+
+    yf_to_sid = {}
+    for sid, market in ticker_map.items():
+        suffix = ".TWO" if market == "OTC" else ".TW"
+        yf_to_sid[sid + suffix] = sid
+    tickers = list(yf_to_sid.keys())
+    period = "{}d".format(lookback_days + 15)
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            raw = yf.download(
+                tickers, period=period, auto_adjust=True,
+                progress=False, group_by="ticker", threads=True,
+            )
+    except Exception:
+        return {}
+
+    if raw is None or raw.empty:
+        return {}
+
+    single = not isinstance(raw.columns, pd.MultiIndex)
+    out = {}
+    for yft, sid in yf_to_sid.items():
+        try:
+            if single:
+                sub = raw.copy()
+            else:
+                if yft not in raw.columns.get_level_values(0):
+                    continue
+                sub = raw[yft].copy()
+            norm = _normalize_yf_single(sub, sid)
+            if not norm.empty:
+                out[sid] = norm
+        except Exception:
+            continue
+    return out
+
+
+def resolve_market(stock_id):
+    """Probe yfinance to decide TSE (.TW) vs OTC (.TWO). Defaults to TSE.
+    Used by the manual single-stock lookup, which has no market snapshot."""
+    for mkt in ("TSE", "OTC"):
+        try:
+            df = fetch_yfinance(stock_id, market=mkt, lookback_days=10)
+            if df is not None and not df.empty:
+                return mkt
+        except Exception:
+            pass
+    return "TSE"
+
+
+def multi_fetch_and_save_batch(stale_ids, id_to_market):
+    """
+    Fast path: batch-fetch stale stocks via chunked yfinance calls and persist
+    them all in a single SQLite transaction.
+
+    Returns the set of stock_ids successfully fetched+saved. Stocks yfinance
+    could not return are absent; the caller falls back per stock (TWSE/TPEX).
+    """
+    if not stale_ids:
+        return set()
+
+    frames = {}
+    for i in range(0, len(stale_ids), YF_BATCH_SIZE):
+        chunk = stale_ids[i:i + YF_BATCH_SIZE]
+        tmap = {sid: id_to_market.get(sid, "TSE") for sid in chunk}
+        got = fetch_yfinance_batch(tmap, lookback_days=ROLLING_DAYS)
+        for sid, df in got.items():
+            frames[sid] = _add_derived(df)
+
+    if frames:
+        bulk_upsert_stocks(
+            PRICE_VOLUME_FILE, frames,
+            date_col="date", key_cols=["date", "stock_id"],
+        )
+    return set(frames.keys())
+
+
 # ── derived columns (mirrors PriceVolumeFetcher._transform) ──────────────────
 
 def _add_derived(df):
@@ -283,7 +407,7 @@ def _add_derived(df):
 
 # ── public entry point ────────────────────────────────────────────────────────
 
-def multi_fetch_and_save(stock_id, market="TSE", incremental=False):
+def multi_fetch_and_save(stock_id, market="TSE", incremental=False, skip_yfinance=False):
     """
     Fetch price/volume data from the best available source and persist to Excel.
 
@@ -306,10 +430,12 @@ def multi_fetch_and_save(stock_id, market="TSE", incremental=False):
     df = pd.DataFrame()
     source = "none"
 
-    # 1. yfinance
-    df = fetch_yfinance(stock_id, market=market, lookback_days=window)
-    if not df.empty:
-        source = "yfinance"
+    # 1. yfinance (skipped on the batch-fallback path, where yfinance already
+    #    failed to return this ticker in the bulk call)
+    if not skip_yfinance:
+        df = fetch_yfinance(stock_id, market=market, lookback_days=window)
+        if not df.empty:
+            source = "yfinance"
 
     # 2. official exchange API
     if df.empty:

@@ -160,6 +160,9 @@ _MODE_CFG = {
     "mode_breakout":        {"min_vol": 1_000_000, "price_max": None, "cap": 100},
     "mode_bottom":          {"min_vol":   300_000, "price_max": None, "cap": 150},
     "mode_short_explosion": {"min_vol": 1_000_000, "price_max": None, "cap": 100},
+    # Leader study casts a wide net (modest liquidity floor, larger cap) so the
+    # 3-month >=30% gainers across the whole market are captured for inspection.
+    "mode_momentum_leader": {"min_vol":   300_000, "price_max": None, "cap": 250},
 }
 _DEFAULT_CFG = {"min_vol": 0, "price_max": None, "cap": PREFILTER_TOP_N}
 
@@ -185,6 +188,30 @@ def apply_prefilter(df: pd.DataFrame, scan_mode: str = "") -> pd.DataFrame:
               cfg["cap"],
           ))
     return result
+
+
+def lookup_stock_info(stock_id: str):
+    """
+    Resolve (stock_name, market) for a single code from the live exchange
+    snapshot. Uses the normalized-but-UNFILTERED data, so it also works for
+    codes the scan drops (ETFs, government stocks). Returns (stock_id, None)
+    when the code is not found on either board.
+    """
+    sid = str(stock_id).strip()
+
+    tse = _normalize_tse(_fetch_json(TSE_URL))
+    if not tse.empty:
+        hit = tse[tse["stock_id"].astype(str) == sid]
+        if not hit.empty:
+            return str(hit.iloc[0]["stock_name"]).strip(), "TSE"
+
+    otc = _normalize_otc(_fetch_json(OTC_URL, verify_ssl=False))
+    if not otc.empty:
+        hit = otc[otc["stock_id"].astype(str) == sid]
+        if not hit.empty:
+            return str(hit.iloc[0]["stock_name"]).strip(), "OTC"
+
+    return sid, None
 
 
 def get_candidate_list(scan_mode: str = "") -> pd.DataFrame:

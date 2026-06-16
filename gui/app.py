@@ -1,9 +1,10 @@
 import json
+import math
 import os
 import threading
 import tkinter as tk
 from tkinter import ttk
-from gui.scan_worker import ScanWorker
+from gui.scan_worker import ScanWorker, SingleStockWorker
 from gemini_hook.gemini_client import generate_report, GeminiError
 
 
@@ -50,8 +51,10 @@ MAIN_COLUMNS = [
     ("Close_Price",          "收盤價",    3.5),
     ("Suggested_Buy_Price",  "建議買入",  3.5),
     ("Strict_Stop_Loss",     "停損價",    3.5),
+    ("Risk_Pct",             "風險%",     2.8),
     ("Explosion_Score",      "爆發分",    3),
     ("RS_Score",             "RS超額%",   3.5),
+    ("Gain_3M_Pct",          "3月漲幅%",  3.5),
     ("Dist_52W_High_Pct",    "距高點%",   3),
     ("Sup_Gap_Pct",          "距支撐%",   3),
     ("Res_Gap_Pct",          "距壓力%",   3),
@@ -127,6 +130,16 @@ def _fmt_gap(val, is_resist=False) -> str:
 
 def _fmt_rs(val) -> str:
     """RS 超額報酬帶正負號顯示。"""
+    if val is None:
+        return "-"
+    try:
+        return "{:+.1f}%".format(float(val))
+    except Exception:
+        return "-"
+
+
+def _fmt_gain(val) -> str:
+    """近三月漲幅帶正負號顯示。"""
     if val is None:
         return "-"
     try:
@@ -269,6 +282,8 @@ class ScannerApp(tk.Tk):
         self._row_data: dict = {}
         self._hovered_item   = None
         self._hovered_tags   = ()
+        self._sort_col       = None
+        self._sort_reverse   = False
         self._scan_modes     = _load_scan_modes()
         # style the combobox dropdown listbox
         self.option_add("*TCombobox*Listbox.background",       SURFACE)
@@ -311,6 +326,25 @@ class ScannerApp(tk.Tk):
         hdr.pack(fill=tk.X, padx=20)
         tk.Label(hdr, text="股市掃描器",
                  bg=BG, fg=FG, font=(FONT, 20, "bold")).pack(side=tk.LEFT)
+
+        # Manual single-stock lookup
+        manual = tk.Frame(hdr, bg=BG)
+        manual.pack(side=tk.LEFT, padx=(24, 0))
+        tk.Label(manual, text="個股查詢:", bg=BG, fg=DIM,
+                 font=(FONT, 11)).pack(side=tk.LEFT, padx=(0, 6))
+        self._manual_var = tk.StringVar()
+        self._manual_entry = tk.Entry(
+            manual, textvariable=self._manual_var, width=8,
+            bg=SURFACE, fg=FG, insertbackground=FG, relief=tk.FLAT,
+            font=(FONT, 13), justify="center")
+        self._manual_entry.pack(side=tk.LEFT, ipady=3)
+        self._manual_entry.bind("<Return>", lambda e: self._start_single_scan())
+        self._manual_btn = tk.Button(
+            manual, text="分析", bg=SURFACE, fg=ACCENT, font=(FONT, 12, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=14, pady=4,
+            activebackground=HEADER_BG, activeforeground=ACCENT,
+            command=self._start_single_scan)
+        self._manual_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self._scan_btn = tk.Button(
             hdr, text="開始掃描",
@@ -371,7 +405,9 @@ class ScannerApp(tk.Tk):
         self._tree = ttk.Treeview(tree_frame, columns=col_ids,
                                    show="headings", selectmode="browse")
         for col_id, label, _w in MAIN_COLUMNS:
-            self._tree.heading(col_id, text=label)
+            self._tree.heading(
+                col_id, text=label,
+                command=lambda c=col_id: self._sort_by_column(c))
             self._tree.column(col_id, width=60, anchor=tk.CENTER,
                               minwidth=30, stretch=tk.NO)
 
@@ -444,34 +480,117 @@ class ScannerApp(tk.Tk):
         if row_dict:
             DetailDialog(self, row_dict)
 
+    # ── 點擊表頭排序 ───────────────────────────────────────────────────────────
+
+    def _row_sort_key(self, item, col_id):
+        """Sort by the ORIGINAL value (number/bool/str), not the display string.
+        Returns (rank, number, text); blanks get rank 2 so they stay last."""
+        val = self._row_data.get(item, {}).get(col_id)
+        if val is None:
+            return (2, 0.0, "")
+        try:
+            f = float(val)              # numbers, np types, bools, numeric codes
+            if math.isnan(f):
+                return (2, 0.0, "")
+            return (0, f, "")
+        except (TypeError, ValueError):
+            return (1, 0.0, str(val))   # names and other text
+
+    def _sort_by_column(self, col_id):
+        items = list(self._tree.get_children(""))
+        if not items:
+            return
+        # same column -> toggle direction; new column -> default high->low
+        if self._sort_col == col_id:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_col = col_id
+            self._sort_reverse = True
+
+        keyed = [(self._row_sort_key(it, col_id), it) for it in items]
+        blanks   = [it for k, it in keyed if k[0] == 2]
+        nonblank = [(k, it) for k, it in keyed if k[0] != 2]
+        nonblank.sort(key=lambda x: x[0], reverse=self._sort_reverse)
+        ordered = [it for _, it in nonblank] + blanks   # blanks always last
+
+        for idx, it in enumerate(ordered):
+            self._tree.move(it, "", idx)
+
+        self._hovered_item = None
+        self._restripe()
+        self._update_heading_arrows()
+
+    def _restripe(self):
+        """Re-apply zebra striping after a reorder, preserving score colours."""
+        for idx, item in enumerate(self._tree.get_children("")):
+            tags = self._tree.item(item, "tags")
+            cur = tags[0] if tags else "alt0"
+            if cur in ("high", "mid"):
+                continue
+            self._tree.item(item, tags=("alt" if idx % 2 else "alt0",))
+
+    def _update_heading_arrows(self):
+        for col_id, label, _w in MAIN_COLUMNS:
+            if col_id == self._sort_col:
+                arrow = " ▼" if self._sort_reverse else " ▲"
+                self._tree.heading(col_id, text=label + arrow)
+            else:
+                self._tree.heading(col_id, text=label)
+
     # ── 掃描 ──────────────────────────────────────────────────────────────────
 
-    def _start_scan(self):
-        self._scan_btn.config(state=tk.DISABLED, text="掃描中…")
+    def _resolve_selected_mode(self):
+        """Map the combobox label back to its English mode key."""
+        selected_label = self._mode_var.get()
+        for m in self._scan_modes:
+            if m["label"] == selected_label:
+                return m["key"]
+        return self._scan_modes[0]["key"] if self._scan_modes else "mode_squeeze"
+
+    def _reset_for_run(self):
+        """Shared UI reset before a scan or a manual lookup."""
         self._ai_btn.config(state=tk.DISABLED)
         self._mode_combo.config(state=tk.DISABLED)
         self._last_result = None
         self._row_data.clear()
         self._hovered_item = None
+        self._sort_col = None
+        self._sort_reverse = False
         self._prog_var.set(0)
         self._count_var.set("")
         for row in self._tree.get_children():
             self._tree.delete(row)
+        self._update_heading_arrows()
 
-        # resolve selected label -> English key
-        selected_label = self._mode_var.get()
-        selected_mode  = self._scan_modes[0]["key"] if self._scan_modes else "mode_squeeze"
-        for m in self._scan_modes:
-            if m["label"] == selected_label:
-                selected_mode = m["key"]
-                break
+    def _start_scan(self):
+        self._scan_btn.config(state=tk.DISABLED, text="掃描中…")
+        self._manual_btn.config(state=tk.DISABLED)
+        self._reset_for_run()
 
         ScanWorker(
             on_progress=self._cb_progress,
             on_result=self._cb_result,
             on_error=self._cb_error,
             on_done=self._cb_done,
-            scan_mode=selected_mode,
+            scan_mode=self._resolve_selected_mode(),
+        ).start()
+
+    def _start_single_scan(self):
+        code = self._manual_var.get().strip()
+        if not code.isdigit() or not (4 <= len(code) <= 6):
+            self._status_var.set("請輸入有效股票代號（4-6 位數字）")
+            return
+        self._manual_btn.config(state=tk.DISABLED, text="分析中…")
+        self._scan_btn.config(state=tk.DISABLED)
+        self._reset_for_run()
+
+        SingleStockWorker(
+            stock_id=code,
+            on_progress=self._cb_progress,
+            on_result=self._cb_result,
+            on_error=self._cb_error,
+            on_done=self._cb_done,
+            scan_mode=self._resolve_selected_mode(),
         ).start()
 
     def _cb_progress(self, current, total, message):
@@ -498,8 +617,11 @@ class ScannerApp(tk.Tk):
                     row.get("Close_Price",          ""),
                     row.get("Suggested_Buy_Price")  if row.get("Suggested_Buy_Price") else "-",
                     row.get("Strict_Stop_Loss")     if row.get("Strict_Stop_Loss")    else "-",
+                    "{:.1f}%".format(row.get("Risk_Pct"))
+                        if row.get("Risk_Pct") is not None else "-",
                     row.get("Explosion_Score",      ""),
                     _fmt_rs(row.get("RS_Score")),
+                    _fmt_gain(row.get("Gain_3M_Pct")),
                     "{}%".format(row.get("Dist_52W_High_Pct"))
                         if row.get("Dist_52W_High_Pct") is not None else "-",
                     _fmt_gap(row.get("Sup_Gap_Pct")),
@@ -524,6 +646,7 @@ class ScannerApp(tk.Tk):
 
     def _cb_done(self):
         self.after(0, lambda: self._scan_btn.config(state=tk.NORMAL, text="開始掃描"))
+        self.after(0, lambda: self._manual_btn.config(state=tk.NORMAL, text="分析"))
         self.after(0, lambda: self._mode_combo.config(state="readonly"))
         self.after(0, lambda: self._prog_var.set(int(self._progressbar.cget("maximum"))))
 

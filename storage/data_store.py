@@ -142,6 +142,31 @@ def batch_latest_dates(file_path: Path, stock_ids: list) -> dict:
     return result
 
 
+def batch_latest_date_strings(file_path: Path, stock_ids: list) -> dict:
+    """
+    One query: return {stock_id: 'YYYY-MM-DD'} (the latest stored date) for every
+    stock that has data. Used to detect staleness by comparing against the latest
+    trading day, rather than a fixed age threshold.
+    """
+    if not file_path.exists() or not stock_ids:
+        return {}
+    placeholders = ",".join("?" for _ in stock_ids)
+    result = {}
+    try:
+        with sqlite3.connect(file_path) as conn:
+            rows = conn.execute(
+                "SELECT stock_id, MAX(date) FROM data "
+                "WHERE stock_id IN ({}) GROUP BY stock_id".format(placeholders),
+                stock_ids,
+            ).fetchall()
+        for sid, max_date in rows:
+            if max_date:
+                result[sid] = str(max_date)[:10]
+    except Exception:
+        pass
+    return result
+
+
 def batch_row_counts(file_path: Path, stock_ids: list) -> dict:
     """
     One query: return {stock_id: bar_count} for every stock_id that has data.
@@ -164,6 +189,54 @@ def batch_row_counts(file_path: Path, stock_ids: list) -> dict:
     except Exception:
         pass
     return result
+
+
+def bulk_upsert_stocks(
+    file_path: Path,
+    frames: dict,
+    date_col: str = "date",
+    key_cols: list = None,
+) -> None:
+    """
+    Upsert many stock frames for a stock-keyed file in ONE connection/transaction.
+
+    frames : {stock_id: new_df}
+    Replaces the per-stock upsert_and_trim loop (which opened 2 connections per
+    stock) so a 200-stock fetch costs a single read query + a single write txn.
+    """
+    if not frames:
+        return
+    if key_cols is None:
+        key_cols = ["date", "stock_id"]
+
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    sids = list(frames.keys())
+    existing_map = bulk_load_stocks(file_path, sids)   # one query for all
+    cutoff = _get_cutoff_date()
+
+    with sqlite3.connect(file_path, timeout=30) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        for sid, new_df in frames.items():
+            if new_df is None or new_df.empty:
+                continue
+            existing = existing_map.get(sid, pd.DataFrame())
+            if existing.empty:
+                combined = new_df.copy()
+            else:
+                combined = pd.concat([existing, new_df], ignore_index=True)
+                combined = combined.drop_duplicates(subset=key_cols, keep="last")
+
+            combined[date_col] = pd.to_datetime(combined[date_col], errors="coerce")
+            combined = combined[combined[date_col] >= cutoff].copy()
+            combined[date_col] = combined[date_col].dt.strftime("%Y-%m-%d")
+            combined = combined.sort_values(by=key_cols).reset_index(drop=True)
+
+            try:
+                conn.execute("DELETE FROM data WHERE stock_id = ?", (sid,))
+            except Exception:
+                pass  # table may not exist yet; the append below creates it
+            combined.to_sql("data", conn, if_exists="append", index=False)
+        _ensure_index(conn)
 
 
 def bulk_load_stocks(file_path: Path, stock_ids: list) -> dict:

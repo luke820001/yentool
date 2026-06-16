@@ -131,20 +131,92 @@ def apply_scan_mode(df, selected_mode):
         mask = have_prices & liq & wide_bar & strong_up & near_high & vol_surge & fast_trend
         return df[mask].reset_index(drop=True)
 
+    if selected_mode == "mode_momentum_leader":
+        # Pre-Launch Momentum (forward-looking, NOT a past-winners list).
+        #
+        # Derived empirically from price_volume.db: for 665 cases where a stock
+        # rose >= 30% within 20 trading days, the pre-launch fingerprint was
+        # *momentum continuation*, not quiet consolidation. The features that
+        # actually separated launch days from ordinary days (and validated with
+        # lift ~1.7 / hit-rate 27% vs 16% base) were:
+        #   above 60MA, MA bull stack (5>10>20), 3-month gain already positive,
+        #   1-month still rising, and up-day volume bias. (Box tightness / volume
+        #   dry-up showed NO predictive edge here, so they are intentionally out.)
+        ma5    = _safe_num(df, "MA5",          0.0)
+        ma10   = _safe_num(df, "MA10",         0.0)
+        ma20   = _safe_num(df, "MA20",         0.0)
+        bias   = _safe_num(df, "Volume_Bias",  0.0)
+        gain60 = _safe_num(df, "Gain_3M_Pct",  float("-inf"))
+        gain20 = _safe_num(df, "Gain_1M_Pct",  float("-inf"))
+        mask = (
+            (close > ma60) &              # established uptrend
+            (ma5 > ma10) & (ma10 > ma20) &  # short-term bull stack
+            (gain60 >= 20.0) &            # 3-month momentum established
+            (gain20 >= 5.0) &             # still rising near-term (not stalled)
+            (bias >= 0.50) &              # up-day volume dominates (accumulation)
+            (vol_ma20 > 300)              # liquidity floor
+        )
+        return df[mask].reset_index(drop=True)
+
     # Unknown mode: return unfiltered
     return df
 
 
+# Per-mode ranking key. Momentum modes must NOT be ranked by Explosion_Score:
+# that score rewards tight consolidation + volume dry-up, which is the inverse
+# of a breakout/runner, so the strongest candidates would sink to the bottom.
+_SORT_KEYS = {
+    "mode_squeeze":         "Explosion_Score",
+    "mode_bottom":          "Explosion_Score",
+    "mode_breakout":        "RS_Score",
+    "mode_short_explosion": "RS_Score",
+    "mode_momentum_leader": "Gain_3M_Pct",
+}
+
+
+def sort_for_mode(df, selected_mode):
+    """Rank rows by a key appropriate to the mode (descending)."""
+    if df is None or df.empty:
+        return df
+    key = _SORT_KEYS.get(selected_mode, "Explosion_Score")
+    if key not in df.columns:
+        return df
+    score = pd.to_numeric(df[key], errors="coerce").fillna(float("-inf"))
+    return (
+        df.assign(_sort_key=score)
+          .sort_values("_sort_key", ascending=False)
+          .drop(columns="_sort_key")
+          .reset_index(drop=True)
+    )
+
+
+# Entry/stop parameters, tuned on price_volume.db (debug_stop_backtest.py).
+# Backtest finding: a structural stop (MA10/3-day low) often lands 1-2% below
+# entry on extended names and gets shaken out 30%+ of the time on noise (the
+# "bought then immediately stopped out" problem). Stops of ~8-13% cut premature
+# exits to ~10-20% and raise expectancy. So the structural stop is kept but
+# CLAMPED into a sane risk band, and entry is a shallow dip (not a deep MA5 dip
+# that never fills and underperforms).
+ENTRY_BUFFER = 0.02   # suggest entry ~2% below close (realistic limit fill)
+MIN_STOP_PCT = 0.06   # never tighter than 6% below entry (avoid instant shakeout)
+MAX_STOP_PCT = 0.13   # never risk more than 13% per trade
+
+
 def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
     """
-    Append Suggested_Buy_Price and Strict_Stop_Loss to the result DataFrame.
+    Append Suggested_Buy_Price, Strict_Stop_Loss and Risk_Pct.
 
     Suggested_Buy_Price
-      breakout / short_explosion : MA5  (buy the pullback to 5-day line)
-      squeeze  / bottom          : min(Close_Price, MA20)  (enter in the safe zone)
+      momentum (breakout / short_explosion / momentum_leader):
+          close * (1 - ENTRY_BUFFER) -- buy a shallow dip near price.
+      consolidation (squeeze / bottom):
+          min(Close_Price, MA20)     -- enter in the value zone.
 
     Strict_Stop_Loss
-      max(Min_Price_3, MA10)  — break below = momentum destroyed
+      structural support = max(Min_Price_3, MA10), then CLAMPED so the distance
+      below the entry stays within [MIN_STOP_PCT, MAX_STOP_PCT]. This guarantees
+      stop < buy with breathing room (fixes stop >= buy and stops that are too
+      tight). Risk_Pct exposes the resulting distance for sizing.
     """
     if df is None or df.empty:
         return df
@@ -152,13 +224,12 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
     df = df.copy()
 
     close = _safe_num(df, "Close_Price", 0.0)
-    ma5   = _safe_num(df, "MA5",         0.0)
     ma10  = _safe_num(df, "MA10",        0.0)
     ma20  = _safe_num(df, "MA20",        0.0)
     min3  = _safe_num(df, "Min_Price_3", 0.0)
 
-    if scan_mode in ("mode_breakout", "mode_short_explosion"):
-        buy = ma5.where(ma5 > 0, close)
+    if scan_mode in ("mode_breakout", "mode_short_explosion", "mode_momentum_leader"):
+        buy = close * (1 - ENTRY_BUFFER)
     else:
         # take the lower of close and MA20; fall back to close when MA20 is 0
         stacked = pd.concat(
@@ -167,13 +238,21 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
         stacked.columns = ["c", "m"]
         buy = stacked.min(axis=1).fillna(close)
 
-    # stop = max(Min_Price_3, MA10); if either is 0/NaN use the other
-    stacked_stop = pd.concat(
+    buy = buy.where(buy > 0, close)
+
+    # structural support = max(Min_Price_3, MA10); NaN when both are missing
+    struct = pd.concat(
         [min3.replace(0, float("nan")), ma10.replace(0, float("nan"))], axis=1
-    )
-    stacked_stop.columns = ["a", "b"]
-    stop = stacked_stop.max(axis=1).fillna(0)
+    ).max(axis=1)
+
+    # clamp the stop into [buy*(1-MAX), buy*(1-MIN)] so it is always safely below
+    # entry and never tighter than MIN_STOP_PCT
+    lo = buy * (1 - MAX_STOP_PCT)
+    hi = buy * (1 - MIN_STOP_PCT)
+    stop = struct.clip(lower=lo, upper=hi)
+    stop = stop.where(stop.notna(), hi)   # no structure -> use the MIN_STOP band
 
     df["Suggested_Buy_Price"] = buy.round(2)
     df["Strict_Stop_Loss"]    = stop.round(2)
+    df["Risk_Pct"]            = ((buy - stop) / buy * 100).round(1)
     return df
