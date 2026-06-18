@@ -2,7 +2,7 @@
   "modes": [
     {
       "key": "mode_squeeze",
-      "label": "Classic Squeeze - 經典爆發蓄勢"
+      "label": "Coiling - 低波蓄勢(高勝率穩健)"
     },
     {
       "key": "mode_breakout",
@@ -10,7 +10,7 @@
     },
     {
       "key": "mode_bottom",
-      "label": "Bottom Accumulation - 跌深大戶建倉"
+      "label": "Strong Pullback - 強勢回檔買點"
     },
     {
       "key": "mode_short_explosion",

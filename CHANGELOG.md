@@ -2,6 +2,170 @@
 
 ---
 
+## 2026-06-18
+
+### scoring: recalibrate Surge_Score to spread (it was saturating)
+
+**File:** `analyzer/trend_analysis.py`
+
+Among the filtered candidates shown in a scan the score sat at 80-100 (42% >=80),
+because the normalization caps were too low (ATR maxed at 6%, momentum at 50%).
+Widened the denominators (ATR/0.11, ret60/1.0, ret20/0.45, dist60/0.45) so the
+candidate median is ~50 and p90 ~73, while the >=30% top-decile lift is unchanged
+(3.34 -> 3.31). See `debug_surge_dist.py`.
+
+### chip: free whole-market shareholding (TDCC) replaces paid FinMind
+
+**Files:** `ingestion/tdcc_holders.py` (new), `scanner/chip_verifier.py`,
+`gui/app.py`
+
+`大戶/散戶持股%` was blank ("-") because the FinMind chip path is paid/disabled.
+New `ingestion/tdcc_holders.py` pulls the TDCC open-data shareholding-distribution
+(one request, whole market ~3990 stocks, weekly, free) and derives large-holder
+(>=400 lots) / retail (<=50 lots) percentages, with week-over-week change building
+over time. Wired into the scan as a single weekly-cached request.
+
+### chip: daily institutional net buy/sell (TWSE T86 + TPEX), free
+
+**Files:** `ingestion/inst_trades.py` (new), `scanner/chip_verifier.py`,
+`gui/app.py`
+
+New `ingestion/inst_trades.py` fetches the three-institution daily net buy/sell
+(foreign / trust / dealer) for the whole market -- TWSE T86 (dated, supports
+backfill) + TPEX openapi -- in lots, storing daily snapshots. Adds `Foreign_Net`,
+`Trust_Net`, `Foreign_Net_5D`, `Inst_Buy_Days` columns and a detail-panel section.
+TPEX dates are ROC (`1150618`) and are converted to Gregorian.
+
+### chip: validated -- holdings LEVEL is not predictive; flow is a confirmation
+
+**Files:** `gui/app.py`, validation scripts (`debug_chip_vs_return.py`,
+`debug_inst_backtest.py`)
+
+- The static large-holder / retail percentage does NOT predict moves: cross-
+  sectionally large% correlates -0.06 with trailing return (very-high large% =
+  locked/dead float), retail% +0.07. So holdings level was NOT added to the score.
+- Backtested foreign flow on 76 backfilled days: foreign 5-day net as a FILTER on
+  high-surge candidates raises precision (23.5% -> 24.9% for a >=30% move), but
+  BLENDING it into the score additively HURTS (down to ~22-23%). So Surge_Score
+  stays pure price/volume; `Foreign_Net_5D` is surfaced as a main-table
+  confirmation column (prefer foreign-buying among high-surge names).
+
+---
+
+## 2026-06-17
+
+### scoring: replace Explosion_Score with Surge_Score as the headline metric
+
+**Files:** `analyzer/trend_analysis.py` (new `calc_surge_score`),
+`scanner/chip_verifier.py`, `scanner/scan_mode.py`, `gui/app.py`
+
+**Problem:** Backtests on the full-universe research db (6 years, 1946 stocks)
+showed `Explosion_Score` (box-tightness + volume dry-up + bias) is *inverted* —
+its top decile had a lift of **0.47** for a >=30%/20-day move (anti-predictive).
+Ranking by it picked the worst stocks. Validated across overlapping, independent
+(non-overlapping), and cross-sectional tests; the inversion held every year.
+
+**Fix:** New `Surge_Score` (0-100) = momentum x volatility x volume, gated by
+trend (price > 60MA). Components by validated power: ATR(volatility) lift 2.54,
+3-/1-month momentum ~2.3, up-volume bias minor; distance-to-52w-high and box
+tightness carry NO signal and are excluded. Top-decile lift **3.34** for a
+>=30% move. Added `ATR_Pct` column. GUI headline column `爆發分` -> `噴發分`,
+plus a `波動%` column. `Explosion_Score` kept as `蓄勢分` for the squeeze mode.
+Momentum modes now rank by `Surge_Score` (`_SORT_KEYS`).
+
+### scan_mode: forward-looking momentum_leader + honest mode relabels
+
+**Files:** `scanner/scan_mode.py`, `config/scan_modes.json`,
+`scanner/market_filter.py`, `scanner/chip_verifier.py`
+
+- **New `mode_momentum_leader`** ("起漲前動能"): empirically-derived pre-launch
+  momentum screen (above 60MA, MA stack, 3M gain >=20%, 1M >=5%, up-volume bias).
+  Added `Gain_3M_Pct` / `Gain_1M_Pct`.
+- **`mode_bottom` rebuilt** from falling-knife (lift 0.83) to **Strong Pullback**
+  ("強勢回檔買點": uptrend leader dipped to ~20MA) — backtested lift **1.55**.
+- **`mode_squeeze` relabeled** "經典爆發蓄勢" -> "低波蓄勢(高勝率穩健)" (lift 0.30
+  for explosions; it is a low-volatility steady mode, not an explosion screen).
+- **Mode-aware ranking** (`sort_for_mode`): momentum modes were being sorted by
+  `Explosion_Score`, which is inverse-correlated; now ranked by `Surge_Score`.
+
+### data fetch: batch yfinance + bulk write, freshness, decouple chip
+
+**Files:** `ingestion/price_volume_multi.py`, `storage/data_store.py`,
+`scanner/chip_verifier.py`, `config/settings.py`
+
+- **Batch yfinance** (`fetch_yfinance_batch`, `multi_fetch_and_save_batch`) + a
+  single-transaction `bulk_upsert_stocks`: full-market fetch ~70s -> ~15s.
+- **Freshness fix:** staleness is now judged against the latest trading day
+  (`_latest_trading_day`, 14:00 EOD cutoff + weekend rollback) instead of a fixed
+  2-day window, so a scan picks up TODAY's bar instead of lagging up to 2 days.
+- **Chip (Cond_B) decoupled** from scans (`CHIP_FETCH_IN_SCAN`, default off):
+  the FinMind 1.5s-throttled serial loop no longer hangs the scan; cache-only.
+- **yfinance log noise silenced** (404/delisted on the .TW-vs-.TWO probe).
+
+### calc fixes: stale rolling columns, support, dryup; full audit
+
+**Files:** `scanner/chip_verifier.py`, `analyzer/support_resistance.py`,
+`analyzer/signal_evaluator.py`
+
+- **Max_Price_20 drift fix:** stored rolling-derived columns could drift out of
+  sync with re-fetched / auto-adjusted close, feeding a stale prior-high into the
+  breakout signal. Now recomputed from raw close/volume in the analysis loop.
+- **Adaptive support:** added `Support_20L` and `Support_Used` = nearest level
+  below price among MA10/MA20/20-day low. The old 60-day low sat 30-50% under
+  price for runners (8042: 距支撐 283% -> ~18%) and was not actionable.
+- **Volume_Dryup smoothed** to a 3-day average volume (was single-day), so
+  Explosion/Cond_A no longer whipsaw on one spike (3236 case).
+- **Full column audit** (`debug_audit_all.py`): all other columns verified
+  correct to rounding (MAs, S/R, gaps, gains, MACD, Donchian, booleans).
+
+### trade plan: stop-below-buy invariant + risk-banded stop
+
+**File:** `scanner/scan_mode.py`
+
+`add_trade_columns` previously could produce `stop >= buy` (e.g. 8042) and stops
+1-2% from entry that get shaken out. Backtest: tight stops on volatile momentum
+names get stopped prematurely ~30%. Fix: structural stop clamped into a
+[6%, 13%] band below entry (always below buy, never too tight); added `Risk_Pct`.
+
+### GUI: manual lookup, sortable columns, regime banner, trend report
+
+**Files:** `gui/app.py`, `gui/scan_worker.py`, `scanner/market_regime.py` (new),
+`scanner/regime_report.py` (new), `scanner/result_export.py` (new),
+`scanner/market_filter.py`
+
+- **Manual single-stock lookup** button: resolves market + Chinese name from the
+  live snapshot (with a persistent `stock_names.json` cache — first lookup caches
+  ~11500 names, later lookups are instant), runs the full pipeline, shows the row.
+- **Clickable column-header sorting** by underlying value (numbers/bools/blanks),
+  toggle direction, arrow indicator.
+- **Market-regime banner:** TAIEX above/below its MAs -> momentum-edge tailwind
+  vs headwind (the 2022 bear collapsed the edge to lift ~1.07).
+- **"趨勢報告" button:** refreshes the research db (incremental) and writes a
+  recent-2y explosion-fingerprint report (`data/scan_results/regime_report.md`).
+- **Scan result CSV export** after every full scan (`scan_result_latest.csv`,
+  latest only, utf-8-sig for Excel) with all 57+ computed columns.
+
+### research infrastructure: full-universe multi-year backtest db
+
+**Files:** `build_research_db.py` (new), `scanner/regime_report.py` (new),
+plus validation scripts (`debug_*.py`)
+
+- **`build_research_db.py`:** builds/maintains `data/research_prices.db` — the
+  full listed universe (~1946 stocks) with ~6 years history (spans the 2022
+  bear), stored separately from the live scan db. Self-healing & incremental:
+  each run fills only the gaps (new/short -> full backfill; stale -> top-up;
+  fresh -> skip), recomputing derived columns over the full merged series.
+- Used to re-validate every conclusion on **unbiased, multi-regime** data after
+  the audit found the live db was a momentum-survivor sample (median +99.5%
+  return, 49% of stocks doubled, 0% halved — and no bear market).
+
+**Key empirical findings (drive the above):** momentum-continuation (not quiet
+consolidation) precedes explosions; ATR is the single best predictor of big
+moves; the edge is regime-robust in trending years (~1.4x) but collapses in the
+2022 bear; +10%/20d is noise now (base 24%), the meaningful move is >=30% (5%).
+
+---
+
 ## 2026-06-14
 
 ### price/volume: multi-source fetcher with yfinance + TWSE/TPEX official API

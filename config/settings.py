@@ -15,6 +15,10 @@ BROKER_BRANCH_FILE = DATA_DIR / "broker_branch.db"
 SIGNAL_LOG_FILE = DATA_DIR / "signal_log.db"
 TAIEX_FILE      = DATA_DIR / "taiex.db"
 
+# --- Scan result export (latest version only, for reviewing calculations) ---
+SCAN_RESULTS_DIR = DATA_DIR / "scan_results"
+SCAN_RESULT_FILE = SCAN_RESULTS_DIR / "scan_result_latest.csv"
+
 # --- Rolling Window ---
 # ~400 calendar days => ~270 trading bars. Required so the 52-week-high
 # (252-bar) and RS (63-bar) calculations have enough history; 90 days only

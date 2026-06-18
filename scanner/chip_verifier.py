@@ -3,10 +3,12 @@ from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 from ingestion.price_volume_multi import multi_fetch_and_save, multi_fetch_and_save_batch
 from ingestion.large_holder import LargeHolderFetcher
+from ingestion.tdcc_holders import update_tdcc_holdings
+from ingestion.inst_trades import update_inst_trades, get_inst_features
 from ingestion.market_index import MarketIndexFetcher
 from analyzer.signal_evaluator import _evaluate_conditions
 from analyzer.support_resistance import calc_all
-from analyzer.trend_analysis import calc_trend_analysis
+from analyzer.trend_analysis import calc_trend_analysis, calc_surge_score
 from storage.data_store import (
     load_sheet, batch_latest_dates, batch_latest_date_strings,
     batch_row_counts, bulk_load_stocks,
@@ -157,7 +159,9 @@ def _get_chip_data(df: pd.DataFrame) -> dict:
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.sort_values("date").reset_index(drop=True)
 
-    if len(df) < 2:
+    # One weekly snapshot is enough to show holdings; the change columns are
+    # simply None until a second week is stored.
+    if len(df) < 1:
         return defaults
 
     latest = df.iloc[-1]
@@ -258,26 +262,25 @@ def verify_candidates(
         with ThreadPoolExecutor(max_workers=6) as pool:
             list(pool.map(_fetch_pv_fallback, missing))
 
-    # ── Phase 2b: chip fetch (OPTIONAL, off by default — see settings) ───────
-    # FinMind shareholding is throttled to ~1 req/1.5s; fetching it for every
-    # candidate serially adds minutes and used to make the scan appear frozen
-    # (this phase emits no progress). Cond_B is optional, so by default we use
-    # only cached chip data and never block the scan on the network.
-    if not (CHIP_FETCH_IN_SCAN and FINMIND_TOKEN):
-        reason = "no FINMIND_TOKEN" if not FINMIND_TOKEN else "inline fetch disabled"
-        print("  [chip] {} -- using cached chip only".format(reason))
-    else:
-        stale_chip = [sid for sid in candidate_ids
-                      if not _is_fresh(chip_ages, sid, CHIP_CACHE_DAYS)]
-        print("  chip cache hits: {}/{}  fetching: {}".format(
-            total - len(stale_chip), total, len(stale_chip)))
-        for i, stock_id in enumerate(stale_chip, 1):
-            if _chip_quota_exhausted:
-                break
-            if progress_callback:
-                progress_callback(i, len(stale_chip),
-                                  "Fetching chip {} ({}/{})".format(stock_id, i, len(stale_chip)))
-            _fetch_chip_safe(lh_fetcher, stock_id)
+    # ── Phase 2b: chip (集保) from TDCC free open data ───────────────────────
+    # One whole-market weekly request (no quota, no per-stock loop) gives every
+    # stock's large-holder / retail percentages. Replaces the paid, throttled
+    # FinMind path that left this column blank.
+    if progress_callback:
+        progress_callback(total, total, "Updating shareholding (TDCC)...")
+    try:
+        tdcc_date = update_tdcc_holdings()
+        print("  [chip] TDCC holdings up to {}".format(tdcc_date))
+    except Exception as e:
+        print("  [chip] TDCC update failed: {}".format(str(e)[:80]))
+
+    # Daily three-institution net buy/sell (TWSE T86 + TPEX), whole-market, free.
+    try:
+        inst_date = update_inst_trades()
+        print("  [inst] institutional net up to {}".format(inst_date))
+    except Exception as e:
+        print("  [inst] update failed: {}".format(str(e)[:80]))
+    inst_feats = get_inst_features(candidate_ids)
 
     # ── Phase 3: bulk load — two queries for all stocks ───────────────────────
     if progress_callback:
@@ -308,6 +311,17 @@ def verify_candidates(
         merged.sort_values("date", inplace=True)
         merged.reset_index(drop=True, inplace=True)
 
+        # Recompute rolling-derived columns from the raw close/volume. The stored
+        # ones are computed at fetch time and can drift out of sync with prices
+        # that were later re-fetched or back-adjusted (auto_adjust), which would
+        # otherwise feed a stale prior-high into the breakout signal.
+        if "close" in merged.columns:
+            merged["Max_Price_20"] = merged["close"].rolling(20, min_periods=1).max()
+            merged["Min_Price_20"] = merged["close"].rolling(20, min_periods=1).min()
+        if "Volume_Lot" in merged.columns:
+            merged["MA5_Volume"]    = merged["Volume_Lot"].rolling(5,  min_periods=1).mean()
+            merged["Min_Volume_20"] = merged["Volume_Lot"].rolling(20, min_periods=1).min()
+
         _t0 = _time.perf_counter()
         evaluated = _evaluate_conditions(merged)
         _t_eval += _time.perf_counter() - _t0
@@ -331,6 +345,7 @@ def verify_candidates(
 
         _t0 = _time.perf_counter()
         ta = calc_trend_analysis(merged, taiex_df=taiex_df if not taiex_df.empty else None)
+        ss = calc_surge_score(merged)
         _t_ta += _time.perf_counter() - _t0
 
         _t0 = _time.perf_counter()
@@ -361,6 +376,8 @@ def verify_candidates(
             "Close_Price":        round(float(latest.get("close", 0)), 2),
             "Explosion_Score":    round(float(latest.get("Explosion_Score", 0)), 1)
                                   if pd.notna(latest.get("Explosion_Score")) else 0.0,
+            "Surge_Score":        ss.get("Surge_Score"),
+            "ATR_Pct":            ss.get("ATR_Pct"),
             "RS_Score":           ta.get("RS_Score"),
             "Gain_3M_Pct":        gain_3m,
             "Gain_1M_Pct":        gain_1m,
@@ -385,12 +402,18 @@ def verify_candidates(
             "Large_Pct_Change":   chip["Large_Pct_Change"],
             "Retail_Pct":         chip["Retail_Pct"],
             "Retail_Pct_Change":  chip["Retail_Pct_Change"],
+            "Foreign_Net":        inst_feats.get(stock_id, {}).get("Foreign_Net"),
+            "Trust_Net":          inst_feats.get(stock_id, {}).get("Trust_Net"),
+            "Foreign_Net_5D":     inst_feats.get(stock_id, {}).get("Foreign_Net_5D"),
+            "Inst_Buy_Days":      inst_feats.get(stock_id, {}).get("Inst_Buy_Days"),
             "MA5":                ta.get("MA5"),
             "MA10":               ta.get("MA10"),
             "MA20":               sr.get("MA20"),
             "MA60":               sr.get("MA60"),
             "Resist_60H":         sr.get("Resist_60H"),
             "Support_60L":        sr.get("Support_60L"),
+            "Support_20L":        sr.get("Support_20L"),
+            "Support_Used":       sr.get("Support_Used"),
             "VP_Zone1":           sr.get("VP_Zone1"),
             "VP_Zone2":           sr.get("VP_Zone2"),
             "VP_Zone3":           sr.get("VP_Zone3"),

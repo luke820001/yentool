@@ -48,7 +48,11 @@ def _calc_range_tightness(df: pd.DataFrame) -> pd.Series:
 def _calc_volume_dryup(df: pd.DataFrame) -> pd.Series:
     vol = pd.to_numeric(df["Volume_Lot"], errors="coerce")
     ma20 = vol.rolling(window=MA20_VOLUME_WINDOW, min_periods=MA20_VOLUME_WINDOW).mean()
-    ratio = vol / ma20.replace(0, float("nan"))
+    # 3-day average volume (not a single noisy day) over the 20-day average, so
+    # the ratio -- and Explosion/Cond_A built on it -- does not whipsaw on one
+    # spike (the 3236 case: single-day volume swung the score 21 -> 7 -> 10).
+    vol3 = vol.rolling(window=3, min_periods=1).mean()
+    ratio = vol3 / ma20.replace(0, float("nan"))
     return ratio.round(4)
 
 

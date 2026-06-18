@@ -1,4 +1,68 @@
+import numpy as np
 import pandas as pd
+
+
+def _clip01(x):
+    try:
+        return max(0.0, min(1.0, float(x)))
+    except Exception:
+        return 0.0
+
+
+# --- Explosive-potential ('surge') score -------------------------------------
+
+def calc_surge_score(df: pd.DataFrame) -> dict:
+    """
+    Forward-looking explosive-potential score (0-100): momentum x volatility x
+    volume, gated by trend. Derived empirically on the full-universe research db
+    (recent 2y): top-decile lift ~3.3 for catching a >=30%/20-day move, vs the
+    old Explosion_Score which is anti-predictive. Components by validated power:
+    ATR(volatility) and 3-/1-month momentum dominate; up-volume bias is minor;
+    distance-to-52w-high and box tightness carry NO signal and are excluded.
+    """
+    out = {"Surge_Score": None, "ATR_Pct": None}
+    c = pd.to_numeric(df.get("close", pd.Series(dtype=float)), errors="coerce")
+    h = pd.to_numeric(df.get("high", pd.Series(dtype=float)), errors="coerce")
+    l = pd.to_numeric(df.get("low", pd.Series(dtype=float)), errors="coerce")
+    if "Volume_Lot" not in df.columns or len(c) < 64:
+        return out
+    v = pd.to_numeric(df["Volume_Lot"], errors="coerce")
+
+    cur = float(c.iloc[-1])
+    if cur <= 0:
+        return out
+    ma60 = c.rolling(60, min_periods=60).mean().iloc[-1]
+    atr = ((h - l) / c).rolling(20).mean().iloc[-1]
+    out["ATR_Pct"] = round(float(atr) * 100, 2) if pd.notna(atr) else None
+
+    ret60 = cur / float(c.iloc[-64]) - 1 if float(c.iloc[-64]) > 0 else 0.0
+    ret20 = cur / float(c.iloc[-21]) - 1 if (len(c) >= 21 and float(c.iloc[-21]) > 0) else 0.0
+    dist60 = (cur - float(ma60)) / float(ma60) if (pd.notna(ma60) and ma60 > 0) else 0.0
+    above60 = 1.0 if (pd.notna(ma60) and cur > float(ma60)) else 0.0
+
+    prev = c.shift(1)
+    upv = v.where(c > prev, 0.0); dnv = v.where(c < prev, 0.0)
+    tot = upv.rolling(10).sum() + dnv.rolling(10).sum()
+    bias = (upv.rolling(10).sum() / tot.replace(0, np.nan)).iloc[-1]
+    vsurge = (v.rolling(5).mean() / v.rolling(20).mean().shift(5)).iloc[-1]
+
+    # Normalization denominators are set so the score SPREADS across qualifying
+    # momentum candidates instead of saturating near 100. With tighter caps the
+    # whole filtered list scored 80-100 (uninformative); these wider caps put the
+    # candidate median near ~50 and p90 near ~73, while keeping the same >=30%
+    # top-decile lift (~3.3). See debug_surge_dist.py.
+    mom = (_clip01(ret60 / 1.0) * 0.5 + _clip01(dist60 / 0.45) * 0.3
+           + _clip01(ret20 / 0.45) * 0.2)
+    vola = _clip01(atr / 0.11) if pd.notna(atr) else 0.0
+    volu = 0.0
+    if pd.notna(bias):
+        volu += _clip01((bias - 0.5) / 0.45) * 0.6
+    if pd.notna(vsurge):
+        volu += _clip01((vsurge - 0.8) / 1.4) * 0.4
+
+    surge = (mom * 45 + vola * 35 + volu * 20) * above60
+    out["Surge_Score"] = round(float(surge), 1)
+    return out
 
 
 # --- Moving-average alignment ------------------------------------------------

@@ -1,9 +1,12 @@
+import json
 import time
 import warnings
 import requests
 import urllib3
 import pandas as pd
-from config.settings import PRICE_FILTER_MAX, VOLUME_TOP_N, PREFILTER_TOP_N
+from config.settings import PRICE_FILTER_MAX, VOLUME_TOP_N, PREFILTER_TOP_N, DATA_DIR
+
+_NAME_CACHE_FILE = DATA_DIR / "stock_names.json"
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -190,27 +193,51 @@ def apply_prefilter(df: pd.DataFrame, scan_mode: str = "") -> pd.DataFrame:
     return result
 
 
+def _load_name_cache() -> dict:
+    try:
+        return json.loads(_NAME_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _cache_names(df: pd.DataFrame, market: str, cache: dict) -> None:
+    for _, r in df.iterrows():
+        sid = str(r.get("stock_id", "")).strip()
+        nm = str(r.get("stock_name", "")).strip()
+        if sid and nm:
+            cache[sid] = [nm, market]
+
+
 def lookup_stock_info(stock_id: str):
     """
-    Resolve (stock_name, market) for a single code from the live exchange
-    snapshot. Uses the normalized-but-UNFILTERED data, so it also works for
-    codes the scan drops (ETFs, government stocks). Returns (stock_id, None)
+    Resolve (stock_name, market) for a single code. Checks a persistent local
+    cache first (instant, no network); on a miss, fetches both exchange
+    snapshots, caches EVERY name in them (~2000), then answers. Subsequent
+    lookups of any mainstream code are then offline. Returns (stock_id, None)
     when the code is not found on either board.
     """
     sid = str(stock_id).strip()
+    cache = _load_name_cache()
+    if sid in cache:
+        nm, mkt = cache[sid]
+        return nm, mkt
 
     tse = _normalize_tse(_fetch_json(TSE_URL))
     if not tse.empty:
-        hit = tse[tse["stock_id"].astype(str) == sid]
-        if not hit.empty:
-            return str(hit.iloc[0]["stock_name"]).strip(), "TSE"
-
+        _cache_names(tse, "TSE", cache)
     otc = _normalize_otc(_fetch_json(OTC_URL, verify_ssl=False))
     if not otc.empty:
-        hit = otc[otc["stock_id"].astype(str) == sid]
-        if not hit.empty:
-            return str(hit.iloc[0]["stock_name"]).strip(), "OTC"
+        _cache_names(otc, "OTC", cache)
 
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _NAME_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+    if sid in cache:
+        nm, mkt = cache[sid]
+        return nm, mkt
     return sid, None
 
 

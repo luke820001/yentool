@@ -27,13 +27,20 @@ def calc_horizontal_sr(df: pd.DataFrame) -> dict:
     # When today's close > prior high -> already broken out -> Res_Gap_Pct < 0.
     prior_high = high.iloc[:-1] if len(high) > 1 else high
 
-    # Support = 60-day low (matches the Support_60L name and the UI label).
+    # Support = 60-day low (long-term context) AND a recent 20-day low (the
+    # actionable support). For a stock that has already run, the 60-day low is
+    # the pre-run base and is useless for risk (8042: 距支撐 283%); the 20-day
+    # low sits near price and is what Sup_Gap_Pct should measure against.
     low60 = pd.to_numeric(
         tail60.get("low", pd.Series(dtype=float)), errors="coerce"
+    )
+    low20 = pd.to_numeric(
+        df.tail(20).get("low", pd.Series(dtype=float)), errors="coerce"
     )
     return {
         "Resist_60H":  _to_float(prior_high.max()),
         "Support_60L": _to_float(low60.min()),
+        "Support_20L": _to_float(low20.min()),
     }
 
 
@@ -130,7 +137,17 @@ def calc_all(df: pd.DataFrame) -> dict:
         result["Round_Level"] = None
 
     close = close_val if pd.notna(close_val) else 0.0
-    support = result.get("Support_60L") or 0.0
+    # Actionable support = the NEAREST level below the current price among the
+    # trailing moving averages (MA10/MA20) and the 20-day low. For a fast mover
+    # the rising MA catches the pullback; the lookback low sits far below and is
+    # not actionable (a parabolic stock's 20-day low can be 30-50% under price).
+    ma10 = pd.to_numeric(df["close"], errors="coerce").rolling(10, min_periods=1).mean().iloc[-1]
+    cands = [result.get("MA20"), result.get("Support_20L"),
+             float(ma10) if pd.notna(ma10) else None]
+    below = [float(x) for x in cands if x is not None and 0 < float(x) < float(close)]
+    support = max(below) if below else (result.get("Support_20L")
+                                        or result.get("Support_60L") or 0.0)
+    result["Support_Used"] = round(float(support), 2) if support else None
     resist = result.get("Resist_60H") or 0.0
     result.update(calc_squeeze_score(float(close), float(support), float(resist)))
     return result

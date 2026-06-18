@@ -32,13 +32,16 @@ def _make_rows():
         # GGG: weak volume bias (<0.5) -> excluded
         ("GGG", 100, 90, 99, 97, 95, 25.0,  8.0, 0.40, 1000, 30.0, 15.0),
     ]
+    # Surge_Score assigned so AAA > BBB among the kept rows, CCC highest overall
+    surge = {"AAA": 80.0, "BBB": 60.0, "CCC": 95.0, "DDD": 70.0,
+             "EEE": 40.0, "FFF": 30.0, "GGG": 20.0}
     return pd.DataFrame([
         {
             "Stock_ID": sid, "Stock_Name": sid, "Close_Price": c, "MA60": ma60,
             "MA5": ma5, "MA10": ma10, "MA20": ma20,
             "Gain_3M_Pct": g3, "Gain_1M_Pct": g1, "Volume_Bias": b,
             "Vol_MA20": v, "Explosion_Score": es, "RS_Score": rs,
-            "Min_Price_3": 94.0,
+            "Surge_Score": surge[sid], "Min_Price_3": 94.0,
         }
         for sid, c, ma60, ma5, ma10, ma20, g3, g1, b, v, es, rs in data
     ])
@@ -57,17 +60,17 @@ def test_leader_sort():
     out = apply_scan_mode(df, "mode_momentum_leader")
     out = sort_for_mode(out, "mode_momentum_leader")
     order = list(out["Stock_ID"])
-    assert order == ["AAA", "BBB"], order  # 35 > 22 by 3M gain
-    print("[PASS] pre-launch sorted by 3M gain desc:", order)
+    assert order == ["AAA", "BBB"], order  # 80 > 60 by Surge_Score
+    print("[PASS] pre-launch sorted by Surge_Score desc:", order)
 
 
-def test_breakout_sort_uses_rs():
+def test_momentum_sort_uses_surge():
     df = _make_rows()
     out = sort_for_mode(df, "mode_breakout")
     order = list(out["Stock_ID"])
-    # CCC has RS 70 (top), AAA 40 next; BBB has RS 5 (last)
-    assert order[0] == "CCC" and order[1] == "AAA" and order[-1] == "BBB", order
-    print("[PASS] breakout ranked by RS_Score (not explosion):", order)
+    # CCC Surge 95 top, AAA 80 next, GGG 20 last
+    assert order[0] == "CCC" and order[1] == "AAA" and order[-1] == "GGG", order
+    print("[PASS] momentum modes ranked by Surge_Score:", order)
 
 
 def test_squeeze_sort_uses_explosion():
@@ -118,7 +121,7 @@ def test_stop_below_buy_invariant():
 if __name__ == "__main__":
     test_leader_filter()
     test_leader_sort()
-    test_breakout_sort_uses_rs()
+    test_momentum_sort_uses_surge()
     test_squeeze_sort_uses_explosion()
     test_gain_formula()
     test_trade_columns_run()

@@ -52,8 +52,10 @@ MAIN_COLUMNS = [
     ("Suggested_Buy_Price",  "建議買入",  3.5),
     ("Strict_Stop_Loss",     "停損價",    3.5),
     ("Risk_Pct",             "風險%",     2.8),
-    ("Explosion_Score",      "爆發分",    3),
+    ("Surge_Score",          "噴發分",    3),
+    ("ATR_Pct",              "波動%",     3),
     ("RS_Score",             "RS超額%",   3.5),
+    ("Foreign_Net_5D",       "外資5日",   3.5),
     ("Gain_3M_Pct",          "3月漲幅%",  3.5),
     ("Dist_52W_High_Pct",    "距高點%",   3),
     ("Sup_Gap_Pct",          "距支撐%",   3),
@@ -69,6 +71,12 @@ _TOTAL_WEIGHT = sum(w for _, _, w in MAIN_COLUMNS)
 
 # ── 詳細面板分區 ─────────────────────────────────────────────────────────────
 DETAIL_SECTIONS = [
+    ("每日法人買賣超（張）", [
+        ("外資買賣超",    "Foreign_Net",     "{:+.0f}",  True),   # True = 正負上色
+        ("投信買賣超",    "Trust_Net",       "{:+.0f}",  True),
+        ("外資5日累計",   "Foreign_Net_5D",  "{:+.0f}",  True),
+        ("外資5日買超天", "Inst_Buy_Days",   "{:.0f}",   False),
+    ]),
     ("集保籌碼（週更新）", [
         ("400張+持股%",   "Large_Holder_Pct",  "{:.2f}%",  False),
         ("大戶週增減",    "Large_Pct_Change",  "{:+.4f}",  True),   # True = 正負上色
@@ -90,8 +98,10 @@ DETAIL_SECTIONS = [
         ("60MA",  "MA60", "{:.2f}", False),
     ]),
     ("壓力 / 支撐 / 量集中區", [
+        ("關鍵支撐", "Support_Used", "{:.2f}", False),
         ("60日高(壓)", "Resist_60H",  "{:.2f}", False),
-        ("60日低(撐)", "Support_60L", "{:.2f}", False),
+        ("20日低(近撐)", "Support_20L", "{:.2f}", False),
+        ("60日低(底)", "Support_60L", "{:.2f}", False),
         ("整數關卡",   "Round_Level", "{:.2f}", False),
         ("Zone 1",    "VP_Zone1",    "{:.2f}", False),
         ("Zone 2",    "VP_Zone2",    "{:.2f}", False),
@@ -101,7 +111,9 @@ DETAIL_SECTIONS = [
         ("跳空支撐", "Gap_Up_Sup", "{:.2f}", False),
         ("跳空壓力", "Gap_Dn_Res", "{:.2f}", False),
     ]),
-    ("原始技術指標", [
+    ("噴發要素 / 原始技術指標", [
+        ("波動度ATR%", "ATR_Pct",         "{:.2f}%", False),
+        ("蓄勢分",     "Explosion_Score", "{:.1f}",  False),
         ("箱型壓縮度", "Range_Tightness", "{:.4f}", False),
         ("量能萎縮比", "Volume_Dryup",    "{:.4f}", False),
         ("吸籌偏多度", "Volume_Bias",     "{:.4f}", False),
@@ -148,6 +160,16 @@ def _fmt_gain(val) -> str:
         return "-"
 
 
+def _fmt_net(val) -> str:
+    """法人買賣超（張）帶正負號千分位顯示。"""
+    if val is None:
+        return "-"
+    try:
+        return "{:+,.0f}".format(float(val))
+    except Exception:
+        return "-"
+
+
 def _score_tag(score) -> str:
     try:
         s = float(score)
@@ -179,12 +201,13 @@ class DetailDialog(tk.Toplevel):
         hdr = tk.Frame(self, bg=BG, padx=18, pady=14)
         hdr.pack(fill=tk.X)
 
-        score = row.get("Explosion_Score", 0)
+        score = row.get("Surge_Score")
+        score = score if score is not None else 0
         rs    = row.get("RS_Score")
         dist  = row.get("Dist_52W_High_Pct")
 
         tk.Label(hdr,
-                 text="{} {}  |  收盤 {}  |  爆發分 {}".format(
+                 text="{} {}  |  收盤 {}  |  噴發分 {}".format(
                      row.get("Stock_ID", ""), row.get("Stock_Name", ""),
                      row.get("Close_Price", "-"), score),
                  bg=BG, fg=ACCENT, font=(FONT, 15, "bold")).pack(anchor="w")
@@ -362,6 +385,15 @@ class ScannerApp(tk.Tk):
             state=tk.DISABLED, command=self._generate_ai_report)
         self._ai_btn.pack(side=tk.RIGHT, padx=(0, 10))
 
+        # Regime/trend report: export recent-2y explosion fingerprint for review
+        self._regime_btn = tk.Button(
+            hdr, text="趨勢報告",
+            bg=SURFACE, fg=ACCENT, font=(FONT, 14, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=16, pady=5,
+            activebackground=HEADER_BG, activeforeground=ACCENT,
+            command=self._generate_regime_report)
+        self._regime_btn.pack(side=tk.RIGHT, padx=(0, 10))
+
         # Scan mode combobox (packed RIGHT, appears to the left of AI button)
         mode_frame = tk.Frame(hdr, bg=BG)
         mode_frame.pack(side=tk.RIGHT, padx=(0, 16))
@@ -385,11 +417,19 @@ class ScannerApp(tk.Tk):
         self._progressbar = ttk.Progressbar(mid, variable=self._prog_var, maximum=100)
         self._progressbar.pack(fill=tk.X, pady=(4, 8))
 
+        # Market-regime banner (momentum edge is regime-dependent)
+        self._regime_var = tk.StringVar(value="")
+        self._regime_lbl = tk.Label(self, textvariable=self._regime_var,
+                                     bg=BG, fg=DIM, font=(FONT, 11, "bold"),
+                                     anchor="w", padx=20)
+        self._regime_lbl.pack(fill=tk.X)
+        self._update_regime_banner()
+
         # Legend
         legend = tk.Frame(self, bg=BG, padx=20, pady=2)
         legend.pack(fill=tk.X)
         for text, color in [
-            ("■ 爆發≥70", YELLOW), ("■ 爆發≥50", ORANGE),
+            ("■ 噴發≥70", YELLOW), ("■ 噴發≥50", ORANGE),
             ("✓ 成立", GREEN),     ("- 未成立", DIM),
             ("RS+ 跑贏大盤", GREEN), ("RS- 跑輸大盤", RED),
             ("雙擊查看詳情", DIM),
@@ -539,6 +579,15 @@ class ScannerApp(tk.Tk):
 
     # ── 掃描 ──────────────────────────────────────────────────────────────────
 
+    def _update_regime_banner(self):
+        try:
+            from scanner.market_regime import get_market_regime
+            r = get_market_regime()
+            self._regime_var.set(r["text"])
+            self._regime_lbl.config(fg=GREEN if r.get("risk_on") else RED)
+        except Exception:
+            self._regime_var.set("")
+
     def _resolve_selected_mode(self):
         """Map the combobox label back to its English mode key."""
         selected_label = self._mode_var.get()
@@ -550,6 +599,7 @@ class ScannerApp(tk.Tk):
     def _reset_for_run(self):
         """Shared UI reset before a scan or a manual lookup."""
         self._ai_btn.config(state=tk.DISABLED)
+        self._regime_btn.config(state=tk.DISABLED)
         self._mode_combo.config(state=tk.DISABLED)
         self._last_result = None
         self._row_data.clear()
@@ -608,7 +658,7 @@ class ScannerApp(tk.Tk):
                 return
             self._ai_btn.config(state=tk.NORMAL)
             for i, (_, row) in enumerate(df.iterrows()):
-                base_tag = _score_tag(row.get("Explosion_Score", 0))
+                base_tag = _score_tag(row.get("Surge_Score", 0))
                 tag = ("alt" if i % 2 else "alt0") if base_tag == "alt" else base_tag
 
                 item = self._tree.insert("", tk.END, tags=(tag,), values=(
@@ -619,8 +669,11 @@ class ScannerApp(tk.Tk):
                     row.get("Strict_Stop_Loss")     if row.get("Strict_Stop_Loss")    else "-",
                     "{:.1f}%".format(row.get("Risk_Pct"))
                         if row.get("Risk_Pct") is not None else "-",
-                    row.get("Explosion_Score",      ""),
+                    row.get("Surge_Score") if row.get("Surge_Score") is not None else "-",
+                    "{:.1f}%".format(row.get("ATR_Pct"))
+                        if row.get("ATR_Pct") is not None else "-",
                     _fmt_rs(row.get("RS_Score")),
+                    _fmt_net(row.get("Foreign_Net_5D")),
                     _fmt_gain(row.get("Gain_3M_Pct")),
                     "{}%".format(row.get("Dist_52W_High_Pct"))
                         if row.get("Dist_52W_High_Pct") is not None else "-",
@@ -647,10 +700,34 @@ class ScannerApp(tk.Tk):
     def _cb_done(self):
         self.after(0, lambda: self._scan_btn.config(state=tk.NORMAL, text="開始掃描"))
         self.after(0, lambda: self._manual_btn.config(state=tk.NORMAL, text="分析"))
+        self.after(0, lambda: self._regime_btn.config(state=tk.NORMAL, text="趨勢報告"))
         self.after(0, lambda: self._mode_combo.config(state="readonly"))
         self.after(0, lambda: self._prog_var.set(int(self._progressbar.cget("maximum"))))
+        self.after(0, self._update_regime_banner)
 
     # ── AI 報告 ───────────────────────────────────────────────────────────────
+
+    def _generate_regime_report(self):
+        self._regime_btn.config(state=tk.DISABLED, text="分析中…")
+        self._status_var.set("正在更新研究資料並分析近兩年趨勢，請稍候…")
+        threading.Thread(target=self._run_regime_report, daemon=True).start()
+
+    def _run_regime_report(self):
+        from scanner.regime_report import generate_regime_report
+        try:
+            def prog(msg):
+                self.after(0, lambda: self._status_var.set(msg))
+            path = generate_regime_report(refresh=True, progress=prog)
+            self.after(0, lambda: self._status_var.set("趨勢報告已產生：{}".format(path)))
+            try:
+                os.startfile(path)   # open the report for review (Windows)
+            except Exception:
+                pass
+        except Exception as e:
+            msg = str(e)
+            self.after(0, lambda: self._status_var.set("趨勢報告失敗：{}".format(msg)))
+        finally:
+            self.after(0, lambda: self._regime_btn.config(state=tk.NORMAL, text="趨勢報告"))
 
     def _generate_ai_report(self):
         if self._last_result is None or self._last_result.empty:

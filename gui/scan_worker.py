@@ -3,6 +3,7 @@ import pandas as pd
 from scanner.market_filter import get_candidate_list, lookup_stock_info
 from scanner.chip_verifier import verify_candidates
 from scanner.scan_mode import apply_scan_mode, add_trade_columns, sort_for_mode
+from scanner.result_export import export_scan_result
 from ingestion.price_volume_multi import resolve_market
 
 
@@ -40,6 +41,15 @@ class ScanWorker:
             result_df = apply_scan_mode(result_df, self._scan_mode)
             result_df = sort_for_mode(result_df, self._scan_mode)
             result_df = add_trade_columns(result_df, self._scan_mode)
+
+            # Persist the latest result (overwrites previous) for offline review.
+            try:
+                path = export_scan_result(result_df, self._scan_mode)
+                if path:
+                    print("  [export] scan result -> {}".format(path))
+            except Exception as e:
+                print("  [export] failed: {}".format(e))
+
             self._on_result(result_df)
 
         except Exception as e:
