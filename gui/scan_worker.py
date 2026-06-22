@@ -2,7 +2,10 @@ import threading
 import pandas as pd
 from scanner.market_filter import get_candidate_list, lookup_stock_info
 from scanner.chip_verifier import verify_candidates
-from scanner.scan_mode import apply_scan_mode, add_trade_columns, sort_for_mode
+from scanner.scan_mode import (
+    apply_scan_mode, add_trade_columns, sort_for_mode, select_with_hysteresis,
+)
+from scanner.scan_state import load_held_ids, save_held_ids
 from scanner.result_export import export_scan_result
 from ingestion.price_volume_multi import resolve_market
 
@@ -25,7 +28,12 @@ class ScanWorker:
     def _run(self):
         try:
             self._on_progress(0, 1, "Fetching market overview...")
-            candidates = get_candidate_list(scan_mode=self._scan_mode)
+            # Names held from the previous run are force-included in the
+            # candidate pool so the hysteresis layer can actually retain them
+            # even if their single-day volume slipped below the prefilter cap.
+            prior_ids = load_held_ids(self._scan_mode)
+            candidates = get_candidate_list(
+                scan_mode=self._scan_mode, include_ids=prior_ids)
 
             if candidates.empty:
                 self._on_error("Failed to fetch market data. Check your connection.")
@@ -40,6 +48,11 @@ class ScanWorker:
             result_df = verify_candidates(candidates, progress_callback=progress_callback)
             result_df = apply_scan_mode(result_df, self._scan_mode)
             result_df = sort_for_mode(result_df, self._scan_mode)
+            # Hysteresis top-N: stabilizes the shortlist day-to-day (see
+            # scanner.scan_mode.select_with_hysteresis). Persist the kept set so
+            # the next run can hold these names through transient dips.
+            result_df, held_ids = select_with_hysteresis(result_df, prior_ids)
+            save_held_ids(self._scan_mode, held_ids)
             result_df = add_trade_columns(result_df, self._scan_mode)
 
             # Persist the latest result (overwrites previous) for offline review.
@@ -63,7 +76,7 @@ class SingleStockWorker:
     regardless of any mode filter. Buy/stop still follow the selected mode."""
 
     def __init__(self, stock_id, on_progress, on_result, on_error, on_done,
-                 scan_mode="mode_momentum_leader"):
+                 scan_mode="mode_prelaunch"):
         self._stock_id   = str(stock_id).strip()
         self._on_progress = on_progress
         self._on_result   = on_result

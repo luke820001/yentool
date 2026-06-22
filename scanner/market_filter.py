@@ -166,11 +166,15 @@ _MODE_CFG = {
     # Leader study casts a wide net (modest liquidity floor, larger cap) so the
     # 3-month >=30% gainers across the whole market are captured for inspection.
     "mode_momentum_leader": {"min_vol":   300_000, "price_max": None, "cap": 250},
+    # Pre-launch wants the broadest net of all: the whole liquid above-trend
+    # universe is scored, then ranked + held by hysteresis downstream.
+    "mode_prelaunch":       {"min_vol":   300_000, "price_max": None, "cap": 300},
 }
 _DEFAULT_CFG = {"min_vol": 0, "price_max": None, "cap": PREFILTER_TOP_N}
 
 
-def apply_prefilter(df: pd.DataFrame, scan_mode: str = "") -> pd.DataFrame:
+def apply_prefilter(df: pd.DataFrame, scan_mode: str = "",
+                    include_ids=None) -> pd.DataFrame:
     cfg = _MODE_CFG.get(scan_mode, _DEFAULT_CFG)
 
     filtered = df.copy()
@@ -182,13 +186,29 @@ def apply_prefilter(df: pd.DataFrame, scan_mode: str = "") -> pd.DataFrame:
     filtered = filtered.sort_values("volume", ascending=False).reset_index(drop=True)
     result = filtered.head(cfg["cap"]).reset_index(drop=True)
 
+    # Force-include names held from the previous run so the downstream
+    # hysteresis can retain them even if today's single-day volume dropped them
+    # below the cap/floor. They must still appear in today's market snapshot.
+    forced = 0
+    if include_ids:
+        want = set(str(x) for x in include_ids)
+        have = set(result["stock_id"].astype(str))
+        need = want - have
+        if need:
+            extra = df[df["stock_id"].astype(str).isin(need)]
+            if not extra.empty:
+                result = pd.concat([result, extra], ignore_index=True)
+                result = result.drop_duplicates(subset="stock_id").reset_index(drop=True)
+                forced = len(extra)
+
     print("  Pre-filter [{}]: {} candidates "
-          "(vol>={:.0f}k shares{}, cap {})".format(
+          "(vol>={:.0f}k shares{}, cap {}{})".format(
               scan_mode or "default",
               len(result),
               cfg["min_vol"] / 1000,
               ", price<{}".format(cfg["price_max"]) if cfg["price_max"] else "",
               cfg["cap"],
+              ", +{} held".format(forced) if forced else "",
           ))
     return result
 
@@ -241,9 +261,9 @@ def lookup_stock_info(stock_id: str):
     return sid, None
 
 
-def get_candidate_list(scan_mode: str = "") -> pd.DataFrame:
+def get_candidate_list(scan_mode: str = "", include_ids=None) -> pd.DataFrame:
     full = fetch_full_market()
     if full.empty:
         print("  ERROR: could not fetch market data from either TSE or OTC.")
         return pd.DataFrame()
-    return apply_prefilter(full, scan_mode=scan_mode)
+    return apply_prefilter(full, scan_mode=scan_mode, include_ids=include_ids)

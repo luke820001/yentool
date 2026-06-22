@@ -1,24 +1,24 @@
 {
   "modes": [
     {
-      "key": "mode_squeeze",
-      "label": "Coiling - 低波蓄勢(高勝率穩健)"
+      "key": "mode_prelaunch",
+      "label": "Pre-Launch - 起漲前蓄勢(提早佈局)"
     },
     {
-      "key": "mode_breakout",
-      "label": "Momentum Breakout - 動能突破發動"
+      "key": "mode_momentum_leader",
+      "label": "Momentum Leader - 主升段強勢(已發動)"
     },
     {
       "key": "mode_bottom",
       "label": "Strong Pullback - 強勢回檔買點"
     },
     {
-      "key": "mode_short_explosion",
-      "label": "Short-Term Explosion - 短線動能爆發"
+      "key": "mode_breakout",
+      "label": "Breakout Monitor - 突破監控(已發動/追高)"
     },
     {
-      "key": "mode_momentum_leader",
-      "label": "Pre-Launch Momentum - 起漲前動能(找未來)"
+      "key": "mode_short_explosion",
+      "label": "Surge Monitor - 短線爆量監控(事後追蹤)"
     }
   ]
 }

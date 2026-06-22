@@ -8,7 +8,7 @@ from ingestion.inst_trades import update_inst_trades, get_inst_features
 from ingestion.market_index import MarketIndexFetcher
 from analyzer.signal_evaluator import _evaluate_conditions
 from analyzer.support_resistance import calc_all
-from analyzer.trend_analysis import calc_trend_analysis, calc_surge_score
+from analyzer.trend_analysis import calc_trend_analysis, calc_surge_score, calc_launch_score
 from storage.data_store import (
     load_sheet, batch_latest_dates, batch_latest_date_strings,
     batch_row_counts, bulk_load_stocks,
@@ -346,6 +346,7 @@ def verify_candidates(
         _t0 = _time.perf_counter()
         ta = calc_trend_analysis(merged, taiex_df=taiex_df if not taiex_df.empty else None)
         ss = calc_surge_score(merged)
+        ls = calc_launch_score(merged)
         _t_ta += _time.perf_counter() - _t0
 
         _t0 = _time.perf_counter()
@@ -377,6 +378,8 @@ def verify_candidates(
             "Explosion_Score":    round(float(latest.get("Explosion_Score", 0)), 1)
                                   if pd.notna(latest.get("Explosion_Score")) else 0.0,
             "Surge_Score":        ss.get("Surge_Score"),
+            "Launch_Score":       ls.get("Launch_Score"),
+            "Ret_5D_Pct":         ls.get("Ret_5D_Pct"),
             "ATR_Pct":            ss.get("ATR_Pct"),
             "RS_Score":           ta.get("RS_Score"),
             "Gain_3M_Pct":        gain_3m,

@@ -33,3 +33,10 @@ python -m PyInstaller --noconfirm --onefile --windowed --name TaiwanScanner --ad
   或在系統設環境變數。
 - --add-data 的分隔符 Windows 是分號 ;  (別換成冒號 :)。
 ============================================================
+
+
+
+
+
+
+python main_gui.py__單獨觸發

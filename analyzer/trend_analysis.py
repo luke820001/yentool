@@ -65,6 +65,70 @@ def calc_surge_score(df: pd.DataFrame) -> dict:
     return out
 
 
+# --- Early-launch ('pre-launch') score ---------------------------------------
+
+def calc_launch_score(df: pd.DataFrame) -> dict:
+    """
+    EARLY-launch score (0-100): flags a name BEFORE its explosive run, the
+    opposite of Surge_Score (which peaks once a stock is already running).
+
+    Validated on the full-universe research db (debug_early_design.py, 1431
+    trading days, 2.6M bars): top ~5% by this score carries lift ~2.26 for a
+    >=25%/20-day move, while the median trailing-5-day return AT selection is
+    only +0.3% (vs +6.8% for the momentum-leader gate) -- i.e. we flag the
+    setup, not the climax. Paired with day-to-day hysteresis it holds a name
+    ~11 days (persistence 0.89), which is what kills the list churn.
+
+    Components (weights): 3-month momentum 0.30, "not-yet-run" 5-day freshness
+    0.25, proximity to 52w high 0.20, up-volume accumulation 0.15, base
+    tightness 0.10 -- gated by (close > 60MA) and a liquidity floor. Adding
+    pivot-proximity or volume-expansion terms raised lift marginally but pulled
+    selection back toward the climax (ret5 -> 4%), so they are intentionally out.
+    """
+    out = {"Launch_Score": None, "Ret_5D_Pct": None}
+    c = pd.to_numeric(df.get("close", pd.Series(dtype=float)), errors="coerce")
+    if "Volume_Lot" not in df.columns or len(c) < 64:
+        return out
+    v = pd.to_numeric(df["Volume_Lot"], errors="coerce")
+
+    cur = float(c.iloc[-1])
+    if cur <= 0:
+        return out
+    ma60   = c.rolling(60, min_periods=60).mean().iloc[-1]
+    vol20  = v.rolling(20, min_periods=20).mean().iloc[-1]
+    ret60  = cur / float(c.iloc[-64]) - 1 if float(c.iloc[-64]) > 0 else 0.0
+    ret5   = cur / float(c.iloc[-6]) - 1 if (len(c) >= 6 and float(c.iloc[-6]) > 0) else 0.0
+    out["Ret_5D_Pct"] = round(ret5 * 100, 1)
+
+    h52 = c.rolling(252, min_periods=63).max().iloc[-1]
+    dist52 = (float(h52) - cur) / float(h52) if (pd.notna(h52) and h52 > 0) else 1.0
+
+    prev = c.shift(1)
+    upv = v.where(c > prev, 0.0); dnv = v.where(c < prev, 0.0)
+    tot = upv.rolling(10).sum() + dnv.rolling(10).sum()
+    bias = (upv.rolling(10).sum() / tot.replace(0, np.nan)).iloc[-1]
+    bias = float(bias) if pd.notna(bias) else 0.5
+
+    h = pd.to_numeric(df.get("high", pd.Series(dtype=float)), errors="coerce")
+    l = pd.to_numeric(df.get("low",  pd.Series(dtype=float)), errors="coerce")
+    rh = h.rolling(20).max().iloc[-1]; rl = l.rolling(20).min().iloc[-1]
+    rt = (float(rh) - float(rl)) / float(rl) if (pd.notna(rl) and rl > 0) else 1.0
+
+    gate = 1.0 if (pd.notna(ma60) and cur > float(ma60)
+                   and pd.notna(vol20) and float(vol20) > 300) else 0.0
+
+    mom   = _clip01(max(ret60, 0.0) / 0.5)
+    young = 1.0 - _clip01(max(ret5, 0.0) / 0.12)
+    near  = 1.0 - _clip01(max(dist52, 0.0) / 0.30)
+    acc   = _clip01(max(bias - 0.5, 0.0) / 0.45)
+    tight = 1.0 - _clip01(max(rt, 0.0) / 0.25)
+
+    score = (mom * 0.30 + young * 0.25 + near * 0.20
+             + acc * 0.15 + tight * 0.10) * gate * 100
+    out["Launch_Score"] = round(float(score), 1)
+    return out
+
+
 # --- Moving-average alignment ------------------------------------------------
 
 def calc_ma_alignment(df: pd.DataFrame) -> dict:

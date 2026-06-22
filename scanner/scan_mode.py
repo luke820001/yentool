@@ -136,6 +136,17 @@ def apply_scan_mode(df, selected_mode):
         mask = have_prices & liq & wide_bar & strong_up & near_high & vol_surge & fast_trend
         return df[mask].reset_index(drop=True)
 
+    if selected_mode == "mode_prelaunch":
+        # Pre-Launch (forward-looking, EARLY): flag the setup BEFORE the run.
+        # The eligible pool is simply "above 60MA + liquid" (encoded as
+        # Launch_Score > 0); ranking by Launch_Score plus the hysteresis top-N
+        # in the worker does the real selection. Validated lift ~2.26 for a
+        # >=25%/20d move with the median name flagged at only +0.3% trailing-5d
+        # (i.e. before the climax) -- see analyzer.trend_analysis.calc_launch_score.
+        launch = _safe_num(df, "Launch_Score", 0.0)
+        mask = launch > 0
+        return df[mask].reset_index(drop=True)
+
     if selected_mode == "mode_momentum_leader":
         # Pre-Launch Momentum (forward-looking, NOT a past-winners list).
         #
@@ -179,6 +190,7 @@ _SORT_KEYS = {
     "mode_breakout":        "Surge_Score",
     "mode_short_explosion": "Surge_Score",
     "mode_momentum_leader": "Surge_Score",
+    "mode_prelaunch":       "Launch_Score",
 }
 
 
@@ -196,6 +208,47 @@ def sort_for_mode(df, selected_mode):
           .drop(columns="_sort_key")
           .reset_index(drop=True)
     )
+
+
+# Hysteresis top-N selection. The single biggest driver of the "list changes
+# completely every day / feels like hindsight" problem was hard pass/fail gates
+# at the candidate boundary plus same-day event triggers. Ranking + hysteresis
+# fixes it: a name ENTERS the shortlist only in the strict top N_ENTER, but is
+# HELD as long as it stays within the looser top N_HOLD. On the research db this
+# lifted day-to-day list overlap from ~0.60 to ~0.89 and median time-on-list
+# from 2 to ~11 days, with no loss of forward lift (debug_early_design.py).
+# enter 20 / hold 80 chosen on the live-flow replay (debug_prelaunch_live_sim.py):
+# it lifts day-to-day list overlap to ~0.79 and median time-on-list to ~6 days
+# (vs 0.05-0.13 and 1 day for the old same-day-event modes) while keeping the
+# forward lift at ~2.5. Widening the hold band further only trades lift for size.
+N_ENTER = 20   # fresh-entry cutoff (strict)
+N_HOLD  = 80   # retention cutoff (loose) -- a held name survives down to here
+
+
+def select_with_hysteresis(df, prior_ids, n_enter=N_ENTER, n_hold=N_HOLD):
+    """
+    Stabilize the displayed shortlist. `df` must already be ranked best-first
+    (see sort_for_mode). A row is kept when it ranks within `n_enter` (a fresh
+    pick) OR it was selected last run (`prior_ids`) and still ranks within
+    `n_hold` (held through noise). Order is preserved.
+
+    Returns (selected_df, new_ids) where new_ids is the Stock_ID list to persist
+    for the next run. With an empty prior set this is just plain top-n_enter.
+    """
+    if df is None or df.empty:
+        return df, []
+    ids = df["Stock_ID"].astype(str).tolist() if "Stock_ID" in df.columns else []
+    prior = set(str(x) for x in (prior_ids or []))
+
+    keep_mask = []
+    for rank, sid in enumerate(ids):
+        fresh = rank < n_enter
+        held  = (sid in prior) and (rank < n_hold)
+        keep_mask.append(fresh or held)
+
+    selected = df[pd.Series(keep_mask, index=df.index)].reset_index(drop=True)
+    new_ids = selected["Stock_ID"].astype(str).tolist() if "Stock_ID" in selected.columns else []
+    return selected, new_ids
 
 
 # Entry/stop parameters, tuned on price_volume.db (debug_stop_backtest.py).
@@ -236,7 +289,8 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
     ma20  = _safe_num(df, "MA20",        0.0)
     min3  = _safe_num(df, "Min_Price_3", 0.0)
 
-    if scan_mode in ("mode_breakout", "mode_short_explosion", "mode_momentum_leader"):
+    if scan_mode in ("mode_breakout", "mode_short_explosion",
+                     "mode_momentum_leader", "mode_prelaunch"):
         buy = close * (1 - ENTRY_BUFFER)
     else:
         # take the lower of close and MA20; fall back to close when MA20 is 0

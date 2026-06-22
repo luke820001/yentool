@@ -45,27 +45,19 @@ BOOL_TRUE  = "✓"
 BOOL_FALSE = "-"
 
 # ── 主列表欄位（比例權重）────────────────────────────────────────────────────
+# Concise main list: identity + the trade plan + the one ranking score + two
+# pieces of at-a-glance context. Everything diagnostic (other score, ATR, RS,
+# gaps, signal lights, MAs) lives in the double-click detail panel below.
 MAIN_COLUMNS = [
     ("Stock_ID",             "代號",      3),
-    ("Stock_Name",           "名稱",      5.5),
+    ("Stock_Name",           "名稱",      6),
     ("Close_Price",          "收盤價",    3.5),
     ("Suggested_Buy_Price",  "建議買入",  3.5),
     ("Strict_Stop_Loss",     "停損價",    3.5),
-    ("Risk_Pct",             "風險%",     2.8),
-    ("Surge_Score",          "噴發分",    3),
-    ("ATR_Pct",              "波動%",     3),
-    ("RS_Score",             "RS超額%",   3.5),
-    ("Foreign_Net_5D",       "外資5日",   3.5),
+    ("Risk_Pct",             "風險%",     3),
+    ("Launch_Score",         "起漲分",    3.5),
     ("Gain_3M_Pct",          "3月漲幅%",  3.5),
-    ("Dist_52W_High_Pct",    "距高點%",   3),
-    ("Sup_Gap_Pct",          "距支撐%",   3),
-    ("Res_Gap_Pct",          "距壓力%",   3),
-    ("Cond_A",               "箱縮",      2.5),
-    ("Cond_C",               "吸籌",      2.5),
-    ("Cond_B",               "B:大戶",    2.5),
-    ("MA_Bull_Align",        "MA多頭",    3),
-    ("Donchian_Break",       "Donchian",  3.5),
-    ("MACD_Cross",           "MACD叉",    3),
+    ("Foreign_Net_5D",       "外資5日",   3.5),
 ]
 _TOTAL_WEIGHT = sum(w for _, _, w in MAIN_COLUMNS)
 
@@ -82,6 +74,20 @@ DETAIL_SECTIONS = [
         ("大戶週增減",    "Large_Pct_Change",  "{:+.4f}",  True),   # True = 正負上色
         ("散戶持股%",     "Retail_Pct",        "{:.2f}%",  False),
         ("散戶週增減",    "Retail_Pct_Change", "{:+.4f}",  True),
+    ]),
+    ("訊號燈號", [
+        ("箱縮",       "Cond_A",         "bool", False),
+        ("吸籌",       "Cond_C",         "bool", False),
+        ("大戶(B)",    "Cond_B",         "bool", False),
+        ("MA多頭",     "MA_Bull_Align",  "bool", False),
+        ("Donchian突破", "Donchian_Break", "bool", False),
+        ("MACD金叉",   "MACD_Cross",     "bool", False),
+    ]),
+    ("距離（%）", [
+        ("距支撐%",   "Sup_Gap_Pct",       "{:.1f}%", False),
+        ("距壓力%",   "Res_Gap_Pct",       "{:.1f}%", False),
+        ("距52週高%", "Dist_52W_High_Pct", "{:.1f}%", False),
+        ("RS超額%",   "RS_Score",          "{:+.1f}%", True),
     ]),
     ("線型輔助指標", [
         ("MA糾結",        "MA_Squeeze",        "bool",     False),
@@ -112,6 +118,9 @@ DETAIL_SECTIONS = [
         ("跳空壓力", "Gap_Dn_Res", "{:.2f}", False),
     ]),
     ("噴發要素 / 原始技術指標", [
+        ("起漲分",     "Launch_Score",    "{:.1f}",  False),
+        ("噴發分",     "Surge_Score",     "{:.1f}",  False),
+        ("近5日漲幅%", "Ret_5D_Pct",      "{:+.1f}%", True),   # 低=尚未發動(早)
         ("波動度ATR%", "ATR_Pct",         "{:.2f}%", False),
         ("蓄勢分",     "Explosion_Score", "{:.1f}",  False),
         ("箱型壓縮度", "Range_Tightness", "{:.4f}", False),
@@ -669,22 +678,9 @@ class ScannerApp(tk.Tk):
                     row.get("Strict_Stop_Loss")     if row.get("Strict_Stop_Loss")    else "-",
                     "{:.1f}%".format(row.get("Risk_Pct"))
                         if row.get("Risk_Pct") is not None else "-",
-                    row.get("Surge_Score") if row.get("Surge_Score") is not None else "-",
-                    "{:.1f}%".format(row.get("ATR_Pct"))
-                        if row.get("ATR_Pct") is not None else "-",
-                    _fmt_rs(row.get("RS_Score")),
-                    _fmt_net(row.get("Foreign_Net_5D")),
+                    row.get("Launch_Score") if row.get("Launch_Score") is not None else "-",
                     _fmt_gain(row.get("Gain_3M_Pct")),
-                    "{}%".format(row.get("Dist_52W_High_Pct"))
-                        if row.get("Dist_52W_High_Pct") is not None else "-",
-                    _fmt_gap(row.get("Sup_Gap_Pct")),
-                    _fmt_gap(row.get("Res_Gap_Pct"), is_resist=True),
-                    _fmt_bool(row.get("Cond_A")),
-                    _fmt_bool(row.get("Cond_C")),
-                    _fmt_bool(row.get("Cond_B")),
-                    _fmt_bool(row.get("MA_Bull_Align")),
-                    _fmt_bool(row.get("Donchian_Break")),
-                    _fmt_bool(row.get("MACD_Cross")),
+                    _fmt_net(row.get("Foreign_Net_5D")),
                 ))
                 self._row_data[item] = row.to_dict()
 
