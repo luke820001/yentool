@@ -1,0 +1,35 @@
+============================================================
+ TaiwanScanner 打包指令 (PyInstaller)
+ 在專案根目錄 D:\YenTool 執行
+============================================================
+
+[0] 第一次先安裝 PyInstaller
+    pip install pyinstaller
+
+
+[推薦] 資料夾模式 (onedir) -- DB 留在 exe 旁邊、跨次保存
+------------------------------------------------------------
+python -m PyInstaller --noconfirm --windowed --name TaiwanScanner --add-data "config/scan_modes.json;config" main_gui.py
+
+    產物: dist\TaiwanScanner\TaiwanScanner.exe
+    (整個 dist\TaiwanScanner\ 資料夾一起帶走)
+
+
+[單檔] 單檔模式 (onefile) -- 一個檔好攜帶
+------------------------------------------------------------
+python -m PyInstaller --noconfirm --onefile --windowed --name TaiwanScanner --add-data "config/scan_modes.json;config" main_gui.py
+
+    產物: dist\TaiwanScanner.exe
+    注意: onefile 每次執行解壓到暫存夾、結束就刪,
+          那幾百 MB 的 DB 與 stock_names.json 快取每次開都會重抓 (很慢)。
+          要常用就改用上面的 onedir。
+
+
+注意事項
+------------------------------------------------------------
+- 一定要帶 --add-data "config/scan_modes.json;config",否則一開就崩
+  (app 啟動會讀 config/scan_modes.json)。
+- .env (GROQ / FinMind 金鑰) 不會被打包,把它放在 exe 旁邊,
+  或在系統設環境變數。
+- --add-data 的分隔符 Windows 是分號 ;  (別換成冒號 :)。
+============================================================
