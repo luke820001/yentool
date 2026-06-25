@@ -1,6 +1,11 @@
 import numpy as np
 import pandas as pd
 
+# A "52-week high" needs roughly a full year of bars. With fewer, a 3-month high
+# would be mislabeled as a 52w high, overstating Near_52W_High / proximity for
+# young listings. Matches MIN_HISTORY_BARS (=240) used elsewhere.
+_MIN_52W_BARS = 240
+
 
 def _clip01(x):
     try:
@@ -100,7 +105,7 @@ def calc_launch_score(df: pd.DataFrame) -> dict:
     ret5   = cur / float(c.iloc[-6]) - 1 if (len(c) >= 6 and float(c.iloc[-6]) > 0) else 0.0
     out["Ret_5D_Pct"] = round(ret5 * 100, 1)
 
-    h52 = c.rolling(252, min_periods=63).max().iloc[-1]
+    h52 = c.rolling(252, min_periods=_MIN_52W_BARS).max().iloc[-1]
     dist52 = (float(h52) - cur) / float(h52) if (pd.notna(h52) and h52 > 0) else 1.0
 
     prev = c.shift(1)
@@ -207,7 +212,7 @@ def calc_52w_position(df: pd.DataFrame, window: int = 252) -> dict:
     Within 15% (Near_52W_High = True) is a precondition for a major-run stock.
     """
     close = pd.to_numeric(df["close"], errors="coerce")
-    min_p = max(60, window // 4)
+    min_p = min(_MIN_52W_BARS, window)
 
     h52 = close.rolling(window, min_periods=min_p).max().iloc[-1]
     cur = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else 0.0

@@ -6,6 +6,7 @@ from scanner.scan_mode import (
     apply_scan_mode, add_trade_columns, sort_for_mode, select_with_hysteresis,
 )
 from scanner.scan_state import load_held_ids, save_held_ids
+from scanner.signal_ledger import record_picks, backfill_outcomes
 from scanner.result_export import export_scan_result
 from ingestion.price_volume_multi import resolve_market
 
@@ -54,6 +55,17 @@ class ScanWorker:
             result_df, held_ids = select_with_hysteresis(result_df, prior_ids)
             save_held_ids(self._scan_mode, held_ids)
             result_df = add_trade_columns(result_df, self._scan_mode)
+
+            # Forward-performance ledger: append today's shortlist (append-only,
+            # idempotent per day) and backfill any matured outcomes. Never let a
+            # ledger hiccup break the scan.
+            try:
+                n = record_picks(result_df, self._scan_mode)
+                filled = backfill_outcomes()
+                print("  [ledger] recorded {} picks, backfilled {} outcomes".format(
+                    n, filled))
+            except Exception as e:
+                print("  [ledger] skipped: {}".format(e))
 
             # Persist the latest result (overwrites previous) for offline review.
             try:

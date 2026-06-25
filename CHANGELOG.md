@@ -2,6 +2,145 @@
 
 ---
 
+## 2026-06-25
+
+### data: forward-performance ledger -- close the open loop
+
+**Files:** `scanner/signal_ledger.py` (new), `backfill_ledger.py` (new),
+`gui/scan_worker.py`, `config/settings.py` (`SIGNAL_LEDGER_FILE`),
+`scanner/chip_verifier.py` (adds `Data_Date`, `Market`)
+
+**Problem:** the scanner was open-loop -- it emitted a shortlist and forgot it
+(`scan_result_latest.csv` overwrites itself, `scan_state` stores only IDs). So
+the live system had NO record of what it recommended or whether it worked; the
+only evidence was the survivorship-biased research backtest.
+
+**Fix:** an append-only SQLite ledger (`signal_ledger.db`). Every scan records
+its picks (`scan_session, mode, stock_id, scores, buy/stop, bar_date`,
+idempotent per day) and backfills realized 5/10/20-day forward returns + MFE/MAE
+once the bars exist. Wired into `scan_worker` so **pressing Scan auto-completes**:
+matured-but-missing names (picks that left the universe and stopped updating) are
+re-fetched in the same pass. `python backfill_ledger.py` runs it headless +
+prints live hit-rate / Surge_Score calibration. Forward return anchors the entry
+close on the backfill series (not the scan-time snapshot) so a dividend
+re-adjustment between scan and backfill cannot skew it.
+
+### data: per-stock integrity audit (B) -- non-destructive flags
+
+**Files:** `scanner/data_integrity.py` (new), `audit_data.py` (new),
+`scanner/chip_verifier.py` (adds `Integrity_OK`, `Integrity_Flags`, `Recent_Jump`)
+
+**Problem:** every score is a deterministic function of the stored OHLCV, so one
+bad bar silently corrupts MA / breakout / RS / forward-return for that name, with
+nothing to surface it.
+
+**Fix:** hard, non-speculative checks per series -- NaN / non-positive, OHLC
+ordering, duplicate dates, close-to-close moves > +-10.5% (TW daily limit, so a
+larger move is an un-adjusted corporate action / feed glitch / no-limit-board
+stock), exact trading-day gaps (vs the whole-market date union), and
+short-history (MA60 < 60 bars, 52w/RS < 240). Attached to the scan output as
+columns; **never alters a score or drops a row** -- a >10% move can be a real
+no-limit stock, so the call stays with the caller. Audit of the live db (451
+stocks): 0 NaN / OHLC / dup errors, 1 internal gap, 28 over-limit jumps across 18
+stocks (ALL reproduced by the yfinance adjusted feed -> no basis seams), 99.6%
+fully clean.
+
+### scan: breakout reference fixed to the prior-20 HIGH (was max of closes)
+
+**Files:** `analyzer/signal_evaluator.py` (`Is_Breakout_Signal`),
+`scanner/chip_verifier.py` + `scanner/scan_mode.py` (`Max_Price_20_Prev` ->
+`High_20_Prev`), `debug_audit_all.py`, `debug_breakout_validate.py` (new)
+
+**Problem:** `Max_Price_20` was `close.rolling(20).max()`, so `mode_breakout` and
+`Is_Breakout_Signal` fired on "close > max of prior 20 CLOSES" -- a stock could
+trigger while still below its actual recent highs (e.g. 8042 closed 195.5 above
+the 192.5 close-max but the real prior high was 206, i.e. 5% BELOW its high).
+Inconsistent with `Donchian_Break`, which already used highs.
+
+**Fix:** breakout reference is now the prior-20 intraday HIGH excluding today
+(`High_20_Prev`), the conventional range breakout. Point-in-time validation on
+`research_prices.db` (1957 stocks, 6y, `debug_breakout_validate.py`): NEW vs OLD
+forward-20d P(+10%) **47.9% vs 47.3%**, lift **1.51 vs 1.49**, signals **27147 vs
+37173**; the 10028 removed signals were weaker (**45.6%**). Strictly removes false
+breakouts (high-max >= close-max, so it can only drop, never add).
+
+### analyzer: MA60 / 52w-high require a full window
+
+**Files:** `analyzer/support_resistance.py`, `analyzer/trend_analysis.py`
+(`_MIN_52W_BARS = 240`)
+
+**Problem:** `calc_moving_averages` used `min_periods=1`, so a 30-bar stock got an
+"MA60" that was a 30-bar mean -- and that MA60 is the `close > MA60` trend gate
+and the buy/stop anchor. `calc_52w_position` / `calc_launch_score` used
+`min_periods=63`, labeling a 3-month high as a 52-week high for young listings.
+
+**Fix:** MA20/60/10 require their full window (None otherwise, so a short-history
+name fails the gate instead of passing on a half-formed average); 52w-high
+requires 240 bars. Impact measured on the live db: only **1** stock loses MA60
+and **16** lose the 52w metric; **200 healthy stocks checked, 0 changes** to MA60
+or Dist_52W -- the fix touches only short-history names.
+
+### audit: price basis verified single -- "unify basis" (A) not needed
+
+A 40-stock sample showed **zero** divergence from the yfinance adjusted feed, and
+all 28 over-limit jumps were source-level (no raw/adjusted seams in the pipeline).
+Raw and adjusted differ only at ex-dividend/ex-rights gaps, which the integrity
+jump check (`recent_jump` within 60 bars = the longest short-term MA) already
+catches. Decision: do not re-architect the price basis; rely on the B guard.
+
+---
+
+## 2026-06-22
+
+### scan: early pre-launch mode + hysteresis selection (kills daily list churn)
+
+**Files:** `analyzer/trend_analysis.py` (new `calc_launch_score`),
+`scanner/scan_mode.py` (new `mode_prelaunch`, `select_with_hysteresis`),
+`scanner/scan_state.py` (new), `scanner/market_filter.py`,
+`scanner/chip_verifier.py`, `gui/scan_worker.py`, `config/scan_modes.json`
+
+**Problem:** the daily recommendation list changed almost completely day-to-day
+("事後諸葛"). Root cause: the headline modes triggered on the SAME bar as the move
+(`mode_breakout`: close>20d-high + today vol>5d*2; `mode_short_explosion`: today
+gain>=4% + near-high + vol>5d*2.5). Replayed on the research db
+(`debug_churn_persistence.py`, 1431 days, 2.6M bars): short_explosion had
+day-to-day list overlap **0.05**, survived **1 day**, and a NEGATIVE forward-20d
+median (**-1.9%**); breakout 0.13 / 1 day / -1.3% -- i.e. they flag the climax,
+when the move is already over. `mode_squeeze` was anti-predictive (lift **0.30**).
+
+**Fix:** select on the *pre-launch state*, not the event.
+- **`Launch_Score`** (`calc_launch_score`): 0-100, validated on the research db
+  (`debug_early_design.py`). 3m momentum .30 + 5d freshness ("not-yet-run") .25 +
+  near-52w .20 + up-volume accumulation .15 + box tightness .10, gated by
+  close>60MA & liquidity. Adds `Ret_5D_Pct`. Pivot-proximity / volume-expansion
+  terms were tested and dropped (they pulled selection back toward the climax).
+- **`mode_prelaunch`** ranks by `Launch_Score` and is now the default mode.
+- **`select_with_hysteresis`** (enter top 20 / hold top 80) + a per-mode prior-ID
+  store (`scanner/scan_state.py`), with held names force-included in the
+  `market_filter` prefilter so they cannot be washed out by a quiet-volume day.
+
+Live-flow replay (`debug_prelaunch_live_sim.py`): list overlap **0.05-0.13 ->
+0.79**, median time-on-list **1 -> ~6 days**, forward >=25%/20d lift **~2.5**,
+with the median name flagged at only **~0% trailing-5d** (before the run, not
+after). `breakout` / `short_explosion` relabeled as monitors (not buy lists);
+anti-predictive `squeeze` dropped from `config/scan_modes.json` (function kept).
+
+Caveat: the research db has no chip/inst data, so the institutional-accumulation
+angle (`Foreign_Net_5D` etc.) is not yet folded into `Launch_Score`.
+
+### GUI: slim the main list 21 -> 9 columns, diagnostics to the detail panel
+
+**File:** `gui/app.py`
+
+The main table was 21 columns wide. Trimmed to 9 -- identity (`代號`/`名稱`), the
+trade plan (`建議買入`/`停損價`/`風險%`), the ranking score (`起漲分`), and two
+at-a-glance context columns (`3月漲幅%`, `外資5日`). Everything diagnostic moved
+into the double-click detail panel: new `訊號燈號` section (`箱縮`/`吸籌`/`大戶`/
+`MA多頭`/`Donchian`/`MACD金叉`), new `距離（%）` section (`距支撐`/`距壓力`/
+`距52週高`/`RS超額`), and `噴發分` added to the `噴發要素` section.
+
+---
+
 ## 2026-06-18
 
 ### scoring: recalibrate Surge_Score to spread (it was saturating)

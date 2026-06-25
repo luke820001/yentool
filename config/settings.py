@@ -15,6 +15,11 @@ BROKER_BRANCH_FILE = DATA_DIR / "broker_branch.db"
 SIGNAL_LOG_FILE = DATA_DIR / "signal_log.db"
 TAIEX_FILE      = DATA_DIR / "taiex.db"
 
+# Forward-performance ledger: append-only record of every scan's picks plus the
+# realized forward returns backfilled later. Turns the open-loop scanner into a
+# self-measuring system (live hit-rate, alpha decay, score calibration).
+SIGNAL_LEDGER_FILE = DATA_DIR / "signal_ledger.db"
+
 # --- Scan result export (latest version only, for reviewing calculations) ---
 SCAN_RESULTS_DIR = DATA_DIR / "scan_results"
 SCAN_RESULT_FILE = SCAN_RESULTS_DIR / "scan_result_latest.csv"

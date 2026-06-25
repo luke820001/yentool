@@ -101,7 +101,7 @@ for sid, g in allrows.groupby("stock_id"):
     vs = _get_volume_stats(g.copy())
     un("Vol_MA20", sid, vs["Vol_MA20"], round(np.mean(vol[-20:]), 0))
     un("Vol_MA5", sid, vs["Vol_MA5"], round(np.mean(vol[-6:-1]), 0))
-    un("Max_Price_20_Prev", sid, vs["Max_Price_20_Prev"], round(np.max(close[-21:-1]), 2))
+    un("High_20_Prev", sid, vs["High_20_Prev"], round(np.max(high[-21:-1]), 2))
     un("Min_Price_3", sid, vs["Min_Price_3"], round(np.min(low[-3:]), 2))
     un("High_Today", sid, vs["High_Today"], round(high[-1], 2))
     un("Low_Today", sid, vs["Low_Today"], round(low[-1], 2))

@@ -8,6 +8,7 @@ from ingestion.inst_trades import update_inst_trades, get_inst_features
 from ingestion.market_index import MarketIndexFetcher
 from analyzer.signal_evaluator import _evaluate_conditions
 from analyzer.support_resistance import calc_all
+from scanner.data_integrity import audit_series
 from analyzer.trend_analysis import calc_trend_analysis, calc_surge_score, calc_launch_score
 from storage.data_store import (
     load_sheet, batch_latest_dates, batch_latest_date_strings,
@@ -89,7 +90,7 @@ def _get_volume_stats(merged: pd.DataFrame) -> dict:
         "Vol_MA20":          None,
         "Vol_MA5":           None,
         "Vol_Today":         None,
-        "Max_Price_20_Prev": None,
+        "High_20_Prev":      None,
         "High_Today":        None,
         "Low_Today":         None,
         "Close_Prev":        None,
@@ -119,9 +120,14 @@ def _get_volume_stats(merged: pd.DataFrame) -> dict:
     last_vol = vol.iloc[-1]
     result["Vol_Today"] = int(last_vol) if pd.notna(last_vol) else None
 
-    if "Max_Price_20" in merged.columns and len(merged) >= 2:
-        mp20_prev = pd.to_numeric(merged["Max_Price_20"], errors="coerce").iloc[-2]
-        result["Max_Price_20_Prev"] = round(float(mp20_prev), 2) if pd.notna(mp20_prev) else None
+    # Prior 20-day HIGH, excluding today (the breakout reference level). Built
+    # from intraday highs -- not the max of closes -- so "close breaks the
+    # 20-day high" means it actually exceeds the range's highs. Requires a full
+    # 20-bar window.
+    if "high" in merged.columns and len(merged) >= 21:
+        h_series = pd.to_numeric(merged["high"], errors="coerce")
+        high20_prev = h_series.rolling(20, min_periods=20).max().shift(1).iloc[-1]
+        result["High_20_Prev"] = round(float(high20_prev), 2) if pd.notna(high20_prev) else None
 
     if "high" in merged.columns:
         h = pd.to_numeric(merged["high"], errors="coerce").iloc[-1]
@@ -288,6 +294,17 @@ def verify_candidates(
     pv_store   = bulk_load_stocks(PRICE_VOLUME_FILE, candidate_ids)
     chip_store = bulk_load_stocks(LARGE_HOLDER_FILE, candidate_ids)
 
+    # Real trading calendar = union of every loaded stock's dates (whole-market),
+    # so the per-stock data-integrity gap check is exact, not holiday-fooled.
+    try:
+        _cal_dates = pd.concat(
+            [f["date"] for f in pv_store.values() if "date" in f.columns],
+            ignore_index=True)
+        _calendar = pd.DatetimeIndex(
+            sorted(pd.to_datetime(_cal_dates, errors="coerce").dropna().unique()))
+    except Exception:
+        _calendar = None
+
     # ── Phase 4: analysis loop (no DB I/O) ───────────────────────────────────
     import time as _time
     _t_eval = _t_sr = _t_ta = _t_vs = 0.0
@@ -353,6 +370,11 @@ def verify_candidates(
         vs = _get_volume_stats(merged)
         _t_vs += _time.perf_counter() - _t0
 
+        # Data-integrity audit (non-destructive): never alters scores, only
+        # surfaces whether this name's series is clean. recent_jump means an
+        # un-adjusted corporate action within ~60 bars is tainting its MAs.
+        ig = audit_series(merged, calendar=_calendar)
+
         # 1-month (~20 bars) and 3-month (~63 bars) price change. Both drive the
         # pre-launch momentum mode and expose how much each name has already run.
         close_series = pd.to_numeric(merged["close"], errors="coerce").dropna().reset_index(drop=True)
@@ -374,6 +396,8 @@ def verify_candidates(
         results.append({
             "Stock_ID":           stock_id,
             "Stock_Name":         stock_name,
+            "Market":             id_to_market.get(stock_id, "TSE"),
+            "Data_Date":          str(latest.get("date"))[:10],
             "Close_Price":        round(float(latest.get("close", 0)), 2),
             "Explosion_Score":    round(float(latest.get("Explosion_Score", 0)), 1)
                                   if pd.notna(latest.get("Explosion_Score")) else 0.0,
@@ -429,12 +453,15 @@ def verify_candidates(
             "Vol_MA20":           vs["Vol_MA20"],
             "Vol_MA5":            vs["Vol_MA5"],
             "Vol_Today":          vs["Vol_Today"],
-            "Max_Price_20_Prev":  vs["Max_Price_20_Prev"],
+            "High_20_Prev":       vs["High_20_Prev"],
             "High_Today":         vs["High_Today"],
             "Low_Today":          vs["Low_Today"],
             "Close_Prev":         vs["Close_Prev"],
             "Min_Price_3":        vs["Min_Price_3"],
             "Cond_A_5D":          bool(recent["Cond_A"].any()),
+            "Integrity_OK":       ig["trustworthy"],
+            "Integrity_Flags":    ";".join(ig["flags"]),
+            "Recent_Jump":        ig["recent_jump"],
         })
 
     n = max(len(results), 1)

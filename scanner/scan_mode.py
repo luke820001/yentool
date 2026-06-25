@@ -42,7 +42,7 @@ def apply_scan_mode(df, selected_mode):
     vol_ma20 = _safe_num(df, "Vol_MA20",         0.0)
     vol_ma5  = _safe_num(df, "Vol_MA5",          _INF)
     vol_now  = _safe_num(df, "Vol_Today",         0.0)
-    max20p   = _safe_num(df, "Max_Price_20_Prev", _INF)
+    high20p  = _safe_num(df, "High_20_Prev",      _INF)
 
     cond_a    = _safe_bool(df, "Cond_A")
     cond_a_5d = _safe_bool(df, "Cond_A_5D")
@@ -65,10 +65,10 @@ def apply_scan_mode(df, selected_mode):
     if selected_mode == "mode_breakout":
         # Momentum Breakout: high liquidity, price breaks 20d high with volume surge
         # base:    20d avg volume > 1000 lots
-        # trigger: today close > prev-20d-high  AND  today volume > 5d avg * 2
+        # trigger: today close > prior-20d HIGH (excl. today)  AND  today volume > 5d avg * 2
         mask = (
             (vol_ma20 > 1000) &
-            (close > max20p) &
+            (close > high20p) &
             (vol_now > vol_ma5 * 2)
         )
         return df[mask].reset_index(drop=True)

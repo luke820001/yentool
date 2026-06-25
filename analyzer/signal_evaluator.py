@@ -109,13 +109,17 @@ def _evaluate_conditions(df: pd.DataFrame) -> pd.DataFrame:
     df["Cond_C"] = cond_c
     df["Is_Golden_Signal"] = cond_a & cond_c
 
-    # Cond_D: breakout with volume surge
+    # Cond_D: breakout with volume surge. The breakout reference is the prior
+    # 20-day HIGH (excluding today), not the max of prior closes: a real
+    # breakout takes out the actual highs of the range. Using close-max fired
+    # early on bars whose intraday highs were never exceeded. Needs a full
+    # 20-bar window, so shorter histories never produce a breakout signal.
     has_breakout_cols = all(c in df.columns for c in
-                            ["close", "Max_Price_20", "Volume_Lot", "MA5_Volume"])
+                            ["close", "high", "Volume_Lot", "MA5_Volume"])
     if has_breakout_cols:
-        prev_max = df["Max_Price_20"].shift(1)
+        prior_high20 = df["high"].rolling(20, min_periods=20).max().shift(1)
         df["Is_Breakout_Signal"] = (
-            (df["close"] > prev_max) &
+            (df["close"] > prior_high20) &
             (df["Volume_Lot"] > df["MA5_Volume"] * BREAKOUT_VOLUME_MULTIPLIER)
         )
     else:

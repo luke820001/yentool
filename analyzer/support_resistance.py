@@ -10,10 +10,14 @@ def _to_float(val) -> float | None:
 
 
 def calc_moving_averages(df: pd.DataFrame) -> dict:
+    # Require the FULL window: an "MA60" built from 12 bars is just a 12-bar mean
+    # mislabeled, and this MA60 is the trend gate (close > MA60) downstream. With
+    # too few bars the value is None, so a short-history name fails the gate
+    # instead of passing on a half-formed average.
     close = pd.to_numeric(df["close"], errors="coerce")
     result = {}
     for w in [20, 60]:
-        ma = close.rolling(window=w, min_periods=1).mean()
+        ma = close.rolling(window=w, min_periods=w).mean()
         result["MA{}".format(w)] = _to_float(ma.iloc[-1]) if len(ma) > 0 else None
     return result
 
@@ -141,7 +145,7 @@ def calc_all(df: pd.DataFrame) -> dict:
     # trailing moving averages (MA10/MA20) and the 20-day low. For a fast mover
     # the rising MA catches the pullback; the lookback low sits far below and is
     # not actionable (a parabolic stock's 20-day low can be 30-50% under price).
-    ma10 = pd.to_numeric(df["close"], errors="coerce").rolling(10, min_periods=1).mean().iloc[-1]
+    ma10 = pd.to_numeric(df["close"], errors="coerce").rolling(10, min_periods=10).mean().iloc[-1]
     cands = [result.get("MA20"), result.get("Support_20L"),
              float(ma10) if pd.notna(ma10) else None]
     below = [float(x) for x in cands if x is not None and 0 < float(x) < float(close)]
