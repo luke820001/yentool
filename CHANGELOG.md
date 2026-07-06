@@ -2,6 +2,36 @@
 
 ---
 
+## 2026-07-06
+
+### feat: ledger-validated trade rules for mode_prelaunch + decision-card UI
+
+**Files:** `scanner/scan_mode.py`, `gui/app.py`, `gemini_hook/prompt_builder.py`
+
+**Evidence** (real-trade simulation on the signal ledger + 16-scan-day replay;
+full numbers in `docs/EVAL_PLAYBOOK.md`, reproducible via `eval_realtrade.py`):
+the limit-below entry was adverse selection (filled picks +0.54% vs no-fill
++9.67% over 5d) and the ~6% stop sat inside daily noise (turned a +3.03% mean
+into +0.16%). The prelaunch alpha concentrates in OTC names (win 71% vs 64%).
+
+**Rule change (mode_prelaunch ONLY -- other modes untouched, no as-directed
+evidence for them yet):** `Suggested_Buy_Price` = signal-day close, i.e. a
+reference for a next-day OPEN market entry (no limit order);
+`Strict_Stop_Loss` = reference * 0.90 (disaster stop, recompute off the actual
+fill); `Risk_Pct` = 10.0. Exit is time-based: 5th trading-day close.
+
+**UI:** new "Market" column + "OTC only" display filter (default ON; hides
+confirmed TSE rows only, unknown market stays visible); per-mode rule-card
+banner (prelaunch shows the entry/stop/exit card, momentum_leader shows a
+negative-expectancy warning -- 23% win as-directed); regime banner now appends
+position advice (risk_on: normal, otherwise: halve NEW positions only -- a
+hard gate also cuts rebound cohorts, so it sizes rather than blocks).
+
+**IMPORTANT for evaluation:** picks recorded from 2026-07-07 onward carry the
+new buy/stop semantics. Before/after comparisons must split on this date.
+
+---
+
 ## 2026-06-25
 
 ### data: forward-performance ledger -- close the open loop

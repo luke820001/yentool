@@ -51,8 +51,9 @@ BOOL_FALSE = "-"
 MAIN_COLUMNS = [
     ("Stock_ID",             "代號",      3),
     ("Stock_Name",           "名稱",      6),
+    ("Market",               "市場",      2.5),
     ("Close_Price",          "收盤價",    3.5),
-    ("Suggested_Buy_Price",  "建議買入",  3.5),
+    ("Suggested_Buy_Price",  "進場參考",  3.5),
     ("Strict_Stop_Loss",     "停損價",    3.5),
     ("Risk_Pct",             "風險%",     3),
     ("Launch_Score",         "起漲分",    3.5),
@@ -60,6 +61,21 @@ MAIN_COLUMNS = [
     ("Foreign_Net_5D",       "外資5日",   3.5),
 ]
 _TOTAL_WEIGHT = sum(w for _, _, w in MAIN_COLUMNS)
+
+# ── 各模式決策卡（依 signal ledger 實戰驗證，見 docs/EVAL_PLAYBOOK.md）────────
+# mode_prelaunch 是目前唯一經實戰模擬驗證有正期望值的模式；其進場/出場規則
+# 直接顯示在橫幅。momentum_leader 照舊建議操作的實戰紀錄為負，明確警告。
+MODE_RULE_CARDS = {
+    "mode_prelaunch": (
+        "決策卡：明日開盤市價進場（表中價格為參考收盤）｜災難停損 -10%"
+        "（以實際成交價重算）｜第 5 個交易日收盤出場｜建議只做 OTC（勝率 71% vs 全部 64%）",
+        "accent"),
+    "mode_momentum_leader": (
+        "警告：此模式照建議操作的實戰紀錄為負期望值（勝率 23%、59% 觸發停損），"
+        "建議停用，僅供觀察",
+        "red"),
+}
+MODE_RULE_DEFAULT = ("此模式尚無實戰驗證數據（ledger 累積中），交易計畫僅供參考", "dim")
 
 # ── 詳細面板分區 ─────────────────────────────────────────────────────────────
 DETAIL_SECTIONS = [
@@ -415,6 +431,20 @@ class ScannerApp(tk.Tk):
             values=mode_labels, state="readonly",
             width=34, font=(FONT, 11), style="Mode.TCombobox")
         self._mode_combo.pack(side=tk.LEFT)
+        self._mode_combo.bind("<<ComboboxSelected>>",
+                              lambda e: self._update_rule_banner())
+
+        # OTC-only display filter. Ledger evidence (docs/EVAL_PLAYBOOK.md):
+        # the prelaunch alpha is concentrated in OTC names (win 71% vs 64%),
+        # so the filter defaults ON. It only hides rows from view -- the scan,
+        # the ledger and the AI report still cover everything.
+        self._otc_var = tk.BooleanVar(value=True)
+        self._otc_chk = tk.Checkbutton(
+            mode_frame, text="只看OTC", variable=self._otc_var,
+            command=self._render_result,
+            bg=BG, fg=FG, selectcolor=SURFACE, activebackground=BG,
+            activeforeground=FG, font=(FONT, 11))
+        self._otc_chk.pack(side=tk.LEFT, padx=(10, 0))
 
         # Status + progress
         mid = tk.Frame(self, bg=BG, padx=20)
@@ -433,6 +463,14 @@ class ScannerApp(tk.Tk):
                                      anchor="w", padx=20)
         self._regime_lbl.pack(fill=tk.X)
         self._update_regime_banner()
+
+        # Per-mode rule card (entry / stop / exit as validated on the ledger)
+        self._rule_var = tk.StringVar(value="")
+        self._rule_lbl = tk.Label(self, textvariable=self._rule_var,
+                                   bg=BG, fg=ACCENT, font=(FONT, 11, "bold"),
+                                   anchor="w", padx=20)
+        self._rule_lbl.pack(fill=tk.X)
+        self._update_rule_banner()
 
         # Legend
         legend = tk.Frame(self, bg=BG, padx=20, pady=2)
@@ -592,10 +630,22 @@ class ScannerApp(tk.Tk):
         try:
             from scanner.market_regime import get_market_regime
             r = get_market_regime()
-            self._regime_var.set(r["text"])
+            text = r["text"]
+            # position advice, validated on the ledger: a hard regime gate cuts
+            # the rebound cohorts too, so risk_off halves NEW positions only
+            if r.get("ok"):
+                text += "　→ 部位建議：" + ("正常" if r.get("risk_on") else "新倉減半")
+            self._regime_var.set(text)
             self._regime_lbl.config(fg=GREEN if r.get("risk_on") else RED)
         except Exception:
             self._regime_var.set("")
+
+    def _update_rule_banner(self):
+        """Show the validated entry/stop/exit card for the selected mode."""
+        text, tone = MODE_RULE_CARDS.get(self._resolve_selected_mode(),
+                                         MODE_RULE_DEFAULT)
+        self._rule_var.set(text)
+        self._rule_lbl.config(fg={"accent": ACCENT, "red": RED}.get(tone, DIM))
 
     def _resolve_selected_mode(self):
         """Map the combobox label back to its English mode key."""
@@ -659,35 +709,66 @@ class ScannerApp(tk.Tk):
 
     def _cb_result(self, df):
         self._last_result = df
+        self.after(0, self._render_result)
 
-        def _draw():
-            if df is None or df.empty:
-                self._count_var.set("未找到符合條件的標的")
-                self._ai_btn.config(state=tk.DISABLED)
-                return
-            self._ai_btn.config(state=tk.NORMAL)
-            for i, (_, row) in enumerate(df.iterrows()):
-                base_tag = _score_tag(row.get("Surge_Score", 0))
-                tag = ("alt" if i % 2 else "alt0") if base_tag == "alt" else base_tag
+    def _render_result(self):
+        """(Re)draw the tree from _last_result, honouring the OTC filter.
+        Called from the scan callback and from the OTC checkbox toggle, so it
+        must fully reset view state (rows, sort arrows, hover) each time."""
+        self._row_data.clear()
+        self._hovered_item = None
+        self._sort_col = None
+        self._sort_reverse = False
+        for row in self._tree.get_children():
+            self._tree.delete(row)
+        self._update_heading_arrows()
 
-                item = self._tree.insert("", tk.END, tags=(tag,), values=(
-                    row.get("Stock_ID",            ""),
-                    row.get("Stock_Name",           ""),
-                    row.get("Close_Price",          ""),
-                    row.get("Suggested_Buy_Price")  if row.get("Suggested_Buy_Price") else "-",
-                    row.get("Strict_Stop_Loss")     if row.get("Strict_Stop_Loss")    else "-",
-                    "{:.1f}%".format(row.get("Risk_Pct"))
-                        if row.get("Risk_Pct") is not None else "-",
-                    row.get("Launch_Score") if row.get("Launch_Score") is not None else "-",
-                    _fmt_gain(row.get("Gain_3M_Pct")),
-                    _fmt_net(row.get("Foreign_Net_5D")),
-                ))
-                self._row_data[item] = row.to_dict()
+        df = self._last_result
+        if df is None:            # toggled before any scan -- nothing to show
+            return
+        if df.empty:
+            self._count_var.set("未找到符合條件的標的")
+            self._ai_btn.config(state=tk.DISABLED)
+            return
+        self._ai_btn.config(state=tk.NORMAL)
 
+        otc_only = bool(self._otc_var.get())
+        shown = 0
+        for _, row in df.iterrows():
+            # hide only confirmed TSE rows; unknown/missing market stays
+            # visible (manual single-stock lookups may not carry Market)
+            if otc_only and str(row.get("Market", "")) == "TSE":
+                continue
+            base_tag = _score_tag(row.get("Surge_Score", 0))
+            tag = ("alt" if shown % 2 else "alt0") if base_tag == "alt" else base_tag
+
+            item = self._tree.insert("", tk.END, tags=(tag,), values=(
+                row.get("Stock_ID",            ""),
+                row.get("Stock_Name",           ""),
+                row.get("Market")               if row.get("Market") else "-",
+                row.get("Close_Price",          ""),
+                row.get("Suggested_Buy_Price")  if row.get("Suggested_Buy_Price") else "-",
+                row.get("Strict_Stop_Loss")     if row.get("Strict_Stop_Loss")    else "-",
+                "{:.1f}%".format(row.get("Risk_Pct"))
+                    if row.get("Risk_Pct") is not None else "-",
+                row.get("Launch_Score") if row.get("Launch_Score") is not None else "-",
+                _fmt_gain(row.get("Gain_3M_Pct")),
+                _fmt_net(row.get("Foreign_Net_5D")),
+            ))
+            self._row_data[item] = row.to_dict()
+            shown += 1
+
+        total = len(df)
+        if otc_only and shown == 0:
             self._count_var.set(
-                "掃描完成，共找到 {} 檔符合訊號的標的  （雙擊任一列查看詳細資訊）".format(len(df))
-            )
-        self.after(0, _draw)
+                "掃描完成，共 {} 檔，但無 OTC 標的（取消「只看OTC」可顯示全部）".format(total))
+        elif otc_only and shown < total:
+            self._count_var.set(
+                "掃描完成，顯示 {} 檔 OTC / 共 {} 檔（雙擊查看詳情；取消「只看OTC」顯示全部）".format(
+                    shown, total))
+        else:
+            self._count_var.set(
+                "掃描完成，共找到 {} 檔符合訊號的標的  （雙擊任一列查看詳細資訊）".format(total))
 
     def _cb_error(self, msg):
         self.after(0, lambda: self._status_var.set("ERROR: {}".format(msg)))

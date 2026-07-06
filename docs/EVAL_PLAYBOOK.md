@@ -98,9 +98,10 @@ TSE 全體基準 +3.26%/59% → picks alpha 只有 +0.56pp。**系統的真 alph
 
 ## 八、未完成事項(狀態:2026-07-06)
 
-- [ ] GUI/報告改用「隔天開盤進場」呈現,廢除 suggested_buy 掛低價
-- [ ] 停損欄位改為 -10% 災難停損(或 1.5~2×ATR,待更多樣本驗證)
+- [x] GUI/報告改用「隔天開盤進場」呈現,廢除 suggested_buy 掛低價(2026-07-06 完成,`scanner/scan_mode.py` prelaunch 分支;**2026-07-07 起 ledger 記錄的是新語義,before/after 比較以此日切分**)
+- [x] 停損欄位改為 -10% 災難停損(2026-07-06 完成,僅 mode_prelaunch;ATR 版待更多樣本)
+- [x] GUI 加「市場」欄 + 「只看OTC」預設開啟 + 模式決策卡橫幅 + regime 部位建議(2026-07-06 完成)
+- [x] momentum_leader 警告橫幅(2026-07-06 完成;模式本身保留供觀察,GUI 明示負期望值)
 - [ ] ledger 寫入實戰模擬報酬(entry=next open、含停損觸發)
 - [ ] outcomes 表去重(PK 去掉 scan_session 或 backfill 時跳過同日重複)
-- [ ] momentum_leader 停用或綁 regime
 - [ ] 累積 15+ 個掃描日後,重新驗證 rank<20 與 -10% vs ATR 停損

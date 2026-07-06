@@ -262,22 +262,44 @@ ENTRY_BUFFER = 0.02   # suggest entry ~2% below close (realistic limit fill)
 MIN_STOP_PCT = 0.06   # never tighter than 6% below entry (avoid instant shakeout)
 MAX_STOP_PCT = 0.13   # never risk more than 13% per trade
 
+# mode_prelaunch override, validated on the signal ledger (2026-07-06; see
+# docs/EVAL_PLAYBOOK.md and eval_realtrade.py). Two findings forced this:
+#   1. The limit-below entry is adverse selection: picks that filled made
+#      +0.54% (5d) while picks that never pulled back to the limit made +9.67%
+#      -- the limit systematically skips the winners. Entry is therefore
+#      next-day OPEN at market; Suggested_Buy_Price becomes a reference price
+#      (= signal-day close), not a limit to post.
+#   2. Any stop inside the daily noise band destroys the edge (-6% intraday
+#      turned a +3.03% mean into +0.16%). Only a wide disaster stop survives,
+#      so the stop is a flat -10% off the reference. The live stop must be
+#      recomputed off the actual fill: fill * (1 - PRELAUNCH_STOP_PCT).
+# Exit is time-based (5th bar close); that rule lives in the UI banner and the
+# playbook, not in these columns. Other modes keep the old plan: their rules
+# have no as-directed ledger evidence yet, changing them would be a blind edit.
+PRELAUNCH_STOP_PCT = 0.10
+
 
 def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
     """
     Append Suggested_Buy_Price, Strict_Stop_Loss and Risk_Pct.
 
     Suggested_Buy_Price
+      mode_prelaunch:
+          Close_Price -- reference for a next-day OPEN market entry (no limit;
+          see PRELAUNCH_STOP_PCT block comment for the ledger evidence).
       momentum (breakout / short_explosion / momentum_leader):
           close * (1 - ENTRY_BUFFER) -- buy a shallow dip near price.
       consolidation (squeeze / bottom):
           min(Close_Price, MA20)     -- enter in the value zone.
 
     Strict_Stop_Loss
-      structural support = max(Min_Price_3, MA10), then CLAMPED so the distance
-      below the entry stays within [MIN_STOP_PCT, MAX_STOP_PCT]. This guarantees
-      stop < buy with breathing room (fixes stop >= buy and stops that are too
-      tight). Risk_Pct exposes the resulting distance for sizing.
+      mode_prelaunch:
+          reference * (1 - PRELAUNCH_STOP_PCT) -- disaster stop only.
+      other modes:
+          structural support = max(Min_Price_3, MA10), CLAMPED so the distance
+          below the entry stays within [MIN_STOP_PCT, MAX_STOP_PCT]. This
+          guarantees stop < buy with breathing room. Risk_Pct exposes the
+          resulting distance for sizing.
     """
     if df is None or df.empty:
         return df
@@ -289,8 +311,16 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
     ma20  = _safe_num(df, "MA20",        0.0)
     min3  = _safe_num(df, "Min_Price_3", 0.0)
 
+    if scan_mode == "mode_prelaunch":
+        buy  = close
+        stop = close * (1 - PRELAUNCH_STOP_PCT)
+        df["Suggested_Buy_Price"] = buy.round(2)
+        df["Strict_Stop_Loss"]    = stop.round(2)
+        df["Risk_Pct"]            = round(PRELAUNCH_STOP_PCT * 100, 1)
+        return df
+
     if scan_mode in ("mode_breakout", "mode_short_explosion",
-                     "mode_momentum_leader", "mode_prelaunch"):
+                     "mode_momentum_leader"):
         buy = close * (1 - ENTRY_BUFFER)
     else:
         # take the lower of close and MA20; fall back to close when MA20 is 0

@@ -103,7 +103,7 @@ def build_local_report(df: pd.DataFrame) -> str:
 
         lines.append(
             "#{rank} {sid} {name}  收盤 {close}\n"
-            "   爆發分={score}  建議買入={buy}  停損={stop}\n"
+            "   爆發分={score}  進場參考={buy}  停損={stop}\n"
             "   訊號：{flags}\n"
             "   支撐={sup}  壓力={res}  距支撐={sgp}%  距壓力={rgp}%\n".format(
                 rank=rank,
