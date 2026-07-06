@@ -34,11 +34,11 @@ ACCENT    = "#4A90E2"   # 點綴藍（10%）
 FG        = "#E0E0E0"   # 主文字
 DIM       = "#757575"   # 次要文字
 GREEN     = "#4CAF50"   # 成立 / 正值
-YELLOW    = "#FFCA28"   # 爆發≥70（琥珀金）
-ORANGE    = "#FFB74D"   # 爆發≥50（淡橘）
+YELLOW    = "#FFD740"   # 爆發≥70（亮金黃，最強）
+ORANGE    = "#FF8A3D"   # 爆發≥50（飽和橘，明顯偏橘）
 RED       = "#E57373"   # 負值 / 警示
-ROW_HIGH  = "#1E2A1A"   # 爆發≥70 底色
-ROW_MID   = "#2A2318"   # 爆發≥50 底色
+ROW_HIGH  = "#2E2A14"   # 爆發≥70 底色（暖金底）
+ROW_MID   = "#2E2014"   # 爆發≥50 底色（暖橘底）
 
 FONT       = "Microsoft JhengHei UI"
 BOOL_TRUE  = "✓"
