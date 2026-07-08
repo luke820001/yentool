@@ -39,6 +39,15 @@ HOLD_BARS_BY_MODE = {
     "mode_prelaunch": 10,
 }
 
+# Market-shock exit delay (validated 2026-07-08, eval_exit_delay.py): if the
+# TAIEX is below its 20MA on the scheduled exit day, keep holding until it climbs
+# back above 20MA, capped at this many bars. On the 214-day OTC replay this beat
+# the fixed 10-bar exit on win AND mean AND both window halves, and never worse
+# (mean +3.98 -> +4.44). Avoids dumping a position into a brief market shock.
+EXIT_DELAY_CAP_BY_MODE = {
+    "mode_prelaunch": 20,
+}
+
 
 def _trading_calendar():
     """Sorted distinct trading dates ('YYYY-MM-DD') from price_volume.db."""
@@ -93,6 +102,17 @@ def annotate_holding(df, scan_mode):
     hold = HOLD_BARS_BY_MODE.get(scan_mode)
     if not hold:
         return df
+    cap = EXIT_DELAY_CAP_BY_MODE.get(scan_mode, hold)   # >= hold; == hold disables
+
+    # Is the market disturbed TODAY (TAIEX below 20MA)? Only then does the exit
+    # delay engage -- see EXIT_DELAY_CAP_BY_MODE. Best effort; default not-disturbed.
+    disturbed = False
+    try:
+        from scanner.market_regime import get_market_regime
+        reg = get_market_regime()
+        disturbed = bool(reg.get("ok")) and not reg.get("above20", True)
+    except Exception:
+        disturbed = False
 
     cal = _trading_calendar()
     if not cal:
@@ -122,13 +142,14 @@ def annotate_holding(df, scan_mode):
 
         entry_idx = idx_of[anchor] + 1          # buy the open AFTER the signal
         today_idx = idx_of.get(today, last_idx)
-        exit_idx = entry_idx + hold - 1         # close of the N-th bar
+        exit_idx = entry_idx + hold - 1         # close of the base N-th bar
+        cap_idx = entry_idx + cap - 1           # hard latest exit bar
 
         entry_dates.append(cal[entry_idx] if entry_idx <= last_idx else "")
         exit_dates.append(cal[exit_idx] if exit_idx <= last_idx else "")
 
         day_no = today_idx - entry_idx + 1      # trading days held incl. today
-        remaining = exit_idx - today_idx        # 0 = exit today, <0 = overdue
+        remaining = exit_idx - today_idx        # to base exit; 0 = today, <0 past
         hold_days.append(max(day_no, 0))
         remainings.append(remaining)
 
@@ -139,18 +160,25 @@ def annotate_holding(df, scan_mode):
             statuses.append("holding")
             notes.append("held {}/{}, exit in {} trading day(s)".format(
                 day_no, hold, remaining))
-        elif remaining == 0:
-            statuses.append("exit_today")
-            notes.append("day {}, exit at today close".format(hold))
+        elif today_idx >= cap_idx:
+            # reached the delay cap -> must exit regardless of the market
+            statuses.append("exit_today" if today_idx == cap_idx else "overdue")
+            notes.append("day {} (delay cap {}), exit now".format(day_no, cap))
+        elif disturbed and cap > hold:
+            # at/past base exit but the market is disturbed -> hold and watch
+            statuses.append("delay")
+            notes.append("day {}: TAIEX below 20MA, hold until it recovers "
+                         "(cap day {})".format(day_no, cap))
         else:
-            statuses.append("overdue")
-            notes.append("overdue: day {}, should be sold".format(day_no))
+            statuses.append("exit_today" if remaining == 0 else "overdue")
+            notes.append("day {}, exit at close".format(day_no))
 
     df["Entry_Date"] = entry_dates
     df["Exit_Date"] = exit_dates
     df["Hold_Day"] = hold_days
     df["Hold_Remaining"] = remainings
-    df["Hold_Total"] = hold          # N in "day X of N" (UIs render the label)
+    df["Hold_Total"] = hold          # base N in "day X of N"
+    df["Hold_Cap"] = cap             # latest exit bar when delayed
     df["Hold_Status"] = statuses
     df["Hold_Note"] = notes
     return df

@@ -67,10 +67,8 @@ _TOTAL_WEIGHT = sum(w for _, _, w in MAIN_COLUMNS)
 # 直接顯示在橫幅。momentum_leader 照舊建議操作的實戰紀錄為負，明確警告。
 MODE_RULE_CARDS = {
     "mode_prelaunch": (
-        "決策卡（214日全期回測校正）：只做 OTC｜大盤順風才開新倉（TAIEX 站上 20MA 且 60MA，"
-        "見上方 regime 燈）｜聚焦 Launch_Score 前 20（核心）｜明日開盤市價進場（表中為參考收盤）｜"
-        "-10% 災難停損｜抱 10 個交易日收盤出場。實測：OTC 勝率約 53%，本組合升到 56%、選股 alpha +5.5pp；"
-        "強月 60%+、弱月 40%——非穩定 70%，勝率隨大盤起伏",
+        "OTC · 順風才進場 · 前20核心 · 隔日開盤進 · -10%停損 · 抱10天(大盤弱可延至20天) · "
+        "回測勝率約56%、alpha +5.5pp",
         "accent"),
     "mode_momentum_leader": (
         "警告：此模式照建議操作的實戰紀錄為負期望值（勝率 23%、59% 觸發停損），"
@@ -207,15 +205,20 @@ def _hold_banner(row):
         day = int(row.get("Hold_Day") or 0)
         rem = int(row.get("Hold_Remaining") or 0)
         total = int(row.get("Hold_Total") or 10)
+        cap = int(row.get("Hold_Cap") or 20)
     except Exception:
         day = rem = 0
         total = 10
+        cap = 20
     exit_d = str(row.get("Exit_Date") or "")
     exit_s = "，出場日 {}".format(exit_d) if exit_d else ""
     if status == "pending":
         return "出場提醒：明日開盤市價進場（尚未進場）", ACCENT
+    if status == "delay":
+        return ("出場提醒：第 {} 天，大盤弱（20MA下）續抱觀察，最晚第 {} 天".format(
+            day, cap), ORANGE)
     if status == "exit_today":
-        return "出場提醒：★ 今日收盤出場（第 {} 天）".format(total), YELLOW
+        return "出場提醒：★ 今日收盤出場（第 {} 天）".format(day), YELLOW
     if status == "overdue":
         return "出場提醒：已持有第 {} 天，應已出場（{}）".format(
             day, exit_d or "已過期"), RED

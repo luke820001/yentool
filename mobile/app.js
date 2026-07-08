@@ -4,7 +4,7 @@
 // not in the Python backend, per the project's ASCII-in-.py rule.
 const MODE_CARDS = {
   mode_prelaunch: [
-    "決策卡（214日全期回測校正）：只做 OTC｜大盤順風才開新倉（見下方 regime 燈）｜聚焦前 20 核心｜明日開盤市價進場｜-10% 災難停損｜抱 10 個交易日收盤出場。實測 OTC 勝率約 53%，本組合升到 56%、alpha +5.5pp；強月 60%+、弱月 40%，非穩定 70%",
+    "OTC · 順風才進場 · 前20核心 · 隔日開盤進 · -10%停損 · 抱10天(大盤弱可延至20天) · 回測勝率~56%",
     "accent",
   ],
   mode_momentum_leader: [
@@ -71,10 +71,11 @@ function holdBanner(r) {
   const st = r.Hold_Status;
   if (!st) return "";
   const day = r.Hold_Day, rem = r.Hold_Remaining, exit = r.Exit_Date || "";
-  const total = r.Hold_Total || 10;
+  const total = r.Hold_Total || 10, cap = r.Hold_Cap || 20;
   let txt, cls;
   if (st === "pending") { txt = "明日開盤進場"; cls = "pending"; }
-  else if (st === "exit_today") { txt = `★ 今日收盤出場（第 ${total} 天）`; cls = "exit"; }
+  else if (st === "delay") { txt = `⏸ 第 ${day} 天 · 大盤弱(20MA下)續抱觀察 · 最晚第 ${cap} 天`; cls = "delay"; }
+  else if (st === "exit_today") { txt = `★ 今日收盤出場（第 ${day} 天）`; cls = "exit"; }
   else if (st === "overdue") { txt = `已第 ${day} 天 · 應已出場${exit ? "（" + exit + "）" : ""}`; cls = "overdue"; }
   else { txt = `持有第 ${day}/${total} 天 · 還有 ${rem} 個交易日${exit ? " · 出場 " + exit : ""}`; cls = "holding"; }
   return `<div class="hold ${cls}">${txt}</div>`;

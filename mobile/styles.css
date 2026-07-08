@@ -176,6 +176,7 @@ body {
 }
 .hold.pending  { background: rgba(74,144,226,0.15); color: #9fc3ee; }
 .hold.holding  { background: rgba(76,175,80,0.12);  color: #9ed7a1; }
+.hold.delay    { background: rgba(255,138,61,0.16);  color: var(--orange); }
 .hold.exit     { background: rgba(255,215,64,0.18);  color: var(--gold); }
 .hold.overdue  { background: rgba(229,115,115,0.14); color: #eaa; }
 

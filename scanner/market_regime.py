@@ -32,6 +32,7 @@ def get_market_regime() -> dict:
         above20 = cur > ma20
         out["ok"] = True
         out["risk_on"] = above60
+        out["above20"] = above20    # exit-delay uses this: below 20MA = disturbed
         # enter_ok = the strict tailwind gate the prelaunch overlay backtest used
         # (TAIEX above BOTH 20 and 60MA). Only open NEW prelaunch positions here;
         # this is what lifts the OTC win rate to ~56pct / alpha +5.5pp.
