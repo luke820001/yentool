@@ -5,28 +5,80 @@ Only the most recent version is kept (the file is overwritten each scan), so
 the folder never accumulates clutter. UTF-8 BOM is used so Excel opens the
 Chinese stock names correctly. All Python strings are ASCII.
 """
+import json
 from datetime import datetime
 
-from config.settings import SCAN_RESULTS_DIR, SCAN_RESULT_FILE
+import pandas as pd
+
+from config.settings import (
+    SCAN_RESULTS_DIR, SCAN_RESULT_FILE, MOBILE_DIR, MOBILE_DATA_FILE,
+)
 
 
 def export_scan_result(df, scan_mode=""):
     """
     Write the full result DataFrame (all computed columns) to SCAN_RESULT_FILE,
     overwriting any previous version. Two context columns (mode + timestamp) are
-    prepended so a saved file is self-describing.
+    prepended so a saved file is self-describing. A JSON twin is also written for
+    the mobile PWA (see export_scan_result_json).
 
-    Returns the written path, or None when there is nothing to export.
+    Returns the written CSV path, or None when there is nothing to export.
     """
     if df is None or df.empty:
         return None
 
     SCAN_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
+    scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     out = df.copy()
     out.insert(0, "Scan_Mode", scan_mode)
-    out.insert(1, "Scan_Time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    out.insert(1, "Scan_Time", scan_time)
 
     # utf-8-sig => Excel detects UTF-8 and renders Chinese names correctly.
     out.to_csv(SCAN_RESULT_FILE, index=False, encoding="utf-8-sig")
+
+    try:
+        export_scan_result_json(df, scan_mode, scan_time)
+    except Exception as e:
+        # A mobile-feed hiccup must never break the primary CSV export.
+        print("  [export] mobile json failed: {}".format(e))
+
     return str(SCAN_RESULT_FILE)
+
+
+def export_scan_result_json(df, scan_mode="", scan_time=""):
+    """
+    Write the scan result as JSON for the mobile PWA. Structure:
+        {"meta": {mode, scan_time, count}, "rows": [ {col: val, ...}, ... ]}
+    NaN/inf are coerced to null so the JSON is valid. Returns the written path.
+    """
+    MOBILE_DIR.mkdir(parents=True, exist_ok=True)
+
+    clean = df.replace([float("inf"), float("-inf")], pd.NA)
+    rows = json.loads(clean.to_json(orient="records", force_ascii=False))
+
+    # Market regime so the phone view can show the prelaunch entry gate
+    # (only open NEW positions when TAIEX is above both 20 and 60MA).
+    try:
+        from scanner.market_regime import get_market_regime
+        reg = get_market_regime()
+    except Exception:
+        reg = {}
+
+    payload = {
+        "meta": {
+            "mode": scan_mode,
+            "scan_time": scan_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "count": len(rows),
+            "regime": {
+                "ok": bool(reg.get("ok", False)),
+                "risk_on": bool(reg.get("risk_on", False)),
+                "enter_ok": bool(reg.get("enter_ok", False)),
+                "text": reg.get("text", ""),
+            },
+        },
+        "rows": rows,
+    }
+    with open(MOBILE_DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+    return str(MOBILE_DATA_FILE)

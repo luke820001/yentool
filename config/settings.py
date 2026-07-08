@@ -24,6 +24,12 @@ SIGNAL_LEDGER_FILE = DATA_DIR / "signal_ledger.db"
 SCAN_RESULTS_DIR = DATA_DIR / "scan_results"
 SCAN_RESULT_FILE = SCAN_RESULTS_DIR / "scan_result_latest.csv"
 
+# --- Mobile PWA data feed ---
+# The mobile/ PWA reads this JSON. Written next to the PWA so serving the
+# mobile/ folder statically exposes both the app and its data in one place.
+MOBILE_DIR       = PROJECT_ROOT / "mobile"
+MOBILE_DATA_FILE = MOBILE_DIR / "scan_result.json"
+
 # --- Rolling Window ---
 # ~400 calendar days => ~270 trading bars. Required so the 52-week-high
 # (252-bar) and RS (63-bar) calculations have enough history; 90 days only
@@ -34,7 +40,12 @@ ROLLING_DAYS = 400
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN", "")
 
-# --- Groq API (replaces Gemini) ---
+# --- Gemini API (primary) ---
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+# --- Groq API (fallback when Gemini fails) ---
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL     = "llama-3.3-70b-versatile"
 GROQ_API_URL   = "https://api.groq.com/openai/v1/chat/completions"

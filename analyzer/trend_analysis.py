@@ -119,8 +119,16 @@ def calc_launch_score(df: pd.DataFrame) -> dict:
     rh = h.rolling(20).max().iloc[-1]; rl = l.rolling(20).min().iloc[-1]
     rt = (float(rh) - float(rl)) / float(rl) if (pd.notna(rl) and rl > 0) else 1.0
 
+    # Liquidity gate measured in turnover VALUE (20d avg lots * price * 1000
+    # >= 1e8 TWD), not share count: a 300-lot floor structurally excluded
+    # high-priced stocks (7769 traded ~700 lots but ~15e8 TWD/day and was
+    # invisible through a 9x run). A/B replay on research_prices.db (2025-09..
+    # 2026-06, ~7.5k trades) showed the value basis raises prelaunch win rate
+    # in every cell -- see CHANGELOG 2026-07-06. Keep in sync with the
+    # prefilter (scanner/market_filter.py) and the replay (eval_realtrade.py).
+    turn20 = (float(vol20) * cur * 1000.0) if pd.notna(vol20) else 0.0
     gate = 1.0 if (pd.notna(ma60) and cur > float(ma60)
-                   and pd.notna(vol20) and float(vol20) > 300) else 0.0
+                   and turn20 >= 1.0e8) else 0.0
 
     mom   = _clip01(max(ret60, 0.0) / 0.5)
     young = 1.0 - _clip01(max(ret5, 0.0) / 0.12)

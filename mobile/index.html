@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>YenTool 選股</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <meta name="theme-color" content="#1E1E24" />
+  <!-- iOS home-screen support -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="YenTool" />
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header id="topbar">
+    <div class="title-row">
+      <h1>YenTool 選股</h1>
+      <button id="refresh" title="重新整理">↻</button>
+    </div>
+    <div id="meta" class="meta"></div>
+    <div id="regime" class="regime"></div>
+    <div id="card" class="decision-card"></div>
+    <input id="search" type="search" placeholder="搜尋代號 / 名稱" />
+  </header>
+
+  <main id="list"></main>
+
+  <footer id="status" class="status"></footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,88 @@
+# Daily cloud scan -> GitHub Pages. Runs the scanner on a schedule with NO PC,
+# publishes mobile/scan_result.json to Pages so the phone PWA always sees the
+# latest. Manual "Run workflow" (workflow_dispatch) doubles as a phone trigger.
+#
+# One-time setup is in mobile/DEPLOY.md. Key points:
+#   - Settings > Pages > Source = "GitHub Actions".
+#   - The big market DBs are cached (not committed) so git stays small; only the
+#     accumulating ledger + hysteresis state are committed back.
+name: daily-scan
+
+on:
+  schedule:
+    # Taiwan is UTC+8, so subtract 8h. Two runs per trading day (the 18:00 run
+    # re-catches any same-day data that was still being published at 17:00).
+    # Mon-Fri only: the market is closed at weekends, so a weekend run would
+    # just repeat Friday's data. GitHub cron is UTC and may be delayed a few
+    # minutes under load -- fine here.
+    - cron: "0 9 * * 1-5"     # 17:00 Taiwan
+    - cron: "0 10 * * 1-5"    # 18:00 Taiwan
+  workflow_dispatch: {}        # manual run button (also usable from the phone)
+
+permissions:
+  contents: write              # commit ledger/state back
+  pages: write                 # deploy Pages
+  id-token: write
+
+concurrency:
+  group: scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Cache the refetchable market DBs so runs start warm and stay fast.
+      # First run (empty cache) cold-fetches everything -- slower but works.
+      - name: Restore market data cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/price_volume.db
+            data/inst_trades.db
+            data/large_holder.db
+            data/taiex.db
+          key: marketdata-${{ github.run_id }}
+          restore-keys: |
+            marketdata-
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run scan
+        run: python scan_headless.py mode_prelaunch
+
+      # Persist only the small, accumulating state (forward-performance ledger,
+      # name cache, hysteresis held-set). Market DBs stay in the cache above.
+      - name: Commit durable state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f data/signal_ledger.db data/stock_names.json data/scan_state 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "no state changes to commit"
+          else
+            git commit -m "chore: daily scan $(date -u +%F)"
+            git push
+          fi
+
+      - name: Upload Pages artifact (mobile/ with fresh scan_result.json)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: mobile
+
+  deploy:
+    needs: scan
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

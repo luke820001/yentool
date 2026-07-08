@@ -156,8 +156,19 @@ def fetch_full_market() -> pd.DataFrame:
 # min_vol : minimum single-day trading volume in shares (stock snapshot)
 #           derived from the mode's Vol_MA20 requirement with a 0.5x safety factor
 #           e.g. Vol_MA20 > 1000 lots -> today >= 500 lots = 500,000 shares
+# min_turnover: minimum single-day turnover in TWD (close * volume). Used
+#           instead of min_vol where liquidity should be measured in VALUE:
+#           share-count floors and share-count ranking structurally exclude
+#           high-priced stocks (7769 at ~700 lots/day ranked #453 by lots but
+#           #63 by value, ~35e8 TWD/day, and was invisible to the scanner
+#           through a 9x run). A/B replay on research_prices.db (2025-09..
+#           2026-06, ~7.5k trades) showed the value basis raises prelaunch
+#           win rate in every cell (all/OTC x hold/stop): see CHANGELOG
+#           2026-07-06. 0.5x safety factor of the downstream 1e8 20d-avg gate.
 # price_max: hard price ceiling (None = no limit)
 # cap      : max candidates to forward to per-stock history fetch
+# rank_by  : snapshot column to rank on before applying cap ("volume" default,
+#            "turnover" ranks by close * volume)
 _MODE_CFG = {
     "mode_squeeze":         {"min_vol":   500_000, "price_max": 150,  "cap": 150},
     "mode_breakout":        {"min_vol": 1_000_000, "price_max": None, "cap": 100},
@@ -168,7 +179,10 @@ _MODE_CFG = {
     "mode_momentum_leader": {"min_vol":   300_000, "price_max": None, "cap": 250},
     # Pre-launch wants the broadest net of all: the whole liquid above-trend
     # universe is scored, then ranked + held by hysteresis downstream.
-    "mode_prelaunch":       {"min_vol":   300_000, "price_max": None, "cap": 300},
+    # Liquidity is measured in turnover VALUE, not shares (see block comment).
+    "mode_prelaunch":       {"min_vol": 0, "min_turnover": 50_000_000,
+                             "price_max": None, "cap": 300,
+                             "rank_by": "turnover"},
 }
 _DEFAULT_CFG = {"min_vol": 0, "price_max": None, "cap": PREFILTER_TOP_N}
 
@@ -182,8 +196,18 @@ def apply_prefilter(df: pd.DataFrame, scan_mode: str = "",
         filtered = filtered[filtered["close"] < cfg["price_max"]]
     if cfg["min_vol"] > 0:
         filtered = filtered[filtered["volume"] >= cfg["min_vol"]]
+    if cfg.get("min_turnover", 0) > 0:
+        filtered = filtered[
+            filtered["close"] * filtered["volume"] >= cfg["min_turnover"]]
 
-    filtered = filtered.sort_values("volume", ascending=False).reset_index(drop=True)
+    if cfg.get("rank_by") == "turnover":
+        rank_key = filtered["close"] * filtered["volume"]
+    else:
+        rank_key = filtered["volume"]
+    filtered = (filtered.assign(_rank_key=rank_key)
+                .sort_values("_rank_key", ascending=False)
+                .drop(columns="_rank_key")
+                .reset_index(drop=True))
     result = filtered.head(cfg["cap"]).reset_index(drop=True)
 
     # Force-include names held from the previous run so the downstream
@@ -201,11 +225,15 @@ def apply_prefilter(df: pd.DataFrame, scan_mode: str = "",
                 result = result.drop_duplicates(subset="stock_id").reset_index(drop=True)
                 forced = len(extra)
 
+    if cfg.get("min_turnover", 0) > 0:
+        liq_desc = "turnover>={:.1f}e8 TWD".format(cfg["min_turnover"] / 1e8)
+    else:
+        liq_desc = "vol>={:.0f}k shares".format(cfg["min_vol"] / 1000)
     print("  Pre-filter [{}]: {} candidates "
-          "(vol>={:.0f}k shares{}, cap {}{})".format(
+          "({}{}, cap {}{})".format(
               scan_mode or "default",
               len(result),
-              cfg["min_vol"] / 1000,
+              liq_desc,
               ", price<{}".format(cfg["price_max"]) if cfg["price_max"] else "",
               cfg["cap"],
               ", +{} held".format(forced) if forced else "",

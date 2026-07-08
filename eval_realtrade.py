@@ -62,11 +62,13 @@ def build_features():
         upv = v.where(c > prev, 0.0)
         dnv = v.where(c < prev, 0.0)
         h52 = c.rolling(252, min_periods=63).max()
+        vol20 = v.rolling(20).mean()
         feats.append(pd.DataFrame({
             "date": g["date"], "sid": str(sid),
             "o": g["open"], "c": c, "h": h, "l": l,
             "ma60": c.rolling(60).mean(),
-            "vol_ma20": v.rolling(20).mean(),
+            "vol_ma20": vol20,
+            "turn20": vol20 * c * 1000.0,
             "ret60": c / c.shift(63) - 1,
             "ret5": c / c.shift(5) - 1,
             "rt": (h.rolling(20).max() - l.rolling(20).min())
@@ -80,10 +82,15 @@ def build_features():
 
 
 def launch_score(t):
-    """SHIPPED formula -- keep in sync with scanner/scan_mode.py."""
+    """SHIPPED formula -- keep in sync with analyzer/trend_analysis.py
+    calc_launch_score (score + gate) and scanner/market_filter.py (pool).
+    Since 2026-07-06 the liquidity gate and the pool ranking are measured in
+    turnover VALUE (TWD), not lots -- share-count floors excluded high-priced
+    stocks entirely (e.g. 7769). Replays of scan days BEFORE 2026-07-07 will
+    show slightly lower ledger overlap because the shipped rule differed."""
     def c01(x, d):
         return (x / d).clip(0, 1)
-    gate = ((t["c"] > t["ma60"]) & (t["vol_ma20"] > 300)).astype(float)
+    gate = ((t["c"] > t["ma60"]) & (t["turn20"] >= 1.0e8)).astype(float)
     mom = c01(t["ret60"].clip(lower=0), 0.5)
     young = 1.0 - c01(t["ret5"].clip(lower=0), 0.12)
     near = 1.0 - c01(t["dist52"].clip(lower=0), 0.30)
@@ -97,11 +104,11 @@ def replay_selection(T):
     all_dates = sorted(T["date"].unique())
     held, streak, picks = set(), {}, []
     for d in [x for x in all_dates if x >= WARMUP_START]:
-        day = T[(T["date"] == d) & (T["ls"] > 0)][["sid", "ls", "vol_ma20"]]
+        day = T[(T["date"] == d) & (T["ls"] > 0)][["sid", "ls", "turn20"]]
         if day.empty:
             held, streak = set(), {}
             continue
-        pool = day.sort_values("vol_ma20", ascending=False).head(POOL)
+        pool = day.sort_values("turn20", ascending=False).head(POOL)
         extra = day[day["sid"].isin(held) & ~day["sid"].isin(set(pool["sid"]))]
         pool = pd.concat([pool, extra]).sort_values(
             "ls", ascending=False).reset_index(drop=True)

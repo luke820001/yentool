@@ -7,6 +7,7 @@ from scanner.scan_mode import (
 )
 from scanner.scan_state import load_held_ids, save_held_ids
 from scanner.signal_ledger import record_picks, backfill_outcomes
+from scanner.holding_tracker import annotate_holding
 from scanner.result_export import export_scan_result
 from ingestion.price_volume_multi import resolve_market
 
@@ -66,6 +67,14 @@ class ScanWorker:
                     n, filled))
             except Exception as e:
                 print("  [ledger] skipped: {}".format(e))
+
+            # Annotate each pick with its holding day + exit date (from the
+            # ledger streak + trading calendar) so a user who does not open the
+            # app daily still knows which day of the 5-bar hold they are on.
+            try:
+                result_df = annotate_holding(result_df, self._scan_mode)
+            except Exception as e:
+                print("  [holding] skipped: {}".format(e))
 
             # Persist the latest result (overwrites previous) for offline review.
             try:

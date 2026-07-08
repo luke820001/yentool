@@ -67,8 +67,10 @@ _TOTAL_WEIGHT = sum(w for _, _, w in MAIN_COLUMNS)
 # 直接顯示在橫幅。momentum_leader 照舊建議操作的實戰紀錄為負，明確警告。
 MODE_RULE_CARDS = {
     "mode_prelaunch": (
-        "決策卡：明日開盤市價進場（表中價格為參考收盤）｜災難停損 -10%"
-        "（以實際成交價重算）｜第 5 個交易日收盤出場｜建議只做 OTC（勝率 71% vs 全部 64%）",
+        "決策卡（214日全期回測校正）：只做 OTC｜大盤順風才開新倉（TAIEX 站上 20MA 且 60MA，"
+        "見上方 regime 燈）｜聚焦 Launch_Score 前 20（核心）｜明日開盤市價進場（表中為參考收盤）｜"
+        "-10% 災難停損｜抱 10 個交易日收盤出場。實測：OTC 勝率約 53%，本組合升到 56%、選股 alpha +5.5pp；"
+        "強月 60%+、弱月 40%——非穩定 70%，勝率隨大盤起伏",
         "accent"),
     "mode_momentum_leader": (
         "警告：此模式照建議操作的實戰紀錄為負期望值（勝率 23%、59% 觸發停損），"
@@ -195,6 +197,32 @@ def _fmt_net(val) -> str:
         return "-"
 
 
+def _hold_banner(row):
+    """出場提醒文字 + 顏色，來源 scanner.holding_tracker 的 Hold_* 欄位。
+    以 ledger 首次上榜日為錨，即使沒有每天掃描也算得準。"""
+    status = row.get("Hold_Status")
+    if status is None or (isinstance(status, float) and math.isnan(status)) or status == "":
+        return "", FG
+    try:
+        day = int(row.get("Hold_Day") or 0)
+        rem = int(row.get("Hold_Remaining") or 0)
+        total = int(row.get("Hold_Total") or 10)
+    except Exception:
+        day = rem = 0
+        total = 10
+    exit_d = str(row.get("Exit_Date") or "")
+    exit_s = "，出場日 {}".format(exit_d) if exit_d else ""
+    if status == "pending":
+        return "出場提醒：明日開盤市價進場（尚未進場）", ACCENT
+    if status == "exit_today":
+        return "出場提醒：★ 今日收盤出場（第 {} 天）".format(total), YELLOW
+    if status == "overdue":
+        return "出場提醒：已持有第 {} 天，應已出場（{}）".format(
+            day, exit_d or "已過期"), RED
+    return "出場提醒：持有第 {}/{} 天，還有 {} 個交易日{}".format(
+        day, total, rem, exit_s), GREEN
+
+
 def _score_tag(score) -> str:
     try:
         s = float(score)
@@ -248,6 +276,13 @@ class DetailDialog(tk.Toplevel):
         ]:
             tk.Label(sub, text=text, bg=BG, fg=color,
                      font=(FONT, 11)).pack(side=tk.LEFT)
+
+        # Holding-day / exit reminder (from scanner.holding_tracker). Anchored to
+        # the ledger streak so it is correct even if the user does not scan daily.
+        hold_text, hold_color = _hold_banner(row)
+        if hold_text:
+            tk.Label(hdr, text=hold_text, bg=BG, fg=hold_color,
+                     font=(FONT, 12, "bold")).pack(anchor="w", pady=(6, 0))
 
         # Score bar
         bar_frame = tk.Frame(hdr, bg=BG)

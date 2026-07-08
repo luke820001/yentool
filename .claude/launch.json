@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mobile-pwa",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["mobile/serve.py"],
+      "port": 8000
+    }
+  ]
+}

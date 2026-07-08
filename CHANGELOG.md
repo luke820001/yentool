@@ -30,6 +30,33 @@ hard gate also cuts rebound cohorts, so it sizes rather than blocks).
 **IMPORTANT for evaluation:** picks recorded from 2026-07-07 onward carry the
 new buy/stop semantics. Before/after comparisons must split on this date.
 
+### feat: prelaunch liquidity measured in turnover VALUE, not share count
+
+**Files:** `scanner/market_filter.py`, `analyzer/trend_analysis.py`,
+`eval_realtrade.py`
+
+**Problem:** the prelaunch prefilter required >=300k SHARES/day and ranked the
+pool by share volume; the Launch_Score gate required vol_ma20 > 300 lots. Both
+structurally exclude high-priced stocks: 7769 (median ~700 lots but ~15e8
+TWD/day, ranking #63 by value vs #453 by lots) was completely invisible to the
+scanner through a 9x run, despite Launch_Score >= 70 firing across 11 months
+when computed on its history. 37 of the 55 stocks priced >=1000 TWD (June
+2026) were missing from the fetch universe, including 3443 (~157e8 TWD/day).
+
+**Evidence:** A/B replay on research_prices.db (full market, 2025-09..2026-06,
+~190 scan days, ~7.5k trades), everything constant except lots->value: win
+rate improved in every cell -- all-picks hold 49.3->50.5%, OTC hold
+51.3->52.1%, all+stop10 47.2->48.2%, OTC+stop10 49.1->49.6%; mean +0.22 to
++0.37pp per trade; 7769 pick-days 38->96.
+
+**Change (mode_prelaunch only):** prefilter floor = single-day turnover
+>= 0.5e8 TWD (0.5x safety of the downstream gate), pool ranked by turnover,
+cap 300 unchanged; Launch_Score gate = 20d-avg turnover >= 1e8 TWD (replaces
+the 300-lot floor -- note this now also EXCLUDES low-priced names under 1e8
+value that previously passed on share count). Other modes untouched.
+eval_realtrade.py replay updated to match; its ledger sanity overlap on scan
+days before 2026-07-07 reads slightly lower by construction.
+
 ---
 
 ## 2026-06-25

@@ -32,6 +32,10 @@ def get_market_regime() -> dict:
         above20 = cur > ma20
         out["ok"] = True
         out["risk_on"] = above60
+        # enter_ok = the strict tailwind gate the prelaunch overlay backtest used
+        # (TAIEX above BOTH 20 and 60MA). Only open NEW prelaunch positions here;
+        # this is what lifts the OTC win rate to ~56pct / alpha +5.5pp.
+        out["enter_ok"] = above60 and above20
 
         if above60 and above20:
             out["text"] = "大盤順風：TAIEX 站上 20/60MA，動能策略 edge 正常（60日回檔 {:.0f}%）".format(dd)
