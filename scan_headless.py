@@ -35,6 +35,34 @@ def _progress(rank, total, stock_id):
         print("  scanning {}/{} ({})".format(rank, total, stock_id))
 
 
+def build_market_reports(df):
+    """Pre-generate one AI report per market view (ALL/OTC/TSE) so the phone can
+    show the report matching its current filter -- exactly the desktop behaviour
+    of "summarize what is on screen" (e.g. OTC filter -> only the OTC names go to
+    the model). With no GEMINI/GROQ key set, generate_report falls back to a local
+    text summary, so the phone always has something. Never aborts the scan."""
+    reports = {}
+    try:
+        from gemini_hook.gemini_client import generate_report
+    except Exception as e:
+        print("  [ai] report module unavailable: {}".format(e))
+        return reports
+
+    views = {"ALL": df}
+    if "Market" in df.columns:
+        for mkt in ("OTC", "TSE"):
+            sub = df[df["Market"].astype(str) == mkt]
+            if not sub.empty:
+                views[mkt] = sub
+    for name, sub in views.items():
+        try:
+            reports[name] = generate_report(sub)
+            print("  [ai] {} report generated ({} names)".format(name, len(sub)))
+        except Exception as e:
+            print("  [ai] {} report skipped: {}".format(name, str(e)[:80]))
+    return reports
+
+
 def run_scan(scan_mode="mode_prelaunch"):
     print("=== headless scan: {} ===".format(scan_mode))
 
@@ -63,8 +91,12 @@ def run_scan(scan_mode="mode_prelaunch"):
     except Exception as e:
         print("  [holding] skipped: {}".format(e))
 
+    # Per-market AI reports for the phone (matches the desktop "summarize what is
+    # shown" behaviour; OTC filter -> only OTC names sent to the model).
+    reports = build_market_reports(result_df)
+
     try:
-        path = export_scan_result(result_df, scan_mode)
+        path = export_scan_result(result_df, scan_mode, reports=reports)
         print("  [export] scan result -> {}".format(path))
     except Exception as e:
         print("  [export] failed: {}".format(e))

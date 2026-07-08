@@ -15,12 +15,15 @@ from config.settings import (
 )
 
 
-def export_scan_result(df, scan_mode=""):
+def export_scan_result(df, scan_mode="", reports=None):
     """
     Write the full result DataFrame (all computed columns) to SCAN_RESULT_FILE,
     overwriting any previous version. Two context columns (mode + timestamp) are
     prepended so a saved file is self-describing. A JSON twin is also written for
     the mobile PWA (see export_scan_result_json).
+
+    `reports` (optional) is a {market: text} dict of pre-generated AI reports the
+    phone shows per market filter; only the cloud path passes it.
 
     Returns the written CSV path, or None when there is nothing to export.
     """
@@ -38,7 +41,7 @@ def export_scan_result(df, scan_mode=""):
     out.to_csv(SCAN_RESULT_FILE, index=False, encoding="utf-8-sig")
 
     try:
-        export_scan_result_json(df, scan_mode, scan_time)
+        export_scan_result_json(df, scan_mode, scan_time, reports=reports)
     except Exception as e:
         # A mobile-feed hiccup must never break the primary CSV export.
         print("  [export] mobile json failed: {}".format(e))
@@ -46,10 +49,11 @@ def export_scan_result(df, scan_mode=""):
     return str(SCAN_RESULT_FILE)
 
 
-def export_scan_result_json(df, scan_mode="", scan_time=""):
+def export_scan_result_json(df, scan_mode="", scan_time="", reports=None):
     """
     Write the scan result as JSON for the mobile PWA. Structure:
-        {"meta": {mode, scan_time, count}, "rows": [ {col: val, ...}, ... ]}
+        {"meta": {mode, scan_time, count, regime, reports}, "rows": [...]}
+    `reports` is an optional {market: text} map (ALL/OTC/TSE) of AI reports.
     NaN/inf are coerced to null so the JSON is valid. Returns the written path.
     """
     MOBILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -76,6 +80,7 @@ def export_scan_result_json(df, scan_mode="", scan_time=""):
                 "enter_ok": bool(reg.get("enter_ok", False)),
                 "text": reg.get("text", ""),
             },
+            "reports": reports or {},
         },
         "rows": rows,
     }

@@ -56,6 +56,13 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run scan
+        env:
+          # Optional: set these as repo secrets to get real AI reports on the
+          # phone. Without them, the scan still runs and uses a local text
+          # summary. Gemini is primary, Groq is the fallback.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python scan_headless.py mode_prelaunch
 
       # Persist only the small, accumulating state (forward-performance ledger,

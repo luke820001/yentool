@@ -44,6 +44,17 @@ Repo → **Actions → daily-scan → Run workflow**。
 
 ---
 
+## B2. 開啟手機版 AI 報告（選配）
+
+手機 App 有「AI 報告」按鈕，會顯示**當前市場篩選**（全部 / OTC / TSE）對應的報告——例如切到 OTC，就只把 OTC 的股票送給 AI。報告在**雲端掃描時**用你的金鑰預先各產一份，所以金鑰不會外流到網頁。
+
+沒設金鑰也能用（會退化成本地文字摘要）。要真 AI，把金鑰加成 repo secret（擇一）：
+```
+gh secret set GEMINI_API_KEY      # 貼上你的 Gemini 金鑰（主要）
+gh secret set GROQ_API_KEY        # 選配，Gemini 失敗時的備援
+```
+或網頁：repo → Settings → Secrets and variables → Actions → New repository secret。設好後下次掃描就有真 AI 報告。
+
 ## C. 想讓程式碼 / 選股資料不公開？（私有替代方案）
 
 GitHub 免費帳號的 Pages 只能從**公開** repo 發佈。若你不想公開：
