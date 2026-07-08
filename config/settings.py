@@ -40,13 +40,20 @@ ROLLING_DAYS = 400
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN", "")
 
+def _clean_key(name: str) -> str:
+    """Env-var API key, stripped of surrounding whitespace AND a BOM (U+FEFF).
+    A BOM sneaks in when a key is piped in via some shells and then blows up the
+    HTTP header encoder ('latin-1' cannot encode U+FEFF); strip it defensively."""
+    return os.environ.get(name, "").strip().strip("\ufeff").strip()
+
+
 # --- Gemini API (primary) ---
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_API_KEY = _clean_key("GEMINI_API_KEY")
+GEMINI_MODEL   = (os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash").strip()
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 # --- Groq API (fallback when Gemini fails) ---
-GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
+GROQ_API_KEY   = _clean_key("GROQ_API_KEY")
 GROQ_MODEL     = "llama-3.3-70b-versatile"
 GROQ_API_URL   = "https://api.groq.com/openai/v1/chat/completions"
 GEMINI_REPORT_FILE = PROJECT_ROOT / "data" / "ai_report.txt"
