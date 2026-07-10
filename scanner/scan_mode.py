@@ -270,13 +270,45 @@ MAX_STOP_PCT = 0.13   # never risk more than 13% per trade
 #      next-day OPEN at market; Suggested_Buy_Price becomes a reference price
 #      (= signal-day close), not a limit to post.
 #   2. Any stop inside the daily noise band destroys the edge (-6% intraday
-#      turned a +3.03% mean into +0.16%). Only a wide disaster stop survives,
-#      so the stop is a flat -10% off the reference. The live stop must be
-#      recomputed off the actual fill: fill * (1 - PRELAUNCH_STOP_PCT).
-# Exit is time-based (5th bar close); that rule lives in the UI banner and the
-# playbook, not in these columns. Other modes keep the old plan: their rules
-# have no as-directed ledger evidence yet, changing them would be a blind edit.
-PRELAUNCH_STOP_PCT = 0.10
+#      turned a +3.03% mean into +0.16%). Only a wide disaster stop survives.
+#      The live stop must be recomputed off the actual fill:
+#      fill * (1 - PRELAUNCH_STOP_PCT).
+# 2026-07-10 (eval_winrate_final.py, 166-scan-day replay): the -10% stop was
+# adopted under hold 5 and never re-validated after the hold moved to 10 bars.
+# Under hold 10 the wider noise band makes -10% a whipsaw stop: it turns the
+# adopted combo's 56.5% win into 48.4% (mean +5.20 -> +3.42). -15% keeps the
+# disaster insurance at a fraction of that cost (win 54.5%, both halves), so
+# the stop widened 0.10 -> 0.15.
+PRELAUNCH_STOP_PCT = 0.15
+
+# Take-profit target, same eval: an intraday +20% TP on the CORE+ subset lifts
+# win 62.2 -> 64.5% for only -0.5pp mean (win-rate/mean trade-off chosen
+# deliberately -- the user optimizes win rate). Shown as Target_Price; the live
+# target must be recomputed off the actual fill: fill * (1 + PRELAUNCH_TP_PCT).
+PRELAUNCH_TP_PCT = 0.20
+
+# Trailing profit lock (2026-07-10 round 2, eval_winrate_round2/2b.py): once
+# the position has traded PRELAUNCH_TRAIL_ARM above entry, the stop rises to
+# entry * (1 + PRELAUNCH_TRAIL_LOCK) -- "gave it all back" losers become small
+# wins. Full replay, CORE+ base: win 62.6 -> 70.9% pooled and 67.1 -> 71.3% on
+# the streak==1 real-entry view (all four quarters 68-76%), mean +5.08 -> +3.96
+# (accepted win-rate/mean trade-off). The arm/lock surface is a smooth plateau
+# (arm 6-10 x lock +1..+3 all 65-71%), not a fitted spike. Locking at +0%
+# (breakeven) is the one bad choice: 45% win -- normal pullbacks get scratched.
+# Both prices must be recomputed off the actual fill in live trading.
+PRELAUNCH_TRAIL_ARM = 0.06
+PRELAUNCH_TRAIL_LOCK = 0.02
+
+# CORE+ entry-quality gate (eval_winrate_search/final.py, full 214-day replay,
+# guards: win/bootLo/h1/h2 all above base AND alpha vs the SAME-filtered
+# universe +8.3pp, quarterly stability all >= base, threshold plateau not a
+# spike). On the adopted combo (OTC + risk_on + rank<20 + hold10) requiring
+#   within 5% of the 52w high  AND  5-day return <= 5% (not already running)
+# lifts win 56.5 -> 62.2% (mean +5.20 -> +6.38, n=519, ~3.3 names/day).
+# Economically this is the mode's own thesis sharpened: pre-launch = coiled at
+# the high, not mid-flight. Both thresholds in PERCENT (column units).
+CORE_PLUS_DIST52_MAX = 5.0
+CORE_PLUS_RET5_MAX = 5.0
 
 
 def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
@@ -317,6 +349,15 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
         df["Suggested_Buy_Price"] = buy.round(2)
         df["Strict_Stop_Loss"]    = stop.round(2)
         df["Risk_Pct"]            = round(PRELAUNCH_STOP_PCT * 100, 1)
+        df["Target_Price"]        = (close * (1 + PRELAUNCH_TP_PCT)).round(2)
+        df["Trail_Arm_Price"]     = (close * (1 + PRELAUNCH_TRAIL_ARM)).round(2)
+        df["Trail_Lock_Price"]    = (close * (1 + PRELAUNCH_TRAIL_LOCK)).round(2)
+        # CORE+ entry-quality flag (see CORE_PLUS_* block comment). Missing
+        # feature values fail the gate rather than pass it.
+        dist52 = _safe_num(df, "Dist_52W_High_Pct", 999.0)
+        ret5   = _safe_num(df, "Ret_5D_Pct", 999.0)
+        df["Core_Plus"] = ((dist52 <= CORE_PLUS_DIST52_MAX)
+                           & (ret5 <= CORE_PLUS_RET5_MAX))
         return df
 
     if scan_mode in ("mode_breakout", "mode_short_explosion",

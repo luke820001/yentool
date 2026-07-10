@@ -35,9 +35,12 @@ from config.settings import PRICE_VOLUME_FILE, ROLLING_DAYS
 _FINMIND = PriceVolumeFetcher()
 
 TWSE_STOCK_DAY_URL = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
+# TPEX revamped its site (the old /web/stock/.../st43_result.php endpoint now
+# redirects to /errors and returns nothing -- which silently killed the OTC
+# fallback path). The current endpoint takes a Gregorian date and returns
+# {"tables": [{"data": [[roc_date, vol_KILOshares, amount, o, h, l, c, ...]]}]}.
 TPEX_STOCK_DAY_URL = (
-    "https://www.tpex.org.tw/web/stock/aftertrading/"
-    "daily_trading_info/st43_result.php"
+    "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock"
 )
 REQUEST_TIMEOUT = 15
 INTER_MONTH_SLEEP = 0.4   # seconds between consecutive month requests
@@ -144,15 +147,13 @@ def fetch_twse(stock_id, lookback_days=90):
 
 def _tpex_one_month(stock_id, year, month):
     """Fetch one calendar month from TPEX individual-stock history endpoint."""
-    roc_year = year - 1911
     try:
         resp = requests.get(
             TPEX_STOCK_DAY_URL,
             params={
-                "l":     "zh-tw",
-                "d":     "{}/{:02d}".format(roc_year, month),
-                "stkno": stock_id,
-                "o":     "json",
+                "code":     stock_id,
+                "date":     "{:04d}/{:02d}/01".format(year, month),
+                "response": "json",
             },
             headers=_HEADERS,
             timeout=REQUEST_TIMEOUT,
@@ -163,12 +164,13 @@ def _tpex_one_month(stock_id, year, month):
     except Exception:
         return pd.DataFrame()
 
-    # TPEX returns DataTables format: aaData or data key
-    data = payload.get("aaData") or payload.get("data", [])
+    tables = payload.get("tables") or []
+    data = tables[0].get("data", []) if tables else []
     if not data:
         return pd.DataFrame()
 
-    # fields: date, vol_shares, amount, open, high, low, close, change, txns
+    # fields: roc_date, vol_KILOshares, amount_K, open, high, low, close,
+    # change, txns  -- volume is in THOUSAND shares on this endpoint.
     rows = []
     for rec in data:
         if len(rec) < 7:
@@ -183,7 +185,7 @@ def _tpex_one_month(stock_id, year, month):
                 "high":         float(_clean(rec[4])),
                 "low":          float(_clean(rec[5])),
                 "close":        float(_clean(rec[6])),
-                "volume_share": float(_clean(rec[1])),
+                "volume_share": float(_clean(rec[1])) * 1000.0,
             })
         except (ValueError, IndexError):
             continue

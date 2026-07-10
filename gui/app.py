@@ -55,7 +55,7 @@ MAIN_COLUMNS = [
     ("Close_Price",          "收盤價",    3.5),
     ("Suggested_Buy_Price",  "進場參考",  3.5),
     ("Strict_Stop_Loss",     "停損價",    3.5),
-    ("Risk_Pct",             "風險%",     3),
+    ("Target_Price",         "停利目標",  3.5),
     ("Launch_Score",         "起漲分",    3.5),
     ("Gain_3M_Pct",          "3月漲幅%",  3.5),
     ("Foreign_Net_5D",       "外資5日",   3.5),
@@ -67,8 +67,8 @@ _TOTAL_WEIGHT = sum(w for _, _, w in MAIN_COLUMNS)
 # 直接顯示在橫幅。momentum_leader 照舊建議操作的實戰紀錄為負，明確警告。
 MODE_RULE_CARDS = {
     "mode_prelaunch": (
-        "OTC · 順風才進場 · 前20核心 · 隔日開盤進 · -10%停損 · 抱10天(大盤弱可延至20天) · "
-        "回測勝率約56%、alpha +5.5pp",
+        "只買OTC核心+(貼近52週高、未起漲) · 順風才進場 · 隔日開盤進 · -15%災難停損 · "
+        "漲6%後鎖利+2% · 觸+20%停利 · 抱10天(大盤弱可延至20天) · 回測勝率約71%(實際進場視角)",
         "accent"),
     "mode_momentum_leader": (
         "警告：此模式照建議操作的實戰紀錄為負期望值（勝率 23%、59% 觸發停損），"
@@ -787,8 +787,7 @@ class ScannerApp(tk.Tk):
                 row.get("Close_Price",          ""),
                 row.get("Suggested_Buy_Price")  if row.get("Suggested_Buy_Price") else "-",
                 row.get("Strict_Stop_Loss")     if row.get("Strict_Stop_Loss")    else "-",
-                "{:.1f}%".format(row.get("Risk_Pct"))
-                    if row.get("Risk_Pct") is not None else "-",
+                row.get("Target_Price")         if row.get("Target_Price")        else "-",
                 row.get("Launch_Score") if row.get("Launch_Score") is not None else "-",
                 _fmt_gain(row.get("Gain_3M_Pct")),
                 _fmt_net(row.get("Foreign_Net_5D")),

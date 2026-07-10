@@ -42,6 +42,19 @@ def _latest_trading_day() -> str:
         d = d - timedelta(days=2)
     return d.strftime("%Y-%m-%d")
 
+
+def _prev_trading_day(day_str: str) -> str:
+    """The weekday before day_str ('YYYY-MM-DD'). Holiday-naive on purpose:
+    used only as a tolerance floor for the lag re-check, where an occasional
+    holiday merely means one extra (harmless) official-API top-up."""
+    d = datetime.strptime(day_str, "%Y-%m-%d").date() - timedelta(days=1)
+    wd = d.weekday()
+    if wd == 5:
+        d = d - timedelta(days=1)
+    elif wd == 6:
+        d = d - timedelta(days=2)
+    return d.strftime("%Y-%m-%d")
+
 # Below this many stored bars, a stock cannot support the 52-week-high (252) or
 # RS (63) calculations, so we force a full backfill instead of a 7-day top-up.
 MIN_HISTORY_BARS = 240
@@ -242,6 +255,23 @@ def verify_candidates(
     missing = [sid for sid in stale_pv if sid not in fetched]
     print("  pv batch yfinance: {}/{}  fallback: {}".format(
         len(fetched), len(stale_pv), len(missing)))
+
+    # yfinance counting as "fetched" only means it returned SOMETHING -- when it
+    # lags it can return rows that still miss the newest sessions, and such a
+    # stock silently stays stale forever (observed 2026-07-10: per-date coverage
+    # decayed 501 -> 315 over a week). Stocks whose newest bar is still 2+
+    # sessions behind after the batch are re-routed to the official APIs.
+    # A 1-session lag is tolerated: it is usually just publication timing or a
+    # holiday, and treating it as stale would hammer TWSE/TPEX on every scan.
+    if fetched:
+        post_dates = batch_latest_date_strings(PRICE_VOLUME_FILE, list(fetched))
+        lag_floor = _prev_trading_day(target_day)
+        lagging = [sid for sid in fetched
+                   if (post_dates.get(sid) or "") < lag_floor]
+        if lagging:
+            print("  pv still lagging after yfinance: {} -> official API".format(
+                len(lagging)))
+            missing = missing + lagging
 
     # Slow path: only the tickers yfinance could not return (TWSE/TPEX/FinMind).
     if missing:

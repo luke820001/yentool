@@ -57,6 +57,19 @@ body {
   font-weight: 600;
   display: none;
 }
+/* stale-data notice: shown while the shipped scan lags the latest expected
+   session; the app polls in the background and clears it on fresh data */
+.stale {
+  display: none;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  background: rgba(255,138,61,0.16);
+  color: var(--orange);
+}
+.stale.show { display: block; }
+
 .regime.on  { display: block; background: rgba(76,175,80,0.15);  color: #9ed7a1; }
 .regime.mid { display: block; background: rgba(255,215,64,0.15);  color: var(--gold); }
 .regime.off { display: block; background: rgba(229,115,115,0.15); color: #eaa; }
@@ -68,6 +81,12 @@ body {
   border-radius: 4px;
   padding: 0 5px;
   font-weight: 600;
+}
+/* CORE+ = top-20 AND entry-quality gate (near 52w high, not extended) --
+   the only rows the validated trading rule actually buys */
+.core.plus {
+  color: #1E1E24;
+  background: var(--gold);
 }
 
 .decision-card {
