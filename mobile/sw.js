@@ -4,11 +4,11 @@
 // build and latest scan; the cache is only a fallback so the last-seen result
 // is still viewable offline. This avoids the classic "PWA shows a stale build"
 // trap that a cache-first shell causes.
-const CACHE = "yentool-v6";
+const CACHE = "yentool-v7";
 const SHELL = [
   "./index.html",
-  "./styles.css?v=6",
-  "./app.js?v=6",
+  "./styles.css?v=7",
+  "./app.js?v=7",
   "./manifest.webmanifest",
   "./scan_result.json",
   "./icons/icon-192.png",
