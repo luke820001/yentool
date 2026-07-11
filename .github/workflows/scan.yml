@@ -10,11 +10,13 @@ name: daily-scan
 
 on:
   schedule:
-    # Taiwan is UTC+8, so subtract 8h. Two runs per trading day (the 18:00 run
-    # re-catches any same-day data that was still being published at 17:00).
-    # Mon-Fri only: the market is closed at weekends, so a weekend run would
-    # just repeat Friday's data. GitHub cron is UTC and may be delayed a few
-    # minutes under load -- fine here.
+    # Taiwan is UTC+8, so subtract 8h. Three runs per trading day: 14:30 right
+    # after the consolidated EOD publishes (~14:00) so the phone sees same-day
+    # picks by mid-afternoon; 17:00 and 18:00 re-catch anything that was still
+    # being published earlier. Mon-Fri only: the market is closed at weekends,
+    # so a weekend run would just repeat Friday's data. GitHub cron is UTC and
+    # may be delayed a few minutes under load -- fine here.
+    - cron: "30 6 * * 1-5"    # 14:30 Taiwan (first same-day scan)
     - cron: "0 9 * * 1-5"     # 17:00 Taiwan
     - cron: "0 10 * * 1-5"    # 18:00 Taiwan
   workflow_dispatch: {}        # manual run button (also usable from the phone)

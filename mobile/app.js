@@ -4,7 +4,7 @@
 // not in the Python backend, per the project's ASCII-in-.py rule.
 const MODE_CARDS = {
   mode_prelaunch: [
-    "OTC · 順風才進場 · 前20核心 · 隔日開盤進 · -10%停損 · 抱10天(大盤弱可延至20天) · 回測勝率~56%",
+    "只買OTC核心+(貼近52週高、未起漲) · 順風才進場 · 隔日開盤進 · -15%災難停損 · 漲6%後鎖利+2% · 觸+20%停利 · 抱10天(大盤弱可延至20天) · 回測勝率~71%",
     "accent",
   ],
   mode_momentum_leader: [
@@ -66,16 +66,89 @@ function light(label, on) {
   return `<span class="light ${on ? "on" : ""}">${label}</span>`;
 }
 
-// Holding-day banner (see scanner/holding_tracker.py).
-function holdBanner(r) {
-  const st = r.Hold_Status;
-  if (!st) return "";
-  const day = r.Hold_Day, rem = r.Hold_Remaining, exit = r.Exit_Date || "";
+// --- Live holding recompute -------------------------------------------------
+// The scan runs after close (17:00/18:00), so the shipped Hold_Day/Hold_Status
+// are frozen at scan time and read one day stale the next morning. Here we
+// recompute them at VIEW time: meta.calendar_tail gives the real trading dates,
+// extended past its end by plain weekdays (holidays unknown until the next scan
+// refreshes the tail -- self-correcting approximation).
+let CAL = [];          // extended trading calendar, "YYYY-MM-DD" ascending
+let KNOWN_LAST = "";   // last REAL (db-backed) trading date in CAL
+let DISTURBED = false; // TAIEX below 20MA -> exit-delay engages
+
+function dstr(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function buildCalendar(tail) {
+  CAL = (tail || []).slice();
+  KNOWN_LAST = CAL.length ? CAL[CAL.length - 1] : "";
+  let d = CAL.length ? new Date(CAL[CAL.length - 1] + "T00:00:00") : new Date();
+  for (let i = 0; i < 45; i++) {
+    d = new Date(d.getTime() + 86400000);
+    const dow = d.getDay();
+    if (dow !== 0 && dow !== 6) CAL.push(dstr(d));
+  }
+}
+
+// Recompute {st, day, rem, exit, total, cap} as of NOW. Mirrors
+// scanner/holding_tracker.py annotate_holding(). null -> fall back to shipped.
+function liveHold(r) {
+  if (!r.Entry_Date || !CAL.length) return null;
+  const iEntry = CAL.indexOf(String(r.Entry_Date).slice(0, 10));
+  if (iEntry < 0) return null;
+  const now = new Date();
+  const today = dstr(now);
+  let iToday = -1; // last trading day <= today (weekend/holiday -> previous bar)
+  for (let i = 0; i < CAL.length; i++) { if (CAL[i] <= today) iToday = i; else break; }
+  if (iToday < 0) return null;
+
   const total = r.Hold_Total || 10, cap = r.Hold_Cap || 20;
+  const iExit = iEntry + total - 1, iCap = iEntry + cap - 1;
+  const day = iToday - iEntry + 1;   // trading days held incl. today
+  const rem = iExit - iToday;        // to base exit; 0 = today, <0 past
+  // Entry is at the open; before 09:00 on entry day the position isn't on yet.
+  const beforeOpen = today === CAL[iEntry] && now.getHours() < 9;
+  const afterClose = now.getHours() > 13 || (now.getHours() === 13 && now.getMinutes() >= 30);
+
+  let st;
+  if (day <= 0 || beforeOpen) st = "pending";
+  else if (rem > 0) st = "holding";
+  else if (iToday >= iCap) st = iToday === iCap ? "exit_today" : "overdue";
+  else if (DISTURBED && cap > total) st = "delay";
+  else st = rem === 0 ? "exit_today" : "overdue";
+
+  return {
+    st, day: Math.max(day, 0), rem, total, cap,
+    entry: CAL[iEntry],
+    exit: iExit < CAL.length ? CAL[iExit] : "",
+    entryIsToday: today === CAL[iEntry],
+    afterClose,
+  };
+}
+
+// Holding-day banner, recomputed live (see scanner/holding_tracker.py).
+function holdBanner(r) {
+  if (!r.Hold_Status) return "";
+  const h = liveHold(r);
+  // Fallback: shipped scan-time snapshot (calendar missing from older JSON).
+  const st = h ? h.st : r.Hold_Status;
+  const day = h ? h.day : r.Hold_Day;
+  const rem = h ? h.rem : r.Hold_Remaining;
+  const exit = h ? h.exit : (r.Exit_Date || "");
+  const total = (h ? h.total : r.Hold_Total) || 10;
+  const cap = (h ? h.cap : r.Hold_Cap) || 20;
   let txt, cls;
-  if (st === "pending") { txt = "明日開盤進場"; cls = "pending"; }
+  if (st === "pending") {
+    txt = h && h.entryIsToday ? "今日開盤進場（09:00）"
+        : h && h.entry ? `${h.entry} 開盤進場` : "明日開盤進場";
+    cls = "pending";
+  }
   else if (st === "delay") { txt = `⏸ 第 ${day} 天 · 大盤弱(20MA下)續抱觀察 · 最晚第 ${cap} 天`; cls = "delay"; }
-  else if (st === "exit_today") { txt = `★ 今日收盤出場（第 ${day} 天）`; cls = "exit"; }
+  else if (st === "exit_today") {
+    txt = h && h.afterClose ? `★ 已到期，今日收盤出場（第 ${day} 天）` : `★ 今日收盤出場（第 ${day} 天）`;
+    cls = "exit";
+  }
   else if (st === "overdue") { txt = `已第 ${day} 天 · 應已出場${exit ? "（" + exit + "）" : ""}`; cls = "overdue"; }
   else { txt = `持有第 ${day}/${total} 天 · 還有 ${rem} 個交易日${exit ? " · 出場 " + exit : ""}`; cls = "holding"; }
   return `<div class="hold ${cls}">${txt}</div>`;
@@ -153,18 +226,22 @@ function stockHtml(r) {
     cell("收盤價", { txt: fmt(r.Close_Price, 2) }) +
     cell("進場參考", { txt: fmt(r.Suggested_Buy_Price, 2), cls: "gold" }) +
     cell("停損價", { txt: fmt(r.Strict_Stop_Loss, 2) }) +
-    cell("風險%", { txt: fmt(r.Risk_Pct, 1, "%") }) +
+    cell("停利目標", { txt: fmt(r.Target_Price, 2), cls: "gold" }) +
     cell("起漲分", { txt: fmt(r.Launch_Score, 1) }) +
-    cell("蓄勢分", { txt: fmt(r.Explosion_Score, 1) }) +
+    cell("鎖利價(漲6%後)", { txt: fmt(r.Trail_Lock_Price, 2), cls: "gold" }) +
     cell("3月漲幅", { txt: fmtSigned(r.Gain_3M_Pct, 1, "%"), cls: signClass(r.Gain_3M_Pct) }) +
     cell("外資5日", { txt: fmtSigned(r.Foreign_Net_5D, 0), cls: signClass(r.Foreign_Net_5D) });
+  // 核心+ = the exact validated buy rule: overall top-20 AND OTC AND the
+  // entry-quality gate. TSE rows never get the plus (the edge is OTC-only).
+  const corePlus = r._rank <= 20 && r.Core_Plus && String(r.Market) === "OTC";
   return `
     <div class="stock ${tierClass(r)}" data-id="${r.Stock_ID}">
       <div class="stock-head">
         <span class="rank">${r._rank}</span>
         <span class="name">${r.Stock_Name || r.Stock_ID}</span>
         <span class="code">${r.Stock_ID}</span>
-        ${r._rank <= 20 ? '<span class="core">核心</span>' : ""}
+        ${corePlus ? '<span class="core plus">核心+</span>'
+                   : r._rank <= 20 ? '<span class="core">核心</span>' : ""}
         <span class="market">${r.Market || ""}</span>
       </div>
       ${holdBanner(r)}
@@ -251,6 +328,65 @@ function buildControls() {
   $("#aiBtn").onclick = () => $("#aiPanel").classList.toggle("show");
 }
 
+// --- Freshness watchdog -------------------------------------------------------
+// "Opening the app" on iOS usually RESUMES a backgrounded PWA, so nothing
+// reloads by itself: without this block the user stares at yesterday's scan
+// until they hit the refresh button. Rules:
+//   * every resume (visibilitychange -> visible) re-fetches the JSON and
+//     re-renders, which also refreshes the live holding-day math to "now";
+//   * the newest session we EXPECT data for = today once the 14:30 cloud scan
+//     has had time to publish (~15:30), else the previous weekday
+//     (holiday-naive: on a holiday the notice shows, wording covers it);
+//   * while the shipped data is older than that, an amber notice shows and the
+//     app silently re-polls every 5 minutes until fresh data lands.
+const STALE_POLL_MS = 5 * 60 * 1000;
+const PUBLISH_HM = 15 * 60 + 30;   // today's scan should be on Pages by 15:30
+let STALE_TIMER = null;
+
+function expectedDataDate() {
+  const now = new Date();
+  const d = new Date(now);
+  if (now.getHours() * 60 + now.getMinutes() < PUBLISH_HM) d.setDate(d.getDate() - 1);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
+  return dstr(d);
+}
+
+function updateStale(dataDate) {
+  const el = $("#stale");
+  const want = expectedDataDate();
+  const stale = !!dataDate && dataDate.slice(0, 10) < want;
+  if (STALE_TIMER) { clearTimeout(STALE_TIMER); STALE_TIMER = null; }
+  if (stale) {
+    el.textContent = `⏳ 等待 ${want} 掃描結果（目前為 ${dataDate}；假日則無新資料）· 每 5 分鐘自動重試`;
+    el.className = "stale show";
+    STALE_TIMER = setTimeout(load, STALE_POLL_MS);
+  } else {
+    el.className = "stale";
+    el.textContent = "";
+  }
+}
+
+// iOS fires different events depending on how the PWA comes back (app switch,
+// bfcache restore, external-link return), so listen to all three; RESUME_GATE
+// keeps a single resume from triggering multiple parallel loads.
+let RESUME_GATE = 0;
+function onResume() {
+  const now = Date.now();
+  if (document.hidden || now - RESUME_GATE < 2000) return;
+  RESUME_GATE = now;
+  load();
+  // also check for a new app shell (deploys while the PWA slept); when one is
+  // found the controllerchange handler below reloads the page automatically
+  if ("serviceWorker" in navigator && window.isSecureContext) {
+    navigator.serviceWorker.getRegistration()
+      .then((reg) => reg && reg.update())
+      .catch(() => {});
+  }
+}
+document.addEventListener("visibilitychange", onResume);
+window.addEventListener("pageshow", onResume);
+window.addEventListener("focus", onResume);
+
 async function load() {
   $("#status").textContent = "載入中…";
   try {
@@ -260,9 +396,22 @@ async function load() {
     ALL_ROWS = (data.rows || []).map((r, i) => ({ ...r, _rank: i + 1 }));
     const m = data.meta || {};
     REPORTS = m.reports || {};
+    buildCalendar(m.calendar_tail);
+    DISTURBED = !!(m.regime && m.regime.ok) && m.regime.above20 === false;
     const dataDate = ALL_ROWS.length ? (ALL_ROWS[0].Data_Date || "") : "";
+    // Trading days elapsed since the data date, so a morning open clearly says
+    // "prices are last night's close" instead of silently looking current.
+    let age = "";
+    if (dataDate && CAL.length) {
+      const iData = CAL.indexOf(String(dataDate).slice(0, 10));
+      const today = dstr(new Date());
+      let iToday = -1;
+      for (let i = 0; i < CAL.length; i++) { if (CAL[i] <= today) iToday = i; else break; }
+      if (iData >= 0 && iToday > iData) age = `（收盤價為 ${iToday - iData} 個交易日前）`;
+    }
     $("#meta").textContent =
-      `${m.mode || ""}｜掃描 ${m.scan_time || ""}｜資料 ${dataDate}`;
+      `${m.mode || ""}｜掃描 ${m.scan_time || ""}｜資料 ${dataDate}${age}`;
+    updateStale(dataDate);
     const [txt, cls] = MODE_CARDS[m.mode] || MODE_CARD_DEFAULT;
     const card = $("#card");
     card.textContent = txt;
@@ -285,4 +434,13 @@ load();
 // Service worker only registers in a secure context (https or localhost).
 if ("serviceWorker" in navigator && window.isSecureContext) {
   navigator.serviceWorker.register("./sw.js").catch(() => {});
+  // The freshness watchdog reloads DATA, but a suspended PWA keeps running the
+  // OLD app code forever. When a new service worker takes control (= a deploy
+  // landed), reload once so the page swaps to the new shell by itself.
+  let swReloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (swReloaded) return;
+    swReloaded = true;
+    window.location.reload();
+  });
 }

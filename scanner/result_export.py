@@ -69,6 +69,16 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None):
     except Exception:
         reg = {}
 
+    # Trading-calendar tail so the phone can recompute holding day / entry-exit
+    # status live at view time (the scan runs after close; without this, "day N"
+    # and "enter tomorrow" freeze at scan time and read one day stale the next
+    # morning). 40 dates comfortably covers hold 10 / delay cap 20.
+    try:
+        from scanner.holding_tracker import _trading_calendar
+        calendar_tail = _trading_calendar()[-40:]
+    except Exception:
+        calendar_tail = []
+
     payload = {
         "meta": {
             "mode": scan_mode,
@@ -78,8 +88,10 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None):
                 "ok": bool(reg.get("ok", False)),
                 "risk_on": bool(reg.get("risk_on", False)),
                 "enter_ok": bool(reg.get("enter_ok", False)),
+                "above20": bool(reg.get("above20", True)),
                 "text": reg.get("text", ""),
             },
+            "calendar_tail": calendar_tail,
             "reports": reports or {},
         },
         "rows": rows,
