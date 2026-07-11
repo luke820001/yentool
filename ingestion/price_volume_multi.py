@@ -270,12 +270,29 @@ def fetch_yfinance(stock_id, market="TSE", lookback_days=90):
     if any(c not in df.columns for c in required):
         return pd.DataFrame()
 
-    return df[required].dropna().reset_index(drop=True)
+    out = df[required].dropna().reset_index(drop=True)
+    return _drop_synthetic_bars(out)
 
 
 # ── yfinance batch (one threaded request for many tickers) ───────────────────
 
 YF_BATCH_SIZE = 50   # tickers per yfinance.download call
+
+
+def _drop_synthetic_bars(df):
+    """Drop zero-volume bars Yahoo fabricates for unscheduled closures.
+
+    Observed 2026-07-10 (typhoon closure, market never opened): yfinance
+    returned a bar for that date on every TW ticker with volume 0 and
+    O=H=L=C=previous close. Such bars poisoned price_volume.db, the ledger
+    (35 picks anchored to a session that never traded) and the mobile
+    trading calendar. A liquid TW stock never prints a genuine 0-volume
+    session, so volume==0 is a safe discriminator; a flat synthetic bar
+    carries no information even if one were real.
+    """
+    if df.empty or "volume_share" not in df.columns:
+        return df
+    return df[df["volume_share"] > 0].reset_index(drop=True)
 
 
 def _normalize_yf_single(sub, stock_id):
@@ -296,7 +313,8 @@ def _normalize_yf_single(sub, stock_id):
     required = ["date", "stock_id", "open", "high", "low", "close", "volume_share"]
     if any(c not in sub.columns for c in required):
         return pd.DataFrame()
-    return sub[required].dropna().reset_index(drop=True)
+    out = sub[required].dropna().reset_index(drop=True)
+    return _drop_synthetic_bars(out)
 
 
 def fetch_yfinance_batch(ticker_map, lookback_days=ROLLING_DAYS):
