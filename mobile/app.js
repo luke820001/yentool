@@ -80,14 +80,31 @@ function dstr(d) {
   const p = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
-function buildCalendar(tail) {
+function buildCalendar(tail, scanTime) {
   CAL = (tail || []).slice();
   KNOWN_LAST = CAL.length ? CAL[CAL.length - 1] : "";
+  // Unscheduled-closure detection (typhoon days): if the scan ran AFTER a
+  // weekday's close (>=15:00) and that weekday still has no bar in the real
+  // calendar, the market did not trade that day. Skip such days when
+  // extrapolating, otherwise every weekday is assumed to trade and hold-day
+  // counts run one high across the closure (observed 2026-07-10 typhoon:
+  // day counts and exit prompts were one day early until the next scan).
+  let verified = "";
+  if (scanTime) {
+    const st = new Date(String(scanTime).slice(0, 19).replace(" ", "T"));
+    if (!isNaN(st.getTime())) {
+      if (st.getHours() < 15) st.setTime(st.getTime() - 86400000);
+      verified = dstr(st);
+    }
+  }
   let d = CAL.length ? new Date(CAL[CAL.length - 1] + "T00:00:00") : new Date();
   for (let i = 0; i < 45; i++) {
     d = new Date(d.getTime() + 86400000);
     const dow = d.getDay();
-    if (dow !== 0 && dow !== 6) CAL.push(dstr(d));
+    if (dow === 0 || dow === 6) continue;
+    const ds = dstr(d);
+    if (verified && ds <= verified) continue;   // known closure: no bar despite post-close scan
+    CAL.push(ds);
   }
 }
 
@@ -353,7 +370,14 @@ function expectedDataDate() {
 
 function updateStale(dataDate) {
   const el = $("#stale");
-  const want = expectedDataDate();
+  // Clamp the naive weekday expectation onto the closure-aware calendar, so an
+  // unscheduled closure (typhoon 2026-07-10) is not waited on forever.
+  let want = expectedDataDate();
+  if (CAL.length) {
+    let w = "";
+    for (const c of CAL) { if (c <= want) w = c; else break; }
+    if (w) want = w;
+  }
   const stale = !!dataDate && dataDate.slice(0, 10) < want;
   if (STALE_TIMER) { clearTimeout(STALE_TIMER); STALE_TIMER = null; }
   if (stale) {
@@ -396,7 +420,7 @@ async function load() {
     ALL_ROWS = (data.rows || []).map((r, i) => ({ ...r, _rank: i + 1 }));
     const m = data.meta || {};
     REPORTS = m.reports || {};
-    buildCalendar(m.calendar_tail);
+    buildCalendar(m.calendar_tail, m.scan_time);
     DISTURBED = !!(m.regime && m.regime.ok) && m.regime.above20 === false;
     const dataDate = ALL_ROWS.length ? (ALL_ROWS[0].Data_Date || "") : "";
     // Trading days elapsed since the data date, so a morning open clearly says
