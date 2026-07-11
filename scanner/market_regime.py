@@ -37,6 +37,14 @@ def get_market_regime() -> dict:
         # (TAIEX above BOTH 20 and 60MA). Only open NEW prelaunch positions here;
         # this is what lifts the OTC win rate to ~56pct / alpha +5.5pp.
         out["enter_ok"] = above60 and above20
+        # str20 = how far above the 20MA, fraction (sandbox 2026-07-11, C2):
+        # >= 0.022 marked the stronger-tailwind days in BOTH 6y windows
+        # (+2.5pp train / +1.4pp valid). Per the 2026-07-06 settled finding
+        # (regime hard gate adds nothing, use for sizing), this is surfaced
+        # as a banner tier / sizing hint, NOT a filter.
+        out["str20"] = round(cur / ma20 - 1, 4) if ma20 > 0 else None
+        out["strong"] = bool(out["enter_ok"] and out["str20"] is not None
+                             and out["str20"] >= 0.022)
 
         if above60 and above20:
             out["text"] = "大盤順風：TAIEX 站上 20/60MA，動能策略 edge 正常（60日回檔 {:.0f}%）".format(dd)

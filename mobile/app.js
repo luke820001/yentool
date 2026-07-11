@@ -4,7 +4,7 @@
 // not in the Python backend, per the project's ASCII-in-.py rule.
 const MODE_CARDS = {
   mode_prelaunch: [
-    "只買OTC核心+(貼近52週高、未起漲) · 順風才進場 · 隔日開盤進 · -15%災難停損 · 漲6%後鎖利+2% · 觸+20%停利 · 抱10天(大盤弱可延至20天) · 回測勝率~71%",
+    "只買OTC核心+(貼近52週高、未起漲、日振幅≥4.5%) · 順風才進場 · 隔日開盤進 · -15%災難停損 · 漲6%後鎖利+2% · 觸+20%停利 · 抱10天(大盤弱可延至20天) · 順風年回測~71%(6年全周期~64%)",
     "accent",
   ],
   mode_momentum_leader: [
@@ -304,7 +304,10 @@ function apply() {
 function renderRegime(reg) {
   const el = $("#regime");
   if (!reg || !reg.ok) { el.className = "regime"; el.textContent = ""; return; }
-  if (reg.enter_ok) { el.textContent = "大盤順風 · 可開新倉"; el.className = "regime on"; }
+  // strong = TAIEX >=2.2% above its 20MA (sandbox C2, sizing hint only --
+  // weaker tailwind days were the losing years' habitat in the 6y replay).
+  if (reg.enter_ok && reg.strong) { el.textContent = "大盤強順風 · 可開新倉"; el.className = "regime on"; }
+  else if (reg.enter_ok) { el.textContent = "大盤順風（20MA上緣 <2.2%）· 可開新倉、部位減量"; el.className = "regime on"; }
   else if (reg.risk_on) { el.textContent = "大盤中性（跌破 20MA）· 新倉保守"; el.className = "regime mid"; }
   else { el.textContent = "大盤逆風（跌破 60MA）· 暫緩開新倉、減碼"; el.className = "regime off"; }
 }

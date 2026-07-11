@@ -309,6 +309,16 @@ PRELAUNCH_TRAIL_LOCK = 0.02
 # the high, not mid-flight. Both thresholds in PERCENT (column units).
 CORE_PLUS_DIST52_MAX = 5.0
 CORE_PLUS_RET5_MAX = 5.0
+# Third gate condition (sandbox 2026-07-11, docs/SANDBOX_PLAN.md H2 C3):
+# 6-year research replay showed the LOWEST-volatility quartile of CORE+
+# picks is the worst bucket in BOTH the train (<=2024) and valid (2025+)
+# windows -- a too-quiet stock cannot reach the +6% trail arm / +20% tp
+# that the exit stack needs. Requiring ATR_Pct (20-day mean of
+# (high-low)/close, percent) >= 4.5 lifts the 6y pooled win 61.2 -> 63.5
+# (train 59.0->61.5, valid 66.3->67.4) and is neutral-positive on the
+# live window (70.9->71.2 pooled, 71.3->71.6 streak==1). Plateau is flat
+# across 4.0-5.0. Missing ATR fails the gate, consistent with the others.
+CORE_PLUS_ATR_MIN = 4.5
 
 
 def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
@@ -356,8 +366,10 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
         # feature values fail the gate rather than pass it.
         dist52 = _safe_num(df, "Dist_52W_High_Pct", 999.0)
         ret5   = _safe_num(df, "Ret_5D_Pct", 999.0)
+        atr    = _safe_num(df, "ATR_Pct", -1.0)
         df["Core_Plus"] = ((dist52 <= CORE_PLUS_DIST52_MAX)
-                           & (ret5 <= CORE_PLUS_RET5_MAX))
+                           & (ret5 <= CORE_PLUS_RET5_MAX)
+                           & (atr >= CORE_PLUS_ATR_MIN))
         return df
 
     if scan_mode in ("mode_breakout", "mode_short_explosion",
