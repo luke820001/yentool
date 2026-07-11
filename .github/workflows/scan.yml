@@ -33,6 +33,13 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    # The scanner decides "is today's close published yet" from local wall time
+    # (chip_verifier._latest_trading_day, _EOD_HOUR=14) and stamps scan_time
+    # with datetime.now(). GitHub runners default to UTC, where every TW-daytime
+    # run reads as before-06:00 -- the 14:30/17:00/18:00 scans would all target
+    # YESTERDAY's session and never require the same-day bar. Pin Taiwan time.
+    env:
+      TZ: Asia/Taipei
     steps:
       - uses: actions/checkout@v4
 
