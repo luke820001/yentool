@@ -89,6 +89,8 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None):
                 "risk_on": bool(reg.get("risk_on", False)),
                 "enter_ok": bool(reg.get("enter_ok", False)),
                 "above20": bool(reg.get("above20", True)),
+                "str20": reg.get("str20"),
+                "strong": bool(reg.get("strong", False)),
                 "text": reg.get("text", ""),
             },
             "calendar_tail": calendar_tail,
