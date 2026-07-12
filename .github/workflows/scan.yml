@@ -57,6 +57,7 @@ jobs:
             data/inst_trades.db
             data/large_holder.db
             data/taiex.db
+            data/tdcc_history.db
           key: marketdata-${{ github.run_id }}
           restore-keys: |
             marketdata-

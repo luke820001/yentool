@@ -33,12 +33,17 @@ KEEP_DAYS = 120
 
 
 def fetch_tdcc_latest() -> pd.DataFrame:
-    """One request -> per-stock {stock_id, date, Large_Holder_Pct, Retail_Pct}."""
+    """One request -> per-stock {stock_id, date, Large_Holder_Pct, Retail_Pct}.
+    Side effect: archives the raw per-level table (holders/shares/pct for all
+    15 tiers, whole market) into data/tdcc_history.db -- the panel the
+    big-holder behaviour study accumulates on (docs/SANDBOX_PLAN.md H5).
+    The aggregate frame this returns is unchanged."""
     r = requests.get(TDCC_URL, timeout=60, verify=False, headers=_HEADERS)
     r.raise_for_status()
     df = pd.read_csv(io.BytesIO(r.content), encoding="utf-8", dtype=str)
     df.columns = [c.strip() for c in df.columns]
     date_c, code_c, lvl_c = df.columns[0], df.columns[1], df.columns[2]
+    hold_c, share_c = df.columns[3], df.columns[4]
     pct_c = df.columns[-1]
 
     code = df[code_c].astype(str).str.strip()
@@ -47,6 +52,11 @@ def fetch_tdcc_latest() -> pd.DataFrame:
     raw_date = str(df[date_c].iloc[0]).strip()
     iso = "{}-{}-{}".format(raw_date[:4], raw_date[4:6], raw_date[6:8])
 
+    try:
+        _archive_levels(iso, code, lvl, df[hold_c], df[share_c], pct)
+    except Exception as e:
+        print("  [chip] level archive skipped: {}".format(str(e)[:60]))
+
     g = pd.DataFrame({"stock_id": code, "lvl": lvl, "pct": pct})
     large = g[g["lvl"].isin(LARGE_LEVELS)].groupby("stock_id")["pct"].sum()
     retail = g[g["lvl"].isin(RETAIL_LEVELS)].groupby("stock_id")["pct"].sum()
@@ -54,6 +64,28 @@ def fetch_tdcc_latest() -> pd.DataFrame:
                      retail.rename("Retail_Pct")], axis=1).reset_index()
     out["date"] = iso
     return out.dropna(subset=["Large_Holder_Pct"]).reset_index(drop=True)
+
+
+def _archive_levels(iso, code, lvl, holders, shares, pct):
+    """Append this week's whole-market per-level rows to tdcc_history.db
+    (same schema as ingestion/tdcc_history.py). Idempotent via PK."""
+    hist_db = LARGE_HOLDER_FILE.parent / "tdcc_history.db"
+    lv = pd.to_numeric(lvl, errors="coerce")
+    hd = pd.to_numeric(holders.astype(str).str.replace(",", "", regex=False),
+                       errors="coerce")
+    sh = pd.to_numeric(shares.astype(str).str.replace(",", "", regex=False),
+                       errors="coerce")
+    rows = pd.DataFrame({"date": iso, "stock_id": code, "level": lv,
+                         "holders": hd, "shares": sh, "pct": pct})
+    rows = rows[(rows["level"] >= 1) & (rows["level"] <= 15)].dropna()
+    with sqlite3.connect(hist_db) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS levels ("
+                     "date TEXT, stock_id TEXT, level INTEGER, "
+                     "holders INTEGER, shares INTEGER, pct REAL, "
+                     "PRIMARY KEY (date, stock_id, level))")
+        conn.executemany(
+            "INSERT OR REPLACE INTO levels VALUES (?,?,?,?,?,?)",
+            rows.itertuples(index=False, name=None))
 
 
 def _read_existing() -> pd.DataFrame:
