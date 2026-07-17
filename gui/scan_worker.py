@@ -1,6 +1,8 @@
 import threading
 import pandas as pd
-from scanner.market_filter import get_candidate_list, lookup_stock_info
+from scanner.market_filter import (
+    get_candidate_list, get_feed_health, lookup_stock_info,
+)
 from scanner.chip_verifier import verify_candidates
 from scanner.scan_mode import (
     apply_scan_mode, add_trade_columns, sort_for_mode, select_with_hysteresis,
@@ -41,6 +43,19 @@ class ScanWorker:
                 self._on_error("Failed to fetch market data. Check your connection.")
                 return
 
+            # Degraded feed guard (see market_filter.FEED_MIN_ROWS): scan and
+            # display what survived, but never overwrite held_ids / the ledger
+            # session with a partial market.
+            health = get_feed_health()
+            degraded = None
+            if not health.get("ok", True):
+                degraded = ("feed degraded: {} snapshot failed "
+                            "(TSE {} / OTC {} rows)").format(
+                    "+".join(health.get("missing", [])),
+                    health.get("tse_rows"), health.get("otc_rows"))
+                print("  [guard] {} -> held_ids/ledger NOT updated".format(
+                    degraded))
+
             total = len(candidates)
 
             def progress_callback(rank, total, stock_id):
@@ -54,14 +69,15 @@ class ScanWorker:
             # scanner.scan_mode.select_with_hysteresis). Persist the kept set so
             # the next run can hold these names through transient dips.
             result_df, held_ids = select_with_hysteresis(result_df, prior_ids)
-            save_held_ids(self._scan_mode, held_ids)
+            if degraded is None:
+                save_held_ids(self._scan_mode, held_ids)
             result_df = add_trade_columns(result_df, self._scan_mode)
 
             # Forward-performance ledger: append today's shortlist (append-only,
             # idempotent per day) and backfill any matured outcomes. Never let a
             # ledger hiccup break the scan.
             try:
-                n = record_picks(result_df, self._scan_mode)
+                n = record_picks(result_df, self._scan_mode) if degraded is None else 0
                 filled = backfill_outcomes()
                 print("  [ledger] recorded {} picks, backfilled {} outcomes".format(
                     n, filled))
@@ -78,7 +94,8 @@ class ScanWorker:
 
             # Persist the latest result (overwrites previous) for offline review.
             try:
-                path = export_scan_result(result_df, self._scan_mode)
+                path = export_scan_result(result_df, self._scan_mode,
+                                          degraded=degraded)
                 if path:
                     print("  [export] scan result -> {}".format(path))
             except Exception as e:

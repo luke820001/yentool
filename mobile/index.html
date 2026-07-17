@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="YenTool" />
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
-  <link rel="stylesheet" href="./styles.css?v=8" />
+  <link rel="stylesheet" href="./styles.css?v=9" />
 </head>
 <body>
   <header id="topbar">
@@ -21,7 +21,9 @@
     </div>
     <div id="meta" class="meta"></div>
     <div id="stale" class="stale"></div>
+    <div id="degraded" class="degraded"></div>
     <div id="regime" class="regime"></div>
+    <div id="tradeable" class="tradeable"></div>
     <div id="card" class="decision-card"></div>
     <div id="controls">
       <div id="market" class="chips"></div>
@@ -33,10 +35,12 @@
     <input id="search" type="search" placeholder="搜尋代號 / 名稱" />
   </header>
 
+  <section id="holdings" class="holdings"></section>
+
   <main id="list"></main>
 
   <footer id="status" class="status"></footer>
 
-  <script src="./app.js?v=8"></script>
+  <script src="./app.js?v=9"></script>
 </body>
 </html>

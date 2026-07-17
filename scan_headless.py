@@ -18,7 +18,7 @@ not abort the run, matching the GUI's resilience.
 import sys
 import traceback
 
-from scanner.market_filter import get_candidate_list
+from scanner.market_filter import get_candidate_list, get_feed_health
 from scanner.chip_verifier import verify_candidates
 from scanner.scan_mode import (
     apply_scan_mode, add_trade_columns, sort_for_mode, select_with_hysteresis,
@@ -72,15 +72,33 @@ def run_scan(scan_mode="mode_prelaunch"):
         print("ERROR: could not fetch market data (empty candidate list).")
         return None
 
+    # Degraded feed (an exchange snapshot failed its sanity floor): the scan
+    # still runs on whatever survived so the phone is not blind, but NOTHING
+    # persistent is overwritten -- held_ids keep yesterday's set (hysteresis
+    # continuity) and the ledger keeps any earlier successful session of the
+    # day (record_picks would DELETE it). See 2026-07-14 incident in
+    # market_filter.FEED_MIN_ROWS.
+    health = get_feed_health()
+    degraded = None
+    if not health.get("ok", True):
+        degraded = "feed degraded: {} snapshot failed (TSE {} / OTC {} rows)".format(
+            "+".join(health.get("missing", [])),
+            health.get("tse_rows"), health.get("otc_rows"))
+        print("  [guard] {} -> held_ids/ledger NOT updated".format(degraded))
+
     result_df = verify_candidates(candidates, progress_callback=_progress)
     result_df = apply_scan_mode(result_df, scan_mode)
     result_df = sort_for_mode(result_df, scan_mode)
     result_df, held_ids = select_with_hysteresis(result_df, prior_ids)
-    save_held_ids(scan_mode, held_ids)
+    if degraded is None:
+        save_held_ids(scan_mode, held_ids)
     result_df = add_trade_columns(result_df, scan_mode)
 
     try:
-        n = record_picks(result_df, scan_mode)
+        if degraded is None:
+            n = record_picks(result_df, scan_mode)
+        else:
+            n = 0
         filled = backfill_outcomes()
         print("  [ledger] recorded {} picks, backfilled {} outcomes".format(n, filled))
     except Exception as e:
@@ -96,7 +114,8 @@ def run_scan(scan_mode="mode_prelaunch"):
     reports = build_market_reports(result_df)
 
     try:
-        path = export_scan_result(result_df, scan_mode, reports=reports)
+        path = export_scan_result(result_df, scan_mode, reports=reports,
+                                  degraded=degraded)
         print("  [export] scan result -> {}".format(path))
     except Exception as e:
         print("  [export] failed: {}".format(e))

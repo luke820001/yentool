@@ -31,6 +31,25 @@ let REPORTS = {};        // {ALL,OTC,TSE} pre-generated AI reports
 let MARKET = "ALL";      // current market filter
 let SORT_I = 0;          // index into SORTS
 
+// --- My holdings (localStorage) ----------------------------------------------
+// The scan list is a SELECTION list: a bought name can legally drop off it
+// mid-hold (normal pullback below the retention band, or a feed-failure day).
+// Holdings therefore live on the phone, keyed by stock id, and are rendered in
+// a pinned section that never depends on today's list membership. All exit
+// levels are recomputed off the user's ACTUAL fill (the validated rule:
+// stop -15%, trail arm +6% -> lock +2%, tp +20%, hold 10 bars, cap 20).
+const HOLD_KEY = "yt_holdings_v1";
+const H_STOP = 0.85, H_LOCK = 1.02, H_ARM = 1.06, H_TP = 1.20;
+
+function loadHoldings() {
+  try { return JSON.parse(localStorage.getItem(HOLD_KEY)) || {}; }
+  catch (e) { return {}; }
+}
+function saveHoldings(h) {
+  try { localStorage.setItem(HOLD_KEY, JSON.stringify(h)); } catch (e) {}
+}
+let HOLDINGS = loadHoldings();
+
 function num(v) {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
@@ -108,11 +127,12 @@ function buildCalendar(tail, scanTime) {
   }
 }
 
-// Recompute {st, day, rem, exit, total, cap} as of NOW. Mirrors
-// scanner/holding_tracker.py annotate_holding(). null -> fall back to shipped.
-function liveHold(r) {
-  if (!r.Entry_Date || !CAL.length) return null;
-  const iEntry = CAL.indexOf(String(r.Entry_Date).slice(0, 10));
+// Recompute {st, day, rem, exit, total, cap} as of NOW for any entry date.
+// Mirrors scanner/holding_tracker.py annotate_holding(). null when the entry
+// date is unknown to the calendar (too old / malformed).
+function holdCalc(entryDate, total, cap) {
+  if (!entryDate || !CAL.length) return null;
+  const iEntry = CAL.indexOf(String(entryDate).slice(0, 10));
   if (iEntry < 0) return null;
   const now = new Date();
   const today = dstr(now);
@@ -120,7 +140,7 @@ function liveHold(r) {
   for (let i = 0; i < CAL.length; i++) { if (CAL[i] <= today) iToday = i; else break; }
   if (iToday < 0) return null;
 
-  const total = r.Hold_Total || 10, cap = r.Hold_Cap || 20;
+  total = total || 10; cap = cap || 20;
   const iExit = iEntry + total - 1, iCap = iEntry + cap - 1;
   const day = iToday - iEntry + 1;   // trading days held incl. today
   const rem = iExit - iToday;        // to base exit; 0 = today, <0 past
@@ -142,6 +162,11 @@ function liveHold(r) {
     entryIsToday: today === CAL[iEntry],
     afterClose,
   };
+}
+
+// Row-based wrapper (scan-list rows carry their own Entry_Date/Hold_* fields).
+function liveHold(r) {
+  return holdCalc(r.Entry_Date, r.Hold_Total, r.Hold_Cap);
 }
 
 // Holding-day banner, recomputed live (see scanner/holding_tracker.py).
@@ -251,6 +276,7 @@ function stockHtml(r) {
   // 核心+ = the exact validated buy rule: overall top-20 AND OTC AND the
   // entry-quality gate. TSE rows never get the plus (the edge is OTC-only).
   const corePlus = r._rank <= 20 && r.Core_Plus && String(r.Market) === "OTC";
+  const held = !!HOLDINGS[String(r.Stock_ID)];
   return `
     <div class="stock ${tierClass(r)}" data-id="${r.Stock_ID}">
       <div class="stock-head">
@@ -259,12 +285,101 @@ function stockHtml(r) {
         <span class="code">${r.Stock_ID}</span>
         ${corePlus ? '<span class="core plus">核心+</span>'
                    : r._rank <= 20 ? '<span class="core">核心</span>' : ""}
+        <button class="hadd${held ? " held" : ""}" data-add="${r.Stock_ID}">${held ? "✓追蹤中" : "＋持有"}</button>
         <span class="market">${r.Market || ""}</span>
       </div>
       ${holdBanner(r)}
       <div class="grid">${grid}</div>
       ${detailHtml(r)}
     </div>`;
+}
+
+// --- My-holdings section ------------------------------------------------------
+function addHolding(r) {
+  const sid = String(r.Stock_ID);
+  if (HOLDINGS[sid]) return;
+  const ref = num(r.Suggested_Buy_Price) || num(r.Close_Price);
+  const raw = prompt(`「${r.Stock_Name || sid}」實際成交價？\n（預設 = 進場參考價 ${ref === null ? "-" : ref}）`, ref === null ? "" : ref);
+  if (raw === null) return;                       // cancelled
+  const fill = num(String(raw).trim()) || ref;
+  if (!fill || fill <= 0) { alert("價格無效，未加入"); return; }
+  // Entry anchor: the shipped Entry_Date (next open after the signal), else the
+  // first calendar day after the row's data date.
+  let entry = String(r.Entry_Date || "").slice(0, 10);
+  if (!entry) {
+    const bar = String(r.Data_Date || "").slice(0, 10);
+    entry = CAL.find((d) => d > bar) || "";
+  }
+  HOLDINGS[sid] = {
+    id: sid, name: r.Stock_Name || sid, market: r.Market || "",
+    entry, fill,
+    total: r.Hold_Total || 10, cap: r.Hold_Cap || 20,
+    added: dstr(new Date()),
+  };
+  saveHoldings(HOLDINGS);
+  renderHoldings();
+  apply();
+}
+
+function removeHolding(sid) {
+  const h = HOLDINGS[sid];
+  if (!h) return;
+  if (!confirm(`移除持倉「${h.name}」？（已出場後移除即可）`)) return;
+  delete HOLDINGS[sid];
+  saveHoldings(HOLDINGS);
+  renderHoldings();
+  apply();
+}
+
+function holdingHtml(h) {
+  const live = holdCalc(h.entry, h.total, h.cap);
+  const row = ALL_ROWS.find((r) => String(r.Stock_ID) === h.id);
+  const close = row ? num(row.Close_Price) : null;
+  const pl = close && h.fill ? (close / h.fill - 1) * 100 : null;
+
+  // Status banner: same wording family as the list cards.
+  let banner;
+  if (!live) {
+    banner = `<div class="hold overdue">進場日 ${h.entry || "?"} 已超出追蹤範圍，請手動確認出場</div>`;
+  } else {
+    const fake = { Hold_Status: "x", Entry_Date: h.entry, Hold_Total: h.total, Hold_Cap: h.cap };
+    banner = holdBanner(fake);
+  }
+  const grid =
+    cell("成交價", { txt: fmt(h.fill, 2), cls: "gold" }) +
+    cell("現價", { txt: close === null ? "-" : fmt(close, 2), cls: signClass(pl) }) +
+    cell("損益", { txt: pl === null ? "-" : fmtSigned(pl, 1, "%"), cls: signClass(pl) }) +
+    cell("停損 -15%", { txt: fmt(h.fill * H_STOP, 2) }) +
+    cell("鎖利 +2%(漲6%後)", { txt: fmt(h.fill * H_LOCK, 2), cls: "gold" }) +
+    cell("停利 +20%", { txt: fmt(h.fill * H_TP, 2), cls: "gold" }) +
+    cell("進場日", { txt: h.entry || "-" }) +
+    cell("出場日", { txt: live && live.exit ? live.exit : "-" });
+  return `
+    <div class="stock hstock" data-hid="${h.id}">
+      <div class="stock-head">
+        <span class="name">${h.name}</span>
+        <span class="code">${h.id}</span>
+        ${row ? "" : '<span class="hgone">已不在名單·追蹤持續</span>'}
+        <button class="hremove" data-remove="${h.id}">出場/移除</button>
+        <span class="market">${h.market}</span>
+      </div>
+      ${banner}
+      <div class="grid">${grid}</div>
+    </div>`;
+}
+
+function renderHoldings() {
+  const sec = $("#holdings");
+  const items = Object.values(HOLDINGS)
+    .sort((a, b) => (a.entry || "").localeCompare(b.entry || ""));
+  if (!items.length) { sec.className = "holdings"; sec.innerHTML = ""; return; }
+  sec.className = "holdings show";
+  sec.innerHTML =
+    `<div class="holdings-title">我的持倉（${items.length}）· 存在手機，不隨名單消失</div>` +
+    items.map(holdingHtml).join("");
+  sec.querySelectorAll("[data-remove]").forEach((b) => {
+    b.addEventListener("click", (e) => { e.stopPropagation(); removeHolding(b.dataset.remove); });
+  });
 }
 
 function render(rows) {
@@ -276,6 +391,15 @@ function render(rows) {
   list.innerHTML = rows.map(stockHtml).join("");
   list.querySelectorAll(".stock").forEach((el) => {
     el.addEventListener("click", () => el.classList.toggle("open"));
+  });
+  list.querySelectorAll("[data-add]").forEach((b) => {
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const r = ALL_ROWS.find((x) => String(x.Stock_ID) === b.dataset.add);
+      if (!r) return;
+      if (HOLDINGS[b.dataset.add]) removeHolding(b.dataset.add);
+      else addHolding(r);
+    });
   });
 }
 
@@ -299,6 +423,33 @@ function apply() {
   });
   $("#count").textContent = rows.length + " 檔";
   render(rows);
+}
+
+// Data-fault banner (meta.degraded): an exchange snapshot failed its sanity
+// floor this scan. Distinct from a normal no-trade day -- the missing market's
+// absence carries NO information. State (held_ids/ledger) was not overwritten.
+function renderDegraded(degraded) {
+  const el = $("#degraded");
+  if (!degraded) { el.className = "degraded"; el.textContent = ""; return; }
+  el.className = "degraded show";
+  el.textContent = `⚠ 資料源異常（${degraded}）· 缺漏市場≠空手 · 持倉照常追蹤，狀態未被覆寫`;
+}
+
+// Buy-rule counter: how many rows the validated rule (top-20 + OTC + 核心+)
+// actually buys today. 0 with a healthy feed = a NORMAL no-trade day; the old
+// UI could not distinguish that from a broken feed.
+function renderTradeable(degraded) {
+  const el = $("#tradeable");
+  if (degraded) { el.className = "tradeable"; el.textContent = ""; return; }
+  const n = ALL_ROWS.filter((r) =>
+    r._rank <= 20 && r.Core_Plus && String(r.Market) === "OTC").length;
+  if (n > 0) {
+    el.textContent = `今日符合買進規則（OTC 核心+）：${n} 檔`;
+    el.className = "tradeable show on";
+  } else {
+    el.textContent = "今日 0 檔符合買進規則 · 正常空手日（資料源正常，非故障）";
+    el.className = "tradeable show off";
+  }
 }
 
 function renderRegime(reg) {
@@ -444,7 +595,10 @@ async function load() {
     card.textContent = txt;
     card.className = "decision-card show " + cls;
     renderRegime(m.regime);
+    renderDegraded(m.degraded);
+    renderTradeable(m.degraded);
     renderReport();
+    renderHoldings();
     apply();
     $("#status").textContent = "更新於 " + new Date().toLocaleTimeString("zh-TW");
   } catch (e) {

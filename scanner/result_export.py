@@ -15,7 +15,7 @@ from config.settings import (
 )
 
 
-def export_scan_result(df, scan_mode="", reports=None):
+def export_scan_result(df, scan_mode="", reports=None, degraded=None):
     """
     Write the full result DataFrame (all computed columns) to SCAN_RESULT_FILE,
     overwriting any previous version. Two context columns (mode + timestamp) are
@@ -41,7 +41,8 @@ def export_scan_result(df, scan_mode="", reports=None):
     out.to_csv(SCAN_RESULT_FILE, index=False, encoding="utf-8-sig")
 
     try:
-        export_scan_result_json(df, scan_mode, scan_time, reports=reports)
+        export_scan_result_json(df, scan_mode, scan_time, reports=reports,
+                                degraded=degraded)
     except Exception as e:
         # A mobile-feed hiccup must never break the primary CSV export.
         print("  [export] mobile json failed: {}".format(e))
@@ -49,11 +50,15 @@ def export_scan_result(df, scan_mode="", reports=None):
     return str(SCAN_RESULT_FILE)
 
 
-def export_scan_result_json(df, scan_mode="", scan_time="", reports=None):
+def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
+                            degraded=None):
     """
     Write the scan result as JSON for the mobile PWA. Structure:
-        {"meta": {mode, scan_time, count, regime, reports}, "rows": [...]}
+        {"meta": {mode, scan_time, count, regime, reports, degraded}, "rows": [...]}
     `reports` is an optional {market: text} map (ALL/OTC/TSE) of AI reports.
+    `degraded` is a short ASCII reason string when an exchange feed failed its
+    sanity floor this run (the phone shows a data-fault banner and the missing
+    market must NOT be read as "no candidates today"). None = healthy.
     NaN/inf are coerced to null so the JSON is valid. Returns the written path.
     """
     MOBILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -94,6 +99,7 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None):
                 "text": reg.get("text", ""),
             },
             "calendar_tail": calendar_tail,
+            "degraded": degraded,
             "reports": reports or {},
         },
         "rows": rows,

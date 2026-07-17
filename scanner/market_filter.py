@@ -131,6 +131,24 @@ _GOVT_STOCKS = {
 }
 
 
+# Feed sanity floors. Each exchange snapshot normally returns thousands of
+# rows; anything below the floor means the feed FAILED (e.g. 2026-07-14: the
+# TPEX endpoint died 3/3 retries, the scan silently continued TSE-only,
+# overwrote held_ids/ledger and published an OTC-less list -- every held OTC
+# position lost tracking at once). Callers must consult get_feed_health() and
+# refuse to overwrite persistent state when ok is False.
+FEED_MIN_ROWS = {"TSE": 500, "OTC": 3000}
+
+_LAST_FEED_HEALTH = {"ok": True, "tse_rows": None, "otc_rows": None,
+                     "missing": []}
+
+
+def get_feed_health() -> dict:
+    """Health of the most recent fetch_full_market() call in this process.
+    {ok: bool, tse_rows: int, otc_rows: int, missing: [market, ...]}"""
+    return dict(_LAST_FEED_HEALTH)
+
+
 def fetch_full_market() -> pd.DataFrame:
     print("  Fetching TSE market data ...")
     tse_raw = _fetch_json(TSE_URL)
@@ -141,6 +159,19 @@ def fetch_full_market() -> pd.DataFrame:
     otc_raw = _fetch_json(OTC_URL, verify_ssl=False)
     otc_df = _normalize_otc(otc_raw)
     print("  -> OTC raw rows: {}".format(len(otc_df)))
+
+    missing = []
+    if len(tse_df) < FEED_MIN_ROWS["TSE"]:
+        missing.append("TSE")
+    if len(otc_df) < FEED_MIN_ROWS["OTC"]:
+        missing.append("OTC")
+    _LAST_FEED_HEALTH.update(
+        ok=not missing, tse_rows=len(tse_df), otc_rows=len(otc_df),
+        missing=missing)
+    if missing:
+        print("  WARN feed degraded: {} snapshot below sanity floor "
+              "({} rows TSE / {} rows OTC) -- state writes must be skipped".format(
+                  "+".join(missing), len(tse_df), len(otc_df)))
 
     combined = pd.concat([tse_df, otc_df], ignore_index=True)
     combined = _clean_numeric(combined)

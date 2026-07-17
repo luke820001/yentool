@@ -74,6 +74,35 @@ body {
 .regime.mid { display: block; background: rgba(255,215,64,0.15);  color: var(--gold); }
 .regime.off { display: block; background: rgba(229,115,115,0.15); color: #eaa; }
 
+/* data-fault banner: an exchange snapshot failed its sanity floor -- the
+   missing market is NOT a no-trade signal (see meta.degraded) */
+.degraded {
+  display: none;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  background: rgba(229,115,115,0.2);
+  border: 1px solid var(--red);
+  color: #f0b3b3;
+}
+.degraded.show { display: block; }
+
+/* buy-rule counter: N tradeable names today, or an explicit "normal no-trade
+   day" so an empty OTC never again reads as a mystery */
+.tradeable {
+  display: none;
+  margin-top: 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.tradeable.show { display: block; }
+.tradeable.on  { background: rgba(255,215,64,0.15); color: var(--gold); }
+.tradeable.off { background: var(--surface); color: var(--dim); }
+
 .core {
   font-size: 10.5px;
   color: var(--gold);
@@ -170,6 +199,35 @@ body {
 #search::placeholder { color: var(--dim); }
 
 #list { padding: 10px 12px 24px; display: flex; flex-direction: column; gap: 8px; }
+
+/* my-holdings: pinned section fed from localStorage, independent of the scan
+   list so a bought name keeps its exit tracking after dropping off the list */
+.holdings { display: none; padding: 10px 12px 0; flex-direction: column; gap: 8px; }
+.holdings.show { display: flex; }
+.holdings-title { font-size: 12px; color: var(--gold); font-weight: 600; }
+.hstock { border-left-color: var(--gold); }
+.hgone {
+  font-size: 10.5px;
+  color: var(--orange);
+  border: 1px solid var(--orange);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.hadd, .hremove {
+  background: var(--surface);
+  color: #9fc3ee;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  margin-left: auto;
+}
+.hadd.held { color: var(--gold); border-color: var(--gold); }
+.hadd:active, .hremove:active { background: var(--hover); }
+.hremove { color: #eaa; border-color: var(--red); }
+/* when the add button is present it takes the auto margin; keep the market tag tight */
+.stock-head .hadd + .market, .stock-head .hremove + .market { margin-left: 0; }
 
 .stock {
   background: var(--surface);
