@@ -17,10 +17,13 @@ includes the 2022 bear), using the exact shipped selection machinery:
        PICKS, counting the opportunity cost of signals that never pull
        back to the limit.
 
-Run:  python sandbox_regime_support.py
+Run:  python sandbox_regime_support.py [eval_from] [warmup]
+      e.g. python sandbox_regime_support.py 2024-07-01 2024-04-01
+      (defaults: the 6y window from sandbox_research_replay)
 ASCII only.
 """
 import json
+import sys
 
 import numpy as np
 import pandas as pd
@@ -182,10 +185,13 @@ def sim_open_supportstop(rows, fwd, sup_of, hold=HOLD, tp=TP):
 
 
 def main():
+    eval_from = sys.argv[1] if len(sys.argv) > 1 else EVAL_FROM
+    warmup = sys.argv[2] if len(sys.argv) > 2 else WARMUP
     er.DB = RESEARCH_DB
-    er.WARMUP_START = WARMUP
+    er.WARMUP_START = warmup
+    print("window: eval_from=%s warmup=%s" % (eval_from, warmup))
 
-    print("building features from %s (6y, be patient)..." % RESEARCH_DB)
+    print("building features from %s (be patient)..." % RESEARCH_DB)
     df, T = er.build_features()
     T["ls"] = er.launch_score(T)
     fwd = er.make_fwd(df)
@@ -196,7 +202,7 @@ def main():
               for k, v in names.items()}
 
     P = er.replay_selection(T)
-    P = P[P["date"] >= EVAL_FROM].copy()
+    P = P[P["date"] >= eval_from].copy()
     P["mkt"] = P["sid"].map(market).fillna("?")
     feat = T[["date", "sid", "c", "ret5", "dist52"]].rename(
         columns={"c": "sig_close"})
