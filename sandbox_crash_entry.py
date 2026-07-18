@@ -39,6 +39,11 @@ def load_taiex():
     tx["r1"] = c / c.shift(1) - 1
     tx["r5"] = c / c.shift(5) - 1
     tx["r20"] = c / c.shift(20) - 1
+    # drawdown from the trailing 20-day high: a V-crash (one huge down day off a
+    # fresh high) shows up here even when the 5d/20d SUM is diluted by prior
+    # gains. This is the fix for the "single-day black swan slips between shallow
+    # and deep triggers" blind spot.
+    tx["dd20"] = c / c.rolling(20).max() - 1
     return tx
 
 
@@ -141,8 +146,13 @@ def main():
 
     trigs = {
         "day<=-3%":  tx["r1"] <= -0.03,
+        "day<=-5%":  tx["r1"] <= -0.05,     # deep single-day (V-crash catcher)
+        "day<=-6%":  tx["r1"] <= -0.06,
         "5d<=-7%":   tx["r5"] <= -0.07,
         "20d<=-10%": tx["r20"] <= -0.10,
+        # combined V-crash rule: a big single day OR a real drawdown from the
+        # recent high -- fires on 07-17-type events the 5d window misses.
+        "day<=-5% OR dd20<=-8%": (tx["r1"] <= -0.05) | (tx["dd20"] <= -0.08),
     }
 
     for name, mask in trigs.items():
