@@ -575,7 +575,12 @@ async function load() {
     const m = data.meta || {};
     REPORTS = m.reports || {};
     buildCalendar(m.calendar_tail, m.scan_time);
-    DISTURBED = !!(m.regime && m.regime.ok) && m.regime.above20 === false;
+    // disturbed = pullback WITHIN an uptrend (below 20MA but still above 60MA).
+    // The 60MA condition (risk_on) matters: delaying the exit into a confirmed
+    // below-60MA bear is worse than a plain 10-bar exit (sandbox_redteam2.py).
+    // Mirrors scanner/holding_tracker.py annotate_holding().
+    DISTURBED = !!(m.regime && m.regime.ok) && m.regime.above20 === false
+                && m.regime.risk_on === true;
     const dataDate = ALL_ROWS.length ? (ALL_ROWS[0].Data_Date || "") : "";
     // Trading days elapsed since the data date, so a morning open clearly says
     // "prices are last night's close" instead of silently looking current.

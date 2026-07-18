@@ -42,8 +42,18 @@ HOLD_BARS_BY_MODE = {
 # Market-shock exit delay (validated 2026-07-08, eval_exit_delay.py): if the
 # TAIEX is below its 20MA on the scheduled exit day, keep holding until it climbs
 # back above 20MA, capped at this many bars. On the 214-day OTC replay this beat
-# the fixed 10-bar exit on win AND mean AND both window halves, and never worse
-# (mean +3.98 -> +4.44). Avoids dumping a position into a brief market shock.
+# the fixed 10-bar exit on win AND mean AND both window halves (mean +3.98 ->
+# +4.44) by not dumping a position into a brief market shock.
+#
+# 2026-07-18 CONDITIONAL refinement (sandbox_redteam2.py, 6y OOS): the delay
+# must ALSO require TAIEX > 60MA (a pullback WITHIN an uptrend), not just
+# < 20MA. On the full 6y window the unconditional delay is ~noise overall
+# (50.3 vs 49.7 fixed), but on the subset whose exit lands while TAIEX < 60MA
+# (a confirmed bear, n=196) it is actively WORSE than fixed (24.0 vs 26.5,
+# mean -4.23 vs -4.16) -- holding high-beta OTC longer into a below-60MA
+# breakdown. The conditional delay reverts to a plain 10-bar exit in that case
+# (26.5, identical to fixed) and is unchanged in normal pullbacks, so it is
+# strictly >= the old rule. See annotate_holding()'s `disturbed` gate.
 EXIT_DELAY_CAP_BY_MODE = {
     "mode_prelaunch": 20,
 }
@@ -104,13 +114,18 @@ def annotate_holding(df, scan_mode):
         return df
     cap = EXIT_DELAY_CAP_BY_MODE.get(scan_mode, hold)   # >= hold; == hold disables
 
-    # Is the market disturbed TODAY (TAIEX below 20MA)? Only then does the exit
-    # delay engage -- see EXIT_DELAY_CAP_BY_MODE. Best effort; default not-disturbed.
+    # Is the market a PULLBACK-WITHIN-UPTREND today (TAIEX below 20MA but still
+    # above 60MA)? Only then does the exit delay engage -- see
+    # EXIT_DELAY_CAP_BY_MODE for why the 60MA condition matters (delaying into a
+    # confirmed below-60MA bear is worse than a plain 10-bar exit). Best effort;
+    # default not-disturbed. reg["risk_on"] == (TAIEX > 60MA).
     disturbed = False
     try:
         from scanner.market_regime import get_market_regime
         reg = get_market_regime()
-        disturbed = bool(reg.get("ok")) and not reg.get("above20", True)
+        disturbed = (bool(reg.get("ok"))
+                     and not reg.get("above20", True)
+                     and bool(reg.get("risk_on", False)))
     except Exception:
         disturbed = False
 
