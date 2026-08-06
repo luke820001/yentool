@@ -4,7 +4,7 @@
 // not in the Python backend, per the project's ASCII-in-.py rule.
 const MODE_CARDS = {
   mode_prelaunch: [
-    "只買OTC核心+(貼近52週高、未起漲、日振幅≥4.5%) · 順風才進場 · 隔日開盤進 · -15%災難停損 · 漲6%後鎖利+2% · 觸+20%停利 · 抱10天(大盤弱可延至20天) · 順風年回測~71%(6年全周期~64%)",
+    "只買標「核心+ 可買」的列(大盤站上20/60MA + OTC + 前20名 + 貼近52週高/未起漲/振幅≥4.5% + 第一天入榜) · 隔日開盤進 · -15%災難停損 · 漲6%後鎖利+2% · 觸+20%停利 · 抱10天(大盤弱可延至20天) · 順風年回測~71%(6年全周期~64%) · 其餘列是觀察/持倉追蹤，不是買點",
     "accent",
   ],
   mode_momentum_leader: [
@@ -94,6 +94,7 @@ function light(label, on) {
 let CAL = [];          // extended trading calendar, "YYYY-MM-DD" ascending
 let KNOWN_LAST = "";   // last REAL (db-backed) trading date in CAL
 let DISTURBED = false; // TAIEX below 20MA -> exit-delay engages
+let ENTER_OK = false;  // TAIEX above BOTH 20MA and 60MA -> new positions allowed
 
 function dstr(d) {
   const p = (n) => String(n).padStart(2, "0");
@@ -168,6 +169,40 @@ function holdCalc(entryDate, total, cap) {
 function liveHold(r) {
   return holdCalc(r.Entry_Date, r.Hold_Total, r.Hold_Cap);
 }
+
+// --- The buy rule -----------------------------------------------------------
+// Mirrors scanner/scan_mode.mark_buy_ready(), recomputed at VIEW time because
+// Hold_Status ages: a row shipped as "pending" last night becomes "holding" the
+// moment its entry bar opens. Buy_Ready/Buy_Block in the payload are the scan-
+// time snapshot and are used only as the fallback when the calendar is missing.
+//
+// All four conditions are load-bearing (see mark_buy_ready's comment for the
+// audit numbers):
+//   ENTER_OK   TAIEX above 20MA AND 60MA -- every published win rate for this
+//              mode is conditional on it. Used to be an advisory banner only,
+//              while the badge underneath still said "buy".
+//   rank<=20 / OTC / Core_Plus   the entry-quality gate.
+//   pending    fresh signal, not yet entered. Hysteresis keeps a name listed
+//              for weeks; the ~71% number is the first-day-in view.
+function buyRuleBlock(r) {
+  if (!ENTER_OK) return "regime";
+  if (r._rank > 20) return "rank";
+  if (String(r.Market) !== "OTC") return "market";
+  if (!r.Core_Plus) return "quality";
+  const h = liveHold(r);
+  const st = h ? h.st : r.Hold_Status;
+  if (st && st !== "pending") return "held";
+  return "";
+}
+function buyable(r) { return buyRuleBlock(r) === ""; }
+
+const BLOCK_TEXT = {
+  regime: "大盤未站上20/60MA",
+  rank: "非前20名",
+  market: "非上櫃",
+  quality: "未過品質閘門",
+  held: "已進場·非新訊號",
+};
 
 // Holding-day banner, recomputed live (see scanner/holding_tracker.py).
 function holdBanner(r) {
@@ -264,27 +299,60 @@ function detailHtml(r) {
 }
 
 function stockHtml(r) {
-  const grid =
-    cell("收盤價", { txt: fmt(r.Close_Price, 2) }) +
-    cell("進場參考", { txt: fmt(r.Suggested_Buy_Price, 2), cls: "gold" }) +
-    cell("停損價", { txt: fmt(r.Strict_Stop_Loss, 2) }) +
-    cell("停利目標", { txt: fmt(r.Target_Price, 2), cls: "gold" }) +
-    cell("起漲分", { txt: fmt(r.Launch_Score, 1) }) +
-    cell("鎖利價(漲6%後)", { txt: fmt(r.Trail_Lock_Price, 2), cls: "gold" }) +
-    cell("3月漲幅", { txt: fmtSigned(r.Gain_3M_Pct, 1, "%"), cls: signClass(r.Gain_3M_Pct) }) +
-    cell("外資5日", { txt: fmtSigned(r.Foreign_Net_5D, 0), cls: signClass(r.Foreign_Net_5D) });
-  // 核心+ = the exact validated buy rule: overall top-20 AND OTC AND the
-  // entry-quality gate. TSE rows never get the plus (the edge is OTC-only).
-  const corePlus = r._rank <= 20 && r.Core_Plus && String(r.Market) === "OTC";
+  // Two different cards, because a row is one of two different things:
+  //
+  //   not entered yet -> a candidate. Its levels come off the signal close and
+  //                      that is correct: the fill does not exist yet.
+  //   already entered -> a position in progress. Hysteresis keeps names listed
+  //                      for weeks, and the close-based Strict_Stop_Loss /
+  //                      Target_Price / Trail_Lock_Price then drift with the
+  //                      market instead of staying anchored to what was paid.
+  //                      Entry_Open + the Fill_* columns (holding_tracker) are
+  //                      the levels that actually govern the position, so an
+  //                      entered row shows those and never a "buy here" price.
+  const fill = num(r.Entry_Open);
+  const close = num(r.Close_Price);
+  const pl = fill && close ? (close / fill - 1) * 100 : null;
+  const grid = fill === null
+    ? cell("收盤價", { txt: fmt(r.Close_Price, 2) }) +
+      cell("進場參考", { txt: fmt(r.Suggested_Buy_Price, 2), cls: "gold" }) +
+      cell("停損價", { txt: fmt(r.Strict_Stop_Loss, 2) }) +
+      cell("停利目標", { txt: fmt(r.Target_Price, 2), cls: "gold" }) +
+      cell("起漲分", { txt: fmt(r.Launch_Score, 1) }) +
+      cell("鎖利價(漲6%後)", { txt: fmt(r.Trail_Lock_Price, 2), cls: "gold" }) +
+      cell("3月漲幅", { txt: fmtSigned(r.Gain_3M_Pct, 1, "%"), cls: signClass(r.Gain_3M_Pct) }) +
+      cell("外資5日", { txt: fmtSigned(r.Foreign_Net_5D, 0), cls: signClass(r.Foreign_Net_5D) })
+    : cell("收盤價", { txt: fmt(r.Close_Price, 2) }) +
+      cell("進場開盤價", { txt: fmt(fill, 2), cls: "gold" }) +
+      cell("停損價(依進場價)", { txt: fmt(r.Fill_Stop_Loss, 2) }) +
+      cell("停利目標(依進場價)", { txt: fmt(r.Fill_Target_Price, 2), cls: "gold" }) +
+      cell("起漲分", { txt: fmt(r.Launch_Score, 1) }) +
+      cell("鎖利價(漲6%後)", { txt: fmt(r.Fill_Trail_Lock_Price, 2), cls: "gold" }) +
+      cell("訊號後損益", { txt: fmtSigned(pl, 1, "%"), cls: signClass(pl) }) +
+      cell("外資5日", { txt: fmtSigned(r.Foreign_Net_5D, 0), cls: signClass(r.Foreign_Net_5D) });
+
+  // 核心+ 可買 = every condition of the validated rule, market gate included.
+  // A row that clears the quality gate but fails the gate/freshness test gets
+  // the greyed badge with the reason -- the old UI showed it as plain 核心+,
+  // which read as "buy" on days the banner above said "do not open".
+  const block = buyRuleBlock(r);
+  const quality = r._rank <= 20 && r.Core_Plus && String(r.Market) === "OTC";
+  let badge = "";
+  if (!block) badge = '<span class="core plus">核心+ 可買</span>';
+  else if (quality) badge = `<span class="core muted">核心+ 暫不可買·${BLOCK_TEXT[block] || block}</span>`;
+  else if (r._rank <= 20) badge = '<span class="core">核心</span>';
+
+  const h = liveHold(r);
+  const st = h ? h.st : r.Hold_Status;
+  const stale = st === "overdue" ? " stale" : "";
   const held = !!HOLDINGS[String(r.Stock_ID)];
   return `
-    <div class="stock ${tierClass(r)}" data-id="${r.Stock_ID}">
+    <div class="stock ${tierClass(r)}${stale}" data-id="${r.Stock_ID}">
       <div class="stock-head">
         <span class="rank">${r._rank}</span>
         <span class="name">${r.Stock_Name || r.Stock_ID}</span>
         <span class="code">${r.Stock_ID}</span>
-        ${corePlus ? '<span class="core plus">核心+</span>'
-                   : r._rank <= 20 ? '<span class="core">核心</span>' : ""}
+        ${badge}
         <button class="hadd${held ? " held" : ""}" data-add="${r.Stock_ID}">${held ? "✓追蹤中" : "＋持有"}</button>
         <span class="market">${r.Market || ""}</span>
       </div>
@@ -298,8 +366,14 @@ function stockHtml(r) {
 function addHolding(r) {
   const sid = String(r.Stock_ID);
   if (HOLDINGS[sid]) return;
-  const ref = num(r.Suggested_Buy_Price) || num(r.Close_Price);
-  const raw = prompt(`「${r.Stock_Name || sid}」實際成交價？\n（預設 = 進場參考價 ${ref === null ? "-" : ref}）`, ref === null ? "" : ref);
+  // Default to the OPEN on the entry date -- that is the price the rule pays.
+  // Falling back to Suggested_Buy_Price (= today's close) put a month-old
+  // position's fill 15-25% off for anything that had run since its signal.
+  const entered = num(r.Entry_Open);
+  const ref = entered || num(r.Suggested_Buy_Price) || num(r.Close_Price);
+  const label = entered ? `${String(r.Entry_Date || "").slice(0, 10)} 開盤價`
+                        : "進場參考價";
+  const raw = prompt(`「${r.Stock_Name || sid}」實際成交價？\n（預設 = ${label} ${ref === null ? "-" : ref}）`, ref === null ? "" : ref);
   if (raw === null) return;                       // cancelled
   const fill = num(String(raw).trim()) || ref;
   if (!fill || fill <= 0) { alert("價格無效，未加入"); return; }
@@ -435,17 +509,26 @@ function renderDegraded(degraded) {
   el.textContent = `⚠ 資料源異常（${degraded}）· 缺漏市場≠空手 · 持倉照常追蹤，狀態未被覆寫`;
 }
 
-// Buy-rule counter: how many rows the validated rule (top-20 + OTC + 核心+)
-// actually buys today. 0 with a healthy feed = a NORMAL no-trade day; the old
-// UI could not distinguish that from a broken feed.
+// Buy-rule counter: how many rows the validated rule actually buys today --
+// the FULL rule (market gate + top-20 + OTC + 核心+ + fresh signal), not just
+// the quality gate. 0 with a healthy feed = a NORMAL no-trade day; the old UI
+// could not distinguish that from a broken feed, and worse, it counted names
+// on days the market gate said "open nothing" (2026-07/08: 10 of 25 days).
 function renderTradeable(degraded) {
   const el = $("#tradeable");
   if (degraded) { el.className = "tradeable"; el.textContent = ""; return; }
-  const n = ALL_ROWS.filter((r) =>
-    r._rank <= 20 && r.Core_Plus && String(r.Market) === "OTC").length;
+  const n = ALL_ROWS.filter(buyable).length;
   if (n > 0) {
-    el.textContent = `今日符合買進規則（OTC 核心+）：${n} 檔`;
+    el.textContent = `今日符合買進規則（順風 + OTC 核心+ 新訊號）：${n} 檔`;
     el.className = "tradeable show on";
+  } else if (!ENTER_OK) {
+    // Name the blocker: the list is not empty, the gate is shut.
+    const q = ALL_ROWS.filter((r) =>
+      r._rank <= 20 && r.Core_Plus && String(r.Market) === "OTC").length;
+    el.textContent = q > 0
+      ? `今日 0 檔可買 · 大盤未站上 20/60MA，${q} 檔過品質閘門但一律不開新倉`
+      : "今日 0 檔可買 · 大盤未站上 20/60MA，暫停開新倉";
+    el.className = "tradeable show off";
   } else {
     el.textContent = "今日 0 檔符合買進規則 · 正常空手日（資料源正常，非故障）";
     el.className = "tradeable show off";
@@ -581,6 +664,10 @@ async function load() {
     // Mirrors scanner/holding_tracker.py annotate_holding().
     DISTURBED = !!(m.regime && m.regime.ok) && m.regime.above20 === false
                 && m.regime.risk_on === true;
+    // enter_ok = TAIEX above BOTH 20MA and 60MA. This is a HARD condition of
+    // the buy rule (see buyRuleBlock), not a hint. An unreadable regime blocks:
+    // "we cannot tell whether it is a tailwind" is not "it is".
+    ENTER_OK = !!(m.regime && m.regime.ok) && m.regime.enter_ok === true;
     const dataDate = ALL_ROWS.length ? (ALL_ROWS[0].Data_Date || "") : "";
     // Trading days elapsed since the data date, so a morning open clearly says
     // "prices are last night's close" instead of silently looking current.

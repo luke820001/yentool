@@ -6,6 +6,7 @@ from scanner.market_filter import (
 from scanner.chip_verifier import verify_candidates
 from scanner.scan_mode import (
     apply_scan_mode, add_trade_columns, sort_for_mode, select_with_hysteresis,
+    mark_buy_ready,
 )
 from scanner.scan_state import load_held_ids, save_held_ids
 from scanner.signal_ledger import record_picks, backfill_outcomes
@@ -91,6 +92,13 @@ class ScanWorker:
                 result_df = annotate_holding(result_df, self._scan_mode)
             except Exception as e:
                 print("  [holding] skipped: {}".format(e))
+
+            # Which rows the validated rule actually buys (needs Hold_Status,
+            # so it has to follow annotate_holding). See scan_mode.mark_buy_ready.
+            try:
+                result_df = mark_buy_ready(result_df, self._scan_mode)
+            except Exception as e:
+                print("  [buyrule] skipped: {}".format(e))
 
             # Persist the latest result (overwrites previous) for offline review.
             try:

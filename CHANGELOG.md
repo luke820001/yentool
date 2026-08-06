@@ -2,6 +2,72 @@
 
 ---
 
+## 2026-08-06
+
+### fix: the app now enforces the buy rule it was validated on
+
+**Files:** `scanner/scan_mode.py`, `scanner/holding_tracker.py`,
+`scanner/signal_ledger.py`, `scan_headless.py`, `gui/scan_worker.py`,
+`mobile/app.js`, `mobile/styles.css`, `docs/STRATEGY.md`
+
+**Trigger:** a month of live use felt like a very low win rate, with the
+suspicion that "the suggested buy is always the close, so I always buy high".
+Audited 2026-07-01..08-06 (25 sessions, 946 rows) against the cloud ledger,
+freshly refetched daily bars and the live PWA payload. Full write-up in
+`docs/STRATEGY.md` appendix D.
+
+**The suspicion did not survive the data.** Next-day open vs signal close was
++0.02% mean / 0.00% median across all picks. The entry price was never the
+problem. Three implementation defects were:
+
+1. **The market gate was advisory.** `renderTradeable()` and the 核心+ badge
+   checked `rank<20 && Core_Plus && OTC` only. `regime_map()` in the backtests
+   every published win rate comes from defines risk_on as TAIEX above BOTH its
+   20MA and 60MA. Result: on 10 of 25 days the banner said "hold off on new
+   positions" while the counter underneath said "N stocks meet the buy rule".
+   16 of the month's 21 核心+ signals fired on non-green days; the 15 that
+   completed won 26.7% (median -15.00%, straight into the disaster stop) vs
+   80% for the 5 on green days.
+2. **79% of the list was carry-over.** Hysteresis retains a name down to rank
+   80, so 752 of 946 displayed rows were already listed the previous day and
+   118 (12%) were past their own 10-bar exit -- each re-rendered as a fresh buy
+   with today's close as the "entry reference". The ~71% figure is the
+   streak==1 view.
+3. **Risk levels were recomputed off today's close.** On the 2026-08-06 payload
+   36 of the 39 already-entered rows (92%) showed a stop that did not belong to
+   their position (mean error 6.5%, max 26.7%) and 9 showed a "profit lock"
+   price BELOW their own fill.
+
+**Changes (selection logic untouched -- the list, ranking and hysteresis are
+identical, so the 6-year replay still describes it):**
+
+- `scan_mode.mark_buy_ready()` -> `Buy_Ready` / `Buy_Block`: the whole rule as
+  one flag (gate + top-20 + OTC + Core_Plus + fresh signal). An unreadable
+  regime blocks rather than passes. Runs after `annotate_holding` in both the
+  headless and GUI pipelines.
+- `holding_tracker` ships `Entry_Open` (the open on Entry_Date) plus
+  `Fill_Stop_Loss` / `Fill_Trail_Arm_Price` / `Fill_Trail_Lock_Price` /
+  `Fill_Target_Price` derived from it.
+- PWA: badge is now 核心+ 可買 / 核心+ 暫不可買·<reason>, recomputed at view
+  time; the counter names the blocker; an entered row shows its fill-anchored
+  levels and P&L instead of a buy price; overdue rows are dimmed; the ＋持有
+  prompt defaults to the entry-day open instead of today's close.
+- `signal_ledger.outcomes` gains `rule_entry` / `rule_return_pct` /
+  `rule_exit`: next-open entry through the adopted exit stack. The old
+  `fwd_return_pct` (close entry, no exits) was measuring a strategy nobody
+  trades -- 19.2% win / -10.72% against the rule's 37.7% / -6.52% on the same
+  signals. Existing rows backfill on the next scan.
+
+**Verified:** ledger simulation cross-checked against an independently written
+simulator over 681 rows, max difference 0.005pp; PWA checked in-browser on the
+green path, the blocked path, and a legacy payload with none of the new columns.
+
+**Sample-size warning:** 20 completed 核心+ trades and 5 green-light ones in a
+single -15% month. The direction matches the 6-year replay; the percentages
+must not be read as win-rate expectations.
+
+---
+
 ## 2026-07-06
 
 ### feat: ledger-validated trade rules for mode_prelaunch + decision-card UI

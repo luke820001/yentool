@@ -401,3 +401,82 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
     df["Strict_Stop_Loss"]    = stop.round(2)
     df["Risk_Pct"]            = ((buy - stop) / buy * 100).round(1)
     return df
+
+
+# --- The buy rule, as one machine-checkable flag -----------------------------
+# 2026-08-06 audit. The PWA used to draw the "core+" buy badge from
+#   rank < 20 AND Market == OTC AND Core_Plus
+# only. The combo that was actually backtested to ~71% is stricter on two
+# further axes, and both were being dropped on the floor:
+#
+#   1. THE MARKET GATE. eval_prelaunch_overlays.regime_map() defines risk_on as
+#      TAIEX above BOTH its 20MA and its 60MA -- the same thing
+#      market_regime.enter_ok computes. Every published win rate for this mode
+#      is conditional on it. It was rendered as an advisory banner while the
+#      badge below it kept saying "buy". Over 2026-07-01..08-06 that produced 16
+#      buy signals on non-green days out of 21 total; the 13 that completed won
+#      15.4% (median -15.00%, i.e. straight into the disaster stop), against
+#      80% for the 5 fired on green days.
+#   2. FRESH SIGNAL ONLY. The 71% figure is the streak==1 view (STRATEGY.md
+#      3.6): enter on the first day a name appears, hold 10 bars, done.
+#      Hysteresis keeps a name listed for weeks (79% of the rows shown in that
+#      window were carried over from the previous day, 12% were past their own
+#      exit date), and every one of those repeat days re-rendered as a fresh
+#      buy. Hold_Status == "pending" is exactly "signalled, not yet entered".
+#
+# This does NOT change selection -- the list, the ranking and the hysteresis are
+# untouched, so the replay the numbers came from still describes it. It only
+# marks which rows the rule buys. Buy_Block carries an ASCII reason code so a UI
+# can explain the refusal in its own language.
+BUY_RULE_MODES = ("mode_prelaunch",)
+
+
+def mark_buy_ready(df, scan_mode):
+    """Add Buy_Ready (bool) + Buy_Block (ASCII reason) to a scanned frame.
+
+    Must run AFTER holding_tracker.annotate_holding (it reads Hold_Status).
+    Modes without a validated buy rule get Buy_Ready = False everywhere with
+    reason 'no_rule'. Never raises: a flagging failure must not break a scan.
+    """
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+
+    if scan_mode not in BUY_RULE_MODES:
+        df["Buy_Ready"] = False
+        df["Buy_Block"] = "no_rule"
+        return df
+
+    try:
+        from scanner.market_regime import get_market_regime
+        reg = get_market_regime()
+        # An unreadable regime must block, not wave through: "we do not know
+        # whether the market is a tailwind" is not "it is".
+        enter_ok = bool(reg.get("ok")) and bool(reg.get("enter_ok"))
+    except Exception:
+        enter_ok = False
+
+    market = df["Market"].astype(str) if "Market" in df.columns else ""
+    core = _safe_bool(df, "Core_Plus")
+    status = (df["Hold_Status"].astype(str) if "Hold_Status" in df.columns
+              else pd.Series([""] * len(df), index=df.index))
+    # Shipped order is the rank; the UI must not re-rank before reading this.
+    rank = pd.Series(range(len(df)), index=df.index)
+
+    fresh = status.isin(("", "pending"))
+    ok = (rank < N_ENTER) & (market == "OTC") & core & fresh
+    ok = ok & enter_ok
+
+    # First failing condition wins, ordered so the message is the most useful
+    # one: the market gate is the reason to do nothing at all today.
+    block = pd.Series("", index=df.index)
+    block = block.mask(~fresh, "held")
+    block = block.mask(~core, "quality")
+    block = block.mask(market != "OTC", "market")
+    block = block.mask(rank >= N_ENTER, "rank")
+    if not enter_ok:
+        block = pd.Series("regime", index=df.index)
+
+    df["Buy_Ready"] = ok
+    df["Buy_Block"] = block.where(~ok, "")
+    return df

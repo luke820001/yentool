@@ -22,6 +22,7 @@ from scanner.market_filter import get_candidate_list, get_feed_health
 from scanner.chip_verifier import verify_candidates
 from scanner.scan_mode import (
     apply_scan_mode, add_trade_columns, sort_for_mode, select_with_hysteresis,
+    mark_buy_ready,
 )
 from scanner.scan_state import load_held_ids, save_held_ids
 from scanner.signal_ledger import record_picks, backfill_outcomes
@@ -108,6 +109,16 @@ def run_scan(scan_mode="mode_prelaunch"):
         result_df = annotate_holding(result_df, scan_mode)
     except Exception as e:
         print("  [holding] skipped: {}".format(e))
+
+    # Buy_Ready must come after annotate_holding: the rule needs Hold_Status to
+    # tell a fresh signal from a name that has been listed for two weeks.
+    try:
+        result_df = mark_buy_ready(result_df, scan_mode)
+        if "Buy_Ready" in result_df.columns:
+            print("  [buyrule] {} of {} rows are buyable today".format(
+                int(result_df["Buy_Ready"].sum()), len(result_df)))
+    except Exception as e:
+        print("  [buyrule] skipped: {}".format(e))
 
     # Per-market AI reports for the phone (matches the desktop "summarize what is
     # shown" behaviour; OTC filter -> only OTC names sent to the model).

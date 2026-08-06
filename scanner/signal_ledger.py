@@ -16,6 +16,20 @@ Two tables in a single append-only SQLite file (config.SIGNAL_LEDGER_FILE):
             price_volume.db. Anchored on each pick's own bar_date so a stale
             quote does not contaminate the return.
 
+            TWO measurements per row, because they answer different questions:
+              fwd_return_pct  raw signal quality: buy the signal-day close, no
+                              stop, no target, hold the full horizon.
+              rule_return_pct what the TRADING RULE would have returned: enter
+                              at the next bar's OPEN, disaster stop -15%, lock
+                              +2% once +6% trades, take profit +20%, else exit
+                              on the horizon's close.
+            Only the second one describes the strategy. Keeping the first is
+            still worth it -- the gap between them is the cost/benefit of the
+            exit stack. Over 2026-07-01..08-06 the raw view read 20.6% win /
+            -10.13% mean while the rule returned 40.6% / -6.11%, so a ledger
+            carrying only the raw number was reporting a strategy nobody
+            trades and understating this one by 20 points.
+
 Nothing here changes selection logic; it only observes. Failures are swallowed
 so a ledger problem can never break a live scan.
 """
@@ -25,10 +39,17 @@ from datetime import datetime, date
 import pandas as pd
 
 from config.settings import SIGNAL_LEDGER_FILE, PRICE_VOLUME_FILE
+from scanner.scan_mode import (
+    PRELAUNCH_STOP_PCT, PRELAUNCH_TP_PCT,
+    PRELAUNCH_TRAIL_ARM, PRELAUNCH_TRAIL_LOCK,
+)
 from storage.data_store import load_sheet
 
 # Forward windows measured for every pick (trading bars).
 HORIZONS = (5, 10, 20)
+
+# Modes whose exit stack is validated well enough to simulate in the ledger.
+RULE_MODES = ("mode_prelaunch",)
 
 
 def _connect():
@@ -88,6 +109,12 @@ def _ensure_schema(conn):
     cols = {row[1] for row in conn.execute("PRAGMA table_info(picks)")}
     if "market" not in cols:
         conn.execute("ALTER TABLE picks ADD COLUMN market TEXT")
+    ocols = {row[1] for row in conn.execute("PRAGMA table_info(outcomes)")}
+    for name, decl in (("rule_entry", "REAL"), ("rule_return_pct", "REAL"),
+                       ("rule_exit", "TEXT")):
+        if name not in ocols:
+            conn.execute("ALTER TABLE outcomes ADD COLUMN {} {}".format(
+                name, decl))
 
 
 def _f(row, col):
@@ -192,7 +219,7 @@ def _fill_from_db(by_stock):
     for sid, jobs in by_stock.items():
         series = load_sheet(PRICE_VOLUME_FILE, sid)
         have = not series.empty and "date" in series.columns
-        dates = closes = highs = lows = []
+        dates = closes = highs = lows = opens = []
         if have:
             series = series.copy()
             series["date"] = pd.to_datetime(
@@ -204,6 +231,8 @@ def _fill_from_db(by_stock):
                 series.get("high", series["close"]), errors="coerce").tolist()
             lows = pd.to_numeric(
                 series.get("low", series["close"]), errors="coerce").tolist()
+            opens = pd.to_numeric(
+                series.get("open", series["close"]), errors="coerce").tolist()
 
         for session, mode, bar_date, entry, need in jobs:
             if entry <= 0:
@@ -215,6 +244,7 @@ def _fill_from_db(by_stock):
             fwd_close = closes[start:] if start is not None else []
             fwd_high = highs[start:] if start is not None else []
             fwd_low = lows[start:] if start is not None else []
+            fwd_open = opens[start:] if start is not None else []
             fwd_date = dates[start:] if start is not None else []
 
             # Anchor the entry on the SAME series the forward bars come from, so
@@ -238,6 +268,14 @@ def _fill_from_db(by_stock):
                 win_h = fwd_high[:h]
                 win_l = fwd_low[:h]
                 last_c = fwd_close[h - 1]
+                # What the rule (next-open entry + exit stack) actually made.
+                # 'na' rather than NULL for the modes/rows it cannot apply to,
+                # so the done-check below can tell "computed, nothing to say"
+                # from "never computed" and stops re-simulating them forever.
+                r_entry, r_ret, r_why = None, None, "na"
+                if mode in RULE_MODES:
+                    r_entry, r_ret, r_why = _simulate_rule(
+                        fwd_open, fwd_high, fwd_low, fwd_close, h)
                 new_rows.append((
                     session, mode, sid, h, bar_date, round(entry_used, 2),
                     fwd_date[h - 1], h,
@@ -245,8 +283,51 @@ def _fill_from_db(by_stock):
                     round((last_c / entry_used - 1.0) * 100, 2),
                     round((max(win_h) / entry_used - 1.0) * 100, 2),
                     round((min(win_l) / entry_used - 1.0) * 100, 2),
+                    round(r_entry, 2) if r_entry is not None else None,
+                    round(r_ret, 2) if r_ret is not None else None,
+                    r_why,
                 ))
     return new_rows, stragglers
+
+
+def _simulate_rule(opens, highs, lows, closes, hold):
+    """Replay the adopted prelaunch exit stack over `hold` forward bars.
+
+    Returns (entry, return_pct, reason) or (None, None, None) when the window is
+    short or the open is unusable. Mirrors eval_winrate_round2.sim_trail, which
+    is the simulator every adopted threshold was chosen on:
+      entry  = the first forward bar's OPEN (the live rule is a market order at
+               the next open; no limit is posted)
+      stop   = entry * (1 - PRELAUNCH_STOP_PCT), disaster insurance only
+      lock   = once a bar's high reaches +PRELAUNCH_TRAIL_ARM, the stop rises to
+               entry * (1 + PRELAUNCH_TRAIL_LOCK)
+      target = entry * (1 + PRELAUNCH_TP_PCT), taken intraday
+    Same-bar high/low ordering is unknowable, so a bar that both arms the lock
+    and breaches it is counted as a breach -- deliberately pessimistic. On a gap
+    through a level the fill is that bar's open, not the level.
+    """
+    if len(opens) < hold:
+        return None, None, "na"
+    entry = opens[0]
+    if not entry or not pd.notna(entry) or entry <= 0:
+        return None, None, "na"
+    entry = float(entry)
+    stop_px = entry * (1 - PRELAUNCH_STOP_PCT)
+    target = entry * (1 + PRELAUNCH_TP_PCT)
+    arm_px = entry * (1 + PRELAUNCH_TRAIL_ARM)
+    armed = False
+    for i in range(hold):
+        op, hi, lo = float(opens[i]), float(highs[i]), float(lows[i])
+        if lo <= stop_px:
+            px = min(op, stop_px) if i > 0 else stop_px
+            return entry, (px / entry - 1.0) * 100, "lock" if armed else "stop"
+        if hi >= target:
+            px = max(op, target) if i > 0 else target
+            return entry, (px / entry - 1.0) * 100, "tp"
+        if not armed and hi >= arm_px:
+            armed = True
+            stop_px = max(stop_px, entry * (1 + PRELAUNCH_TRAIL_LOCK))
+    return entry, (float(closes[hold - 1]) / entry - 1.0) * 100, "time"
 
 
 def _refetch(stock_ids, market_of):
@@ -289,9 +370,13 @@ def backfill_outcomes(horizons=HORIZONS, allow_fetch=True):
                 "SELECT scan_session, scan_mode, stock_id, market, bar_date, close "
                 "FROM picks"
             ).fetchall()
+            # A row counts as done only once the rule columns exist. Rows
+            # written before those columns were added come back through here
+            # once, which is how the historical ledger acquires its rule-based
+            # measurement instead of only the raw close-to-close one.
             done = set(conn.execute(
                 "SELECT scan_session, scan_mode, stock_id, horizon_days "
-                "FROM outcomes"
+                "FROM outcomes WHERE rule_exit IS NOT NULL"
             ).fetchall())
 
             # Group pending picks by stock so each price series loads once.
@@ -319,9 +404,16 @@ def backfill_outcomes(horizons=HORIZONS, allow_fetch=True):
                     new_rows.extend(more)
 
             if new_rows:
+                # Columns spelled out: the rule_* columns arrive via ALTER
+                # TABLE on an existing ledger, so positional VALUES would bind
+                # to whatever order the migration happened to produce.
                 conn.executemany(
-                    "INSERT OR REPLACE INTO outcomes VALUES "
-                    "(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO outcomes "
+                    "(scan_session, scan_mode, stock_id, horizon_days, "
+                    " bar_date, entry_close, asof_date, bars, fwd_close, "
+                    " fwd_return_pct, mfe_pct, mae_pct, "
+                    " rule_entry, rule_return_pct, rule_exit) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     new_rows,
                 )
                 written = len(new_rows)

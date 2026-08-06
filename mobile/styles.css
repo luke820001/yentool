@@ -117,6 +117,15 @@ body {
   color: #1E1E24;
   background: var(--gold);
 }
+/* Passed the entry-quality gate but the FULL rule still refuses it today
+   (market gate shut, or the name is already in a hold). Must not look like a
+   buy: same badge slot, no gold fill, reason spelled out. */
+.core.muted {
+  color: var(--dim);
+  border-color: #3a3d4a;
+  background: none;
+  font-weight: 500;
+}
 
 .decision-card {
   margin-top: 8px;
@@ -237,6 +246,11 @@ body {
 }
 .stock.tier-high { background: var(--row-high); border-left-color: var(--gold); }
 .stock.tier-mid  { background: var(--row-mid);  border-left-color: var(--orange); }
+/* Past its own exit date: still listed (hysteresis retains it down to rank 80)
+   but it is history, not a candidate. Dimmed so it stops competing for
+   attention with the rows that are actually actionable. */
+.stock.stale { opacity: 0.55; }
+.stock.stale.open { opacity: 1; }
 
 .stock-head { display: flex; align-items: baseline; gap: 8px; }
 .rank { color: var(--dim); font-size: 12px; min-width: 22px; }

@@ -19,6 +19,21 @@ It adds these columns to the result DataFrame:
   Hold_Status    machine code for the UI: pending | holding | exit_today |
                  overdue  (UIs render their own localized text from this)
   Hold_Note      ASCII plain-language action for CSV review
+  Entry_Open     the actual OPEN price on Entry_Date (None while still pending)
+  Fill_Stop_Loss / Fill_Trail_Arm_Price / Fill_Trail_Lock_Price /
+  Fill_Target_Price
+                 the exit levels recomputed off Entry_Open
+
+Why Entry_Open exists (2026-08-06 audit): add_trade_columns derives
+Suggested_Buy_Price / Strict_Stop_Loss / Target_Price / Trail_Lock_Price from
+TODAY's close every scan. That is right for a row that has not been entered
+yet, but a row already mid-hold (hysteresis keeps names listed for weeks) then
+shows a stop that drifts with the market instead of sitting at fill * 0.85. On
+the live 2026-08-06 payload 36 of the 39 already-entered rows (92%) showed a
+stop that did not belong to their position, mean error 6.5% and max 26.7%, and
+9 rows showed a "profit lock" price BELOW their own fill. The levels that
+matter are anchored to the fill, so they are computed here where Entry_Date is
+known and shipped alongside the close-based ones.
 
 Nothing here changes selection; it only annotates. Failures are swallowed so a
 tracker problem can never break a scan.
@@ -28,6 +43,12 @@ import sqlite3
 import pandas as pd
 
 from config.settings import PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE
+from scanner.scan_mode import (
+    PRELAUNCH_STOP_PCT as STOP_PCT,
+    PRELAUNCH_TP_PCT as TP_PCT,
+    PRELAUNCH_TRAIL_ARM as TRAIL_ARM,
+    PRELAUNCH_TRAIL_LOCK as TRAIL_LOCK,
+)
 
 # Time-exit horizon per mode (trading bars). Modes without a validated time
 # exit are left out and simply get no holding annotation.
@@ -68,6 +89,38 @@ def _trading_calendar():
         return []
     dates = sorted({str(r[0])[:10] for r in rows if r and r[0]})
     return dates
+
+
+def _entry_opens(pairs):
+    """{(stock_id, date): open} for the given (stock_id, date) pairs.
+
+    One query per scan (the pick list is ~40 rows), so this costs nothing next
+    to the scan itself. Missing bars simply do not appear in the map.
+    """
+    pairs = [(str(s), str(d)[:10]) for s, d in pairs if s and d]
+    if not pairs:
+        return {}
+    ids = sorted({s for s, _ in pairs})
+    dates = sorted({d for _, d in pairs})
+    try:
+        with sqlite3.connect(PRICE_VOLUME_FILE) as conn:
+            rows = conn.execute(
+                "SELECT stock_id, date, open FROM data WHERE stock_id IN (%s)"
+                " AND date IN (%s)"
+                % (",".join("?" * len(ids)), ",".join("?" * len(dates))),
+                ids + dates,
+            ).fetchall()
+    except Exception:
+        return {}
+    out = {}
+    for sid, d, op in rows:
+        try:
+            op = float(op)
+        except (TypeError, ValueError):
+            continue
+        if op > 0:
+            out[(str(sid), str(d)[:10])] = op
+    return out
 
 
 def _ledger_bar_dates(scan_mode):
@@ -196,4 +249,20 @@ def annotate_holding(df, scan_mode):
     df["Hold_Cap"] = cap             # latest exit bar when delayed
     df["Hold_Status"] = statuses
     df["Hold_Note"] = notes
+
+    # Exit levels anchored to the price actually paid (see module docstring).
+    # A pending row has no fill yet, so its Entry_Open stays None and the UI
+    # keeps showing the close-based reference -- which is correct there.
+    opens = _entry_opens(zip(df["Stock_ID"].astype(str), entry_dates))
+    fills = [opens.get((str(sid), ed)) for sid, ed
+             in zip(df["Stock_ID"].astype(str), entry_dates)]
+    df["Entry_Open"] = fills
+    df["Fill_Stop_Loss"] = [
+        round(f * (1 - STOP_PCT), 2) if f else None for f in fills]
+    df["Fill_Trail_Arm_Price"] = [
+        round(f * (1 + TRAIL_ARM), 2) if f else None for f in fills]
+    df["Fill_Trail_Lock_Price"] = [
+        round(f * (1 + TRAIL_LOCK), 2) if f else None for f in fills]
+    df["Fill_Target_Price"] = [
+        round(f * (1 + TP_PCT), 2) if f else None for f in fills]
     return df
