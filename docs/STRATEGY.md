@@ -510,6 +510,21 @@ Entry_Date、16 列 overdue，只有 4 列是新訊號。每列都照樣顯示�
 
 ### D.4 ledger 量錯了東西
 
+> **2026-09-09 更新：本節的 rule 數字已失效，不可再引用。**
+> F09 修正了 `_simulate_rule` 的當日事件順序（開盤價優先、鎖利在觸發當根即生效、
+> 其餘以「該根實際觸及的最低出場價」為準）。修正後同一批訊號會得到不同的
+> `rule_return_pct` / `rule_exit`，因此下面的 **rule 37.7% 勝 / -6.52%** 是舊順序的產物。
+> 重算方式：`reset_rule_outcomes()` 後執行 `python tools/backfill_ledger.py`。
+>
+> **更要緊的是最後一句的交叉驗證也不成立了。** 用來比對的
+> `archive/research/eval_winrate_round2.sim_trail` **帶有完全相同的兩個順序錯誤**
+> （它的註解描述的正是修正後的順序，程式碼做的卻是相反的），所以「最大差 0.005pp」
+> 只證明兩份程式錯得一樣，不是各自獨立算對。
+>
+> 連帶的結論：**目前採用的出場參數（停損 15 / 停利 20 / 啟動 6 / 鎖利 2）當初就是在這個
+> 有錯的模擬器上選出來的。** 這不代表參數一定不好，但它們現在屬於「未經正確驗證」，
+> 要重新挑選必須先修 `sim_trail` 再重跑 overlay。見 `docs/TASKS.md`。
+
 `outcomes.fwd_return_pct` 是「收盤進、不停損、不停利、抱滿」。同一批訊號：
 raw 19.2% 勝 / -10.72%，rule 37.7% 勝 / -6.52%。它量的不是這套策略。
 → 修：outcomes 新增 `rule_entry / rule_return_pct / rule_exit`（隔日開盤進 + 完整出場堆疊），

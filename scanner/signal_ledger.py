@@ -7,9 +7,13 @@ export overwrites itself every run). This module makes every scan accumulate.
 Two tables in a single append-only SQLite file (config.SIGNAL_LEDGER_FILE):
 
   picks     one row per (scan_session, scan_mode, stock_id). Captures what was
-            recommended and the full feature/score snapshot at that moment.
-            Re-running the same mode on the same day REPLACES that day's rows
-            (idempotent), so a double-scan does not double-count.
+            recommended, the full feature/score snapshot at that moment, and the
+            buy DECISION that went with it (core_plus / buy_ready / buy_block /
+            gate_detail / rule_version) so a past row can be re-judged instead
+            of merely re-read. Re-running the same mode on the same day REPLACES
+            that day's rows (idempotent), so a double-scan does not double-count
+            -- the stored row is the last scan of that day, the one whose export
+            the user actually saw.
 
   outcomes  one row per (scan_session, scan_mode, stock_id, horizon_days). The
             realized forward result, backfilled once enough future bars exist in
@@ -28,11 +32,16 @@ Two tables in a single append-only SQLite file (config.SIGNAL_LEDGER_FILE):
             exit stack. Over 2026-07-01..08-06 the raw view read 20.6% win /
             -10.13% mean while the rule returned 40.6% / -6.11%, so a ledger
             carrying only the raw number was reporting a strategy nobody
-            trades and understating this one by 20 points.
+            trades and understating this one by 20 points. NOTE: that 40.6% /
+            -6.11% pair was produced by the pre-2026-09-09 _simulate_rule, whose
+            same-bar event order was wrong (F09). It is quoted here as the
+            reason the second measurement exists, not as a current figure --
+            rerun reset_rule_outcomes() + backfill_outcomes() to get one.
 
 Nothing here changes selection logic; it only observes. Failures are swallowed
 so a ledger problem can never break a live scan.
 """
+import json
 import sqlite3
 from datetime import datetime, date
 
@@ -50,6 +59,11 @@ HORIZONS = (5, 10, 20)
 
 # Modes whose exit stack is validated well enough to simulate in the ledger.
 RULE_MODES = ("mode_prelaunch",)
+
+# Fallback buy-rule revision stamped on stored picks when scan_mode does not
+# publish one; see _rule_version(). Two incomparable rules must never share one
+# label in the ledger, which is the whole point of storing it.
+BUY_RULE_VERSION_FALLBACK = "buy_rule-2026-08-06"
 
 
 def _connect():
@@ -78,6 +92,11 @@ def _ensure_schema(conn):
             launch_score    REAL,
             surge_score     REAL,
             explosion_score REAL,
+            core_plus       INTEGER,
+            buy_ready       INTEGER,
+            buy_block       TEXT,
+            gate_detail     TEXT,
+            rule_version    TEXT,
             PRIMARY KEY (scan_session, scan_mode, stock_id)
         )
         """
@@ -109,6 +128,17 @@ def _ensure_schema(conn):
     cols = {row[1] for row in conn.execute("PRAGMA table_info(picks)")}
     if "market" not in cols:
         conn.execute("ALTER TABLE picks ADD COLUMN market TEXT")
+    # F17: the ledger recorded WHAT was shortlisted but never WHY it was or was
+    # not buyable, so a past row cannot be re-judged -- you could not tell a
+    # name the rule refused (regime shut, stale bar, already held) from one it
+    # bought. These five carry the decision itself plus the rule revision that
+    # produced it. Same lightweight forward migration as `market` above.
+    for name, decl in (("core_plus", "INTEGER"), ("buy_ready", "INTEGER"),
+                       ("buy_block", "TEXT"), ("gate_detail", "TEXT"),
+                       ("rule_version", "TEXT")):
+        if name not in cols:
+            conn.execute("ALTER TABLE picks ADD COLUMN {} {}".format(
+                name, decl))
     ocols = {row[1] for row in conn.execute("PRAGMA table_info(outcomes)")}
     for name, decl in (("rule_entry", "REAL"), ("rule_return_pct", "REAL"),
                        ("rule_exit", "TEXT")):
@@ -130,6 +160,58 @@ def _f(row, col):
         return None
 
 
+def _b(row, col):
+    """Tri-state 1/0/None accessor for a boolean-ish column.
+
+    None is not False here: a column the scan never produced ("we did not
+    evaluate this") must stay distinguishable from an evaluated False. NaN maps
+    to None for the same reason -- bool(NaN) is True, which is how a missing
+    Core_Plus once read as a pass (report section 15).
+    """
+    if col not in row:
+        return None
+    v = row[col]
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    return 1 if bool(v) else 0
+
+
+def _s(row, col):
+    """Stripped-string-or-None accessor that tolerates missing columns / NaN."""
+    if col not in row:
+        return None
+    v = row[col]
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    return s or None
+
+
+def _rule_version():
+    """Revision string stamped onto every pick.
+
+    Read from scan_mode.BUY_RULE_VERSION so the stamp cannot drift away from the
+    rule it names -- the rule lives there, so the version has to as well. The
+    local literal only covers a scan_mode old enough not to publish one, and
+    names the rule as it stood at the 2026-08-06 audit (market gate + OTC +
+    rank < N_ENTER + Core_Plus + fresh signal).
+    """
+    try:
+        import scanner.scan_mode as _sm
+        published = str(getattr(_sm, "BUY_RULE_VERSION", "") or "")
+        return published or BUY_RULE_VERSION_FALLBACK
+    except Exception:
+        return BUY_RULE_VERSION_FALLBACK
+
+
 def record_picks(df, scan_mode, scan_session=None):
     """
     Append today's shortlist for `scan_mode` to the ledger. Idempotent: the
@@ -137,6 +219,13 @@ def record_picks(df, scan_mode, scan_session=None):
 
     `scan_session` defaults to today's wall-clock date (the run that produced
     the list). The per-stock forward anchor is each row's own Data_Date.
+
+    Also stores the buy DECISION, not just the shortlist (F17): core_plus,
+    buy_ready, buy_block, a gate_detail JSON of the remaining gate inputs and
+    the rule revision that judged them. Those come from mark_buy_ready, which
+    the scan runs before this; when it has not run (a mode with no buy rule, or
+    an older caller ordering) the columns land as NULL, which reads as "not
+    evaluated" rather than "refused".
     """
     if df is None or df.empty:
         return 0
@@ -144,6 +233,20 @@ def record_picks(df, scan_mode, scan_session=None):
     now = datetime.now()
     session = scan_session or now.strftime("%Y-%m-%d")
     ts = now.strftime("%Y-%m-%d %H:%M:%S")
+    rule_version = _rule_version()
+
+    # The market gate is a property of the RUN, not of a row, and it is the most
+    # common single reason a name is not buyable -- capture it once so a stored
+    # buy_block == "regime" can still be explained months later. Best effort:
+    # the ledger must never be the thing that breaks a scan.
+    regime = None
+    try:
+        from scanner.market_regime import get_market_regime
+        r = get_market_regime() or {}
+        regime = {k: r.get(k) for k in
+                  ("ok", "enter_ok", "is_current", "as_of_date", "ref_date")}
+    except Exception:
+        regime = None
 
     rows = []
     for rank, (_, r) in enumerate(df.iterrows()):
@@ -151,6 +254,15 @@ def record_picks(df, scan_mode, scan_session=None):
         if not sid:
             continue
         bar_date = str(r.get("Data_Date") or "")[:10] or session
+        # Everything the gate looked at that has no column of its own. Kept as
+        # JSON because the gate's inputs grow over time (Integrity_OK and the
+        # per-row freshness check were both added after the table was designed)
+        # and a schema change per input would be worse than a blob here.
+        gate = {
+            "hold_status": _s(r, "Hold_Status"),
+            "integrity_ok": _b(r, "Integrity_OK"),
+            "regime": regime,
+        }
         rows.append((
             session, ts, scan_mode, sid,
             str(r.get("Stock_Name", "")),
@@ -164,6 +276,11 @@ def record_picks(df, scan_mode, scan_session=None):
             _f(r, "Launch_Score"),
             _f(r, "Surge_Score"),
             _f(r, "Explosion_Score"),
+            _b(r, "Core_Plus"),
+            _b(r, "Buy_Ready"),
+            _s(r, "Buy_Block"),
+            json.dumps(gate, ensure_ascii=False, sort_keys=True),
+            rule_version,
         ))
 
     if not rows:
@@ -172,6 +289,10 @@ def record_picks(df, scan_mode, scan_session=None):
     try:
         with _connect() as conn:
             _ensure_schema(conn)
+            # Delete-then-insert keeps a same-day rescan idempotent (a double
+            # scan must not double-count). The decision columns are part of that
+            # replacement, so the row always describes the LAST scan of the day
+            # -- which is the one whose CSV/JSON the user actually saw.
             conn.execute(
                 "DELETE FROM picks WHERE scan_session = ? AND scan_mode = ?",
                 (session, scan_mode),
@@ -180,8 +301,9 @@ def record_picks(df, scan_mode, scan_session=None):
                 "INSERT OR REPLACE INTO picks "
                 "(scan_session, scan_ts, scan_mode, stock_id, stock_name, "
                 " market, rank, bar_date, close, suggested_buy, stop_loss, "
-                " risk_pct, launch_score, surge_score, explosion_score) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " risk_pct, launch_score, surge_score, explosion_score, "
+                " core_plus, buy_ready, buy_block, gate_detail, rule_version) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 rows,
             )
         return len(rows)
@@ -293,18 +415,55 @@ def _fill_from_db(by_stock):
 def _simulate_rule(opens, highs, lows, closes, hold):
     """Replay the adopted prelaunch exit stack over `hold` forward bars.
 
-    Returns (entry, return_pct, reason) or (None, None, None) when the window is
-    short or the open is unusable. Mirrors eval_winrate_round2.sim_trail, which
-    is the simulator every adopted threshold was chosen on:
+    Returns (entry, return_pct, reason) or (None, None, "na") when the window is
+    short or the open is unusable. Same levels as
+    archive/research/eval_winrate_round2.sim_trail, the simulator every adopted
+    threshold was chosen on -- but NOT the same event order any more; see the
+    F09 note below, and read the two together before comparing a ledger number
+    with a backtest number:
       entry  = the first forward bar's OPEN (the live rule is a market order at
                the next open; no limit is posted)
       stop   = entry * (1 - PRELAUNCH_STOP_PCT), disaster insurance only
       lock   = once a bar's high reaches +PRELAUNCH_TRAIL_ARM, the stop rises to
                entry * (1 + PRELAUNCH_TRAIL_LOCK)
       target = entry * (1 + PRELAUNCH_TP_PCT), taken intraday
-    Same-bar high/low ordering is unknowable, so a bar that both arms the lock
-    and breaches it is counted as a breach -- deliberately pessimistic. On a gap
-    through a level the fill is that bar's open, not the level.
+
+    EVENT ORDER WITHIN ONE BAR (F09, report sections 5.4 / 15). A daily bar is
+    four numbers; it cannot tell you the true intraday sequence, so the order
+    below is a stated assumption, not a measurement:
+
+      1. THE OPEN, which is the one price whose timing IS known -- it is the
+         first trade of the day. A bar that opens at or through a level filled
+         AT THE OPEN, not at the level. So an open above the target is a take
+         profit at the open (a gap up to 125 with a 120 target books +25%, not
+         the +2% lock that the old low-first ordering booked), and an open at or
+         below the live stop is a stop at the open.
+      2. ARMING, same bar. A bar whose high reaches arm_px can be stopped out on
+         the lock it just armed. The old code only applied arming from the NEXT
+         bar, which contradicted this docstring: high 107 / low 100 on a 100
+         entry armed at 106 and broke 102 within one bar, and was booked
+         "time +5%" instead of "lock +2%".
+      3. THE REST OF THE BAR, where high-vs-low ordering is unknowable, so the
+         LOWEST exit level the bar actually touched is booked -- deliberately
+         pessimistic, and the same convention the round2 simulator used. That
+         means the stop carried into the bar is tested before the lock the bar
+         itself arms, and both before the target: a bar with high 125 and low 80
+         on a 100 entry could have gone down first (-15%), or up through the arm
+         and back down (+2%), or up through the target (+20%), and -15% is the
+         one we cannot rule out. A fill inside the bar is at the level itself (a
+         gap through it was already handled in step 1).
+
+    Because arming now bites on its own bar and the open is settled first, this
+    function returns DIFFERENT rule_return_pct / rule_exit values than it did
+    before 2026-09-09: same-bar arm-and-break bars move from "time" to "lock",
+    and gap-through-target bars move from "stop"/"lock" to "tp". Any published
+    figure derived from it (docs/STRATEGY.md D.4 quotes one) predates the fix
+    and must be recomputed -- reset_rule_outcomes() then backfill_outcomes() --
+    before being quoted again. eval_winrate_round2.sim_trail carries the SAME
+    two ordering bugs (its comment describes this order, its code does not), so
+    until that research file is fixed too the ledger and the backtest that chose
+    these thresholds no longer agree bar for bar. The ledger is the corrected
+    one; the disagreement is the old backtest's, not this function's.
     """
     if len(opens) < hold:
         return None, None, "na"
@@ -315,18 +474,32 @@ def _simulate_rule(opens, highs, lows, closes, hold):
     stop_px = entry * (1 - PRELAUNCH_STOP_PCT)
     target = entry * (1 + PRELAUNCH_TP_PCT)
     arm_px = entry * (1 + PRELAUNCH_TRAIL_ARM)
+    lock_px = entry * (1 + PRELAUNCH_TRAIL_LOCK)
     armed = False
     for i in range(hold):
         op, hi, lo = float(opens[i]), float(highs[i]), float(lows[i])
+
+        # 1. the open, against the stop carried IN to this bar (on bar 0 that is
+        #    the disaster stop -- the lock cannot exist before the entry fill).
+        if op >= target:
+            return entry, (op / entry - 1.0) * 100, "tp"
+        if op <= stop_px:
+            return entry, (op / entry - 1.0) * 100, "lock" if armed else "stop"
+
+        # 2. ambiguous remainder of the bar, lowest exit level touched first:
+        #    the stop carried IN, then the lock this bar arms, then the target.
         if lo <= stop_px:
-            px = min(op, stop_px) if i > 0 else stop_px
-            return entry, (px / entry - 1.0) * 100, "lock" if armed else "stop"
+            return (entry, (stop_px / entry - 1.0) * 100,
+                    "lock" if armed else "stop")
+        arm_here = (not armed) and hi >= arm_px      # arming bites on its bar
+        if arm_here and lo <= lock_px:
+            return entry, (lock_px / entry - 1.0) * 100, "lock"
         if hi >= target:
-            px = max(op, target) if i > 0 else target
-            return entry, (px / entry - 1.0) * 100, "tp"
-        if not armed and hi >= arm_px:
+            return entry, (target / entry - 1.0) * 100, "tp"
+
+        if arm_here:
             armed = True
-            stop_px = max(stop_px, entry * (1 + PRELAUNCH_TRAIL_LOCK))
+            stop_px = max(stop_px, lock_px)
     return entry, (float(closes[hold - 1]) / entry - 1.0) * 100, "time"
 
 
@@ -420,6 +593,36 @@ def backfill_outcomes(horizons=HORIZONS, allow_fetch=True):
     except Exception as e:
         print("  [ledger] backfill failed: {}".format(e))
     return written
+
+
+def reset_rule_outcomes():
+    """
+    Clear the simulated rule columns so the next backfill recomputes them.
+
+    DELIBERATE step, called by nothing in the scan path. backfill_outcomes
+    treats a row with a non-NULL rule_exit as done, so the F09 event-order fix
+    (see _simulate_rule) only reaches rows written AFTER it -- every historical
+    row keeps the old, wrong same-bar ordering until this is run. Clearing the
+    three rule_* columns is safe: they are pure simulation, recomputed from the
+    price series, and the measured columns (fwd_return_pct / mfe_pct / mae_pct)
+    are not touched.
+
+    Returns the number of rows cleared.
+        python -c "from scanner.signal_ledger import reset_rule_outcomes as r; print(r())"
+        python tools/backfill_ledger.py
+    """
+    if not SIGNAL_LEDGER_FILE.exists():
+        return 0
+    try:
+        with _connect() as conn:
+            _ensure_schema(conn)
+            cur = conn.execute(
+                "UPDATE outcomes SET rule_entry = NULL, rule_return_pct = NULL, "
+                "rule_exit = NULL WHERE rule_exit IS NOT NULL")
+            return cur.rowcount
+    except Exception as e:
+        print("  [ledger] rule reset failed: {}".format(e))
+        return 0
 
 
 def load_picks():
