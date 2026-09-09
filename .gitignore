@@ -7,3 +7,8 @@ __pycache__/
 build/
 dist/
 *.spec
+# ...except the single packaging entry point (report F26: two specs disagreed).
+!TaiwanScanner.spec
+
+# Legacy pre-SQLite dump kept for reconciliation only, not version control.
+archive/legacy/*.xlsx

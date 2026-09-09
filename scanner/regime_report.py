@@ -98,7 +98,7 @@ def generate_regime_report(refresh=True, progress=None):
     if refresh:
         say("Updating research database (filling gaps)...")
         try:
-            from build_research_db import build
+            from tools.build_research_db import build
             build()
         except Exception as e:
             say("refresh skipped: {}".format(str(e)[:60]))
