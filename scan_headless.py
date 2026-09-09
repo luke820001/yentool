@@ -11,8 +11,9 @@ Usage:
     python scan_headless.py [mode]
         mode defaults to mode_prelaunch.
 
-Exit code 0 on success, 1 if the market feed was unreachable (so CI can decide
-whether to keep the previous data). Any single stage failure is logged but does
+Exit codes (see main): 0 ran and published, INCLUDING a legitimate day where
+nothing qualified; 1 the market feed was unreachable so the previous data is
+left in place; 2 the scan crashed. Any single stage failure is logged but does
 not abort the run, matching the GUI's resilience.
 """
 import sys
@@ -51,6 +52,43 @@ def _session_date(df):
         return ""
     dates = [str(d)[:10] for d in df["Data_Date"] if str(d or "").strip()]
     return max(dates) if dates else ""
+
+
+def _data_health(df, session_date, degraded):
+    """Whether the data we just scanned is as fresh as it should be.
+
+    mark_buy_ready compares each row against `session_date`, which catches ONE
+    stock whose feed died. It cannot catch the case where the whole fetch
+    silently returned yesterday, because the session is derived from the data
+    itself.
+
+    The obvious fix -- block everything when the data is older than
+    chip_verifier._latest_trading_day() -- is wrong: that helper rolls back
+    weekends but knows nothing about public holidays, so on the day after Lunar
+    New Year it would declare perfectly good data stale and refuse every buy.
+    Until there is a real market calendar (report 9.1's trading_sessions, still
+    unbuilt), the discrepancy is REPORTED rather than enforced: the UI can say
+    "data may be behind" without the scanner pretending to know the holiday
+    schedule. Guessing in the blocking direction is still guessing.
+    """
+    health = {"session_date": session_date, "rows": 0 if df is None else len(df),
+              "degraded": degraded}
+    try:
+        from scanner.chip_verifier import _latest_trading_day
+        expected = _latest_trading_day()
+        health["expected_session"] = expected
+        health["data_lag"] = bool(session_date and expected
+                                  and session_date < expected)
+        health["calendar_confirmed"] = False   # no official calendar yet
+    except Exception:
+        health["expected_session"] = None
+        health["data_lag"] = None
+    if df is not None and not df.empty and "Buy_Ready" in df.columns:
+        health["buy_ready"] = int(df["Buy_Ready"].sum())
+        if "Buy_Block" in df.columns:
+            health["blocks"] = {str(k): int(v) for k, v
+                                in df["Buy_Block"].value_counts().items() if k}
+    return health
 
 
 def build_market_reports(df):
@@ -166,10 +204,17 @@ def run_scan(scan_mode="mode_prelaunch"):
     # export, so a hung Gemini request delayed -- and an unconverted
     # requests.Timeout could skip past -- the market data and the user's own
     # position prices. Nobody's holdings should wait on a language model.
+    data_health = _data_health(result_df, session_date, degraded)
+    if data_health.get("data_lag"):
+        print("  [health] data may be behind: have {} expected {}".format(
+            data_health.get("session_date"),
+            data_health.get("expected_session")))
+
     try:
         path = export_scan_result(result_df, scan_mode, degraded=degraded,
                                   session_date=session_date,
-                                  strategy_version=STRATEGY_VERSION)
+                                  strategy_version=STRATEGY_VERSION,
+                                  quality=data_health)
         print("  [export] scan result -> {}".format(path))
     except Exception as e:
         print("  [export] failed: {}".format(e))
@@ -183,7 +228,8 @@ def run_scan(scan_mode="mode_prelaunch"):
         try:
             export_scan_result(result_df, scan_mode, reports=reports,
                                degraded=degraded, session_date=session_date,
-                               strategy_version=STRATEGY_VERSION)
+                               strategy_version=STRATEGY_VERSION,
+                               quality=data_health)
             print("  [ai] {} report(s) attached".format(len(reports)))
         except Exception as e:
             print("  [ai] attach failed, prices already published: {}".format(e))

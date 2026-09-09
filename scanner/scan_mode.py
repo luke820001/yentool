@@ -454,6 +454,12 @@ BUY_RULE_MODES = ("mode_prelaunch",)
 #   2026-09-09  F06 -- data date, Integrity_OK and unknown-hold-status now block
 STRATEGY_VERSION = "prelaunch-2026-09-09"
 
+# signal_ledger stamps every stored pick with this so a past row can be judged
+# against the rule that actually produced it. It is the SAME string on purpose:
+# two constants for "which rule was this" is how two incomparable rules end up
+# sharing one label, which is the exact problem the stamp exists to prevent.
+BUY_RULE_VERSION = STRATEGY_VERSION
+
 
 def mark_buy_ready(df, scan_mode, session_date=None):
     """Add Buy_Ready (bool) + Buy_Block (ASCII reason) to a scanned frame.
