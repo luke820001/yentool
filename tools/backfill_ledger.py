@@ -9,6 +9,13 @@ see whether the LIVE system matches the backtest -- and watch for alpha decay.
 
     python backfill_ledger.py
 """
+
+# Python puts the SCRIPT's directory on sys.path, not the working directory,
+# so running this from the repo root cannot see scanner/, config/ etc. after
+# the 2026-09-09 move into tools/. Put the project root on the path first.
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import pandas as pd
 
 from scanner.signal_ledger import backfill_outcomes, load_picks, load_outcomes

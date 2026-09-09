@@ -7,6 +7,13 @@ before trusting a scan (or a backtest) -- every score is a function of this data
 
     python audit_data.py
 """
+
+# Python puts the SCRIPT's directory on sys.path, not the working directory,
+# so running this from the repo root cannot see scanner/, config/ etc. after
+# the 2026-09-09 move into tools/. Put the project root on the path first.
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 from scanner.data_integrity import audit_store
 
 
