@@ -108,6 +108,30 @@ class TestFixedFirstDay(LedgerCase):
                               (rec_id,)).fetchone()["initial_buy_price"],
             "100.00", "closing a cycle must not disturb the old fixed price")
 
+    def test_taking_a_recommendation_converts_it_rather_than_expiring_it(self):
+        """Report section 5.2's lifecycle: 觀察 -> 首次合格建議 -> 已建立實際持倉.
+        A recommendation the user acted on did not lapse unacted-on, and the
+        expiry sweep must not later relabel it as though it had."""
+        rec_id, _ = self.recommend("100")
+        L.open_position(self.conn, "8069", recommendation_id=rec_id,
+                        strategy=STRATEGY)
+        status = self.conn.execute(
+            "SELECT status FROM recommendations WHERE recommendation_id = ?",
+            (rec_id,)).fetchone()["status"]
+        self.assertEqual(status, "converted")
+        self.assertEqual(L.expire_recommendations(self.conn, "2026-12-31"), 0)
+        events = [r["event_type"] for r in self.conn.execute(
+            "SELECT event_type FROM recommendation_events ORDER BY event_id")]
+        self.assertEqual(events, ["created", "position_opened"])
+
+    def test_an_untaken_recommendation_does_expire(self):
+        rec_id, _ = self.recommend("100", valid_until_session=CAL[2])
+        self.assertEqual(L.expire_recommendations(self.conn, CAL[4]), 1)
+        status = self.conn.execute(
+            "SELECT status FROM recommendations WHERE recommendation_id = ?",
+            (rec_id,)).fetchone()["status"]
+        self.assertEqual(status, "expired")
+
     def test_zero_or_negative_recommendation_price_refused(self):
         for bad in ("0", "-5"):
             with self.assertRaises(L.LedgerError):

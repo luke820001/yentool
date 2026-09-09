@@ -198,6 +198,15 @@ def open_position(conn, stock_id, stock_name="", market="", strategy="",
              origin, note, ts, ts),
         )
         if recommendation_id:
+            # The recommendation has done its job: it is now a real holding,
+            # not an outstanding suggestion. Report section 5.2's lifecycle
+            # ends the advice branch here ("已建立實際持倉"), which also stops
+            # expire_recommendations from later marking it as one that lapsed
+            # unacted-on -- it did not lapse, it was taken.
+            conn.execute(
+                "UPDATE recommendations SET status = 'converted' "
+                "WHERE recommendation_id = ? AND status = 'active'",
+                (recommendation_id,))
             conn.execute(
                 "INSERT INTO recommendation_events "
                 "(recommendation_id, event_type, effective_session, recorded_at, reason_code, payload) "

@@ -256,33 +256,80 @@ class TestEmptyPublish(unittest.TestCase):
     """F18: a zero-pick day is a result, not a failure."""
 
     def test_empty_frame_still_produces_a_payload(self):
+        """Writes to a temp dir and reads the file back.
+
+        (An earlier version of this test monkeypatched result_export.json.dump
+        and redirected only MOBILE_DATA_FILE. json is a shared module object, so
+        the patch also silenced the quote feed's writer, and MOBILE_QUOTES_FILE
+        still pointed at the repo -- the test left a 0-byte mobile/quotes.json
+        behind. Redirect every path the function writes to, and do not patch
+        stdlib modules other code is using.)
+        """
         from scanner import result_export
-        captured = {}
 
-        def fake_dump(payload, f, **kw):
-            captured.update(payload)
-
-        real_open, real_dump = result_export.json.dump, None
-        orig = result_export.json.dump
-        result_export.json.dump = fake_dump
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                result_export.MOBILE_DATA_FILE = Path(tmp) / "scan_result.json"
+        # Every path the function touches, including the ones reached only via
+        # the quote feed -- otherwise the test creates a real data/ ledger.
+        originals = {name: getattr(result_export, name) for name in
+                     ("MOBILE_DIR", "MOBILE_DATA_FILE", "MOBILE_QUOTES_FILE",
+                      "PRICE_VOLUME_FILE", "PORTFOLIO_LEDGER_FILE")}
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
                 result_export.MOBILE_DIR = Path(tmp)
-                result_export.export_scan_result_json(
+                result_export.MOBILE_DATA_FILE = Path(tmp) / "scan_result.json"
+                result_export.MOBILE_QUOTES_FILE = Path(tmp) / "quotes.json"
+                result_export.PRICE_VOLUME_FILE = Path(tmp) / "price_volume.db"
+                result_export.PORTFOLIO_LEDGER_FILE = Path(tmp) / "ledger.db"
+                out = result_export.export_scan_result_json(
                     pd.DataFrame(), "mode_prelaunch", "2026-09-09 18:00:00",
                     session_date=TODAY)
-        finally:
-            result_export.json.dump = orig
+            finally:
+                for name, value in originals.items():
+                    setattr(result_export, name, value)
 
-        self.assertEqual(captured["meta"]["count"], 0)
-        self.assertTrue(captured["meta"]["empty_ok"],
+            payload = json.loads(Path(out).read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["meta"]["count"], 0)
+        self.assertTrue(payload["meta"]["empty_ok"],
                         "a healthy zero-pick day must be flagged as such")
-        self.assertEqual(captured["rows"], [])
+        self.assertEqual(payload["rows"], [])
+        self.assertEqual(payload["meta"]["session_date"], TODAY)
 
     def test_none_is_not_publishable(self):
         from scanner.result_export import export_scan_result
         self.assertIsNone(export_scan_result(None, "mode_prelaunch"))
+
+
+class TestLedgerPublishGuard(unittest.TestCase):
+    """The repo is public and git history is forever (report 9.2)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "portfolio_ledger.db"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_recommendations_only_is_publishable(self):
+        from portfolio.ledger import open_ledger, record_recommendation
+        from tools.check_ledger_public import check
+        conn = open_ledger(self.db)
+        record_recommendation(conn, "8069", MODE, STRATEGY_VERSION, TODAY, "100")
+        conn.close()
+        self.assertEqual(check(self.db), 0)
+
+    def test_a_real_fill_blocks_publication(self):
+        from portfolio.ledger import open_ledger, open_position, add_execution
+        from tools.check_ledger_public import check
+        conn = open_ledger(self.db)
+        pid = open_position(conn, "8069", strategy=MODE)
+        add_execution(conn, pid, "BUY", TODAY, 1000, "102")
+        conn.close()
+        self.assertEqual(check(self.db), 1,
+                         "a ledger holding real trades must not be published")
+
+    def test_missing_ledger_is_not_an_error(self):
+        from tools.check_ledger_public import check
+        self.assertEqual(check(self.db), 0)
 
 
 if __name__ == "__main__":

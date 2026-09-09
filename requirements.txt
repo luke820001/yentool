@@ -1,5 +1,19 @@
-pandas>=2.0.0
-openpyxl>=3.1.0
-requests>=2.31.0
-python-dotenv>=1.0.0
-yfinance>=0.2.0
+# Bounded, not just floored (report F26: every dependency was ">=" only, so a
+# CI run months apart could resolve a different major version than the machine
+# the strategy was validated on). Upper bounds stop the next major from landing
+# unannounced in a scheduled run nobody is watching; raise them deliberately.
+#
+# Verified working set as of 2026-09-09 (local, CPython 3.13.5):
+#   pandas 3.0.3  openpyxl 3.1.5  requests 2.34.2  python-dotenv 1.2.2
+#   yfinance 1.4.1  numpy 2.4.6 (transitive, via pandas/yfinance)
+#
+# NOTE: CI pins python-version 3.12 while local development is on 3.13. That
+# gap is real and still open -- see docs/TASKS.md. It is left alone here rather
+# than changed blind, because the 3.12 runner is the configuration the current
+# daily scan is known to work on and nothing in this checkout can test the
+# runner.
+pandas>=2.0.0,<4.0.0
+openpyxl>=3.1.0,<4.0.0
+requests>=2.31.0,<3.0.0
+python-dotenv>=1.0.0,<2.0.0
+yfinance>=0.2.0,<2.0.0

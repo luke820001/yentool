@@ -65,7 +65,14 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      # Exit codes are meaningful (scan_headless.main): 0 published, including a
+      # legitimate day where nothing qualified; 1 the market feed was
+      # unreachable so the previous data is deliberately left in place; 2 the
+      # scan crashed. Only 2 should read as a build failure -- a quiet market
+      # and a temporary feed outage are not bugs, and burying them in a red X
+      # trains everyone to ignore the red X.
       - name: Run scan
+        id: scan
         env:
           # Optional: set these as repo secrets to get real AI reports on the
           # phone. Without them, the scan still runs and uses a local text
@@ -73,15 +80,39 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        run: python scan_headless.py mode_prelaunch
+        run: |
+          set +e
+          python scan_headless.py mode_prelaunch
+          code=$?
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          case "$code" in
+            0) echo "published=true"  >> "$GITHUB_OUTPUT" ;;
+            1) echo "published=false" >> "$GITHUB_OUTPUT"
+               echo "::warning::market feed unreachable; previous data kept" ;;
+            *) echo "::error::scan failed with exit $code"; exit "$code" ;;
+          esac
+
+      # The ledger has to survive between runs -- otherwise every scan believes
+      # today is the first day each name qualified and the fixed first-day price
+      # resets daily, which defeats the point of recording it. But this repo is
+      # public, so before committing it we verify it holds ONLY recommendations
+      # and no real positions or fills (report section 9.2). CI never records a
+      # trade, so a non-empty positions table means a local database with real
+      # holdings got committed by accident -- and git history would keep it
+      # forever. Fail loudly rather than publish it.
+      - name: Verify the ledger carries no private positions
+        run: python tools/check_ledger_public.py
 
       # Persist only the small, accumulating state (forward-performance ledger,
-      # name cache, hysteresis held-set). Market DBs stay in the cache above.
+      # recommendation ledger, name cache, hysteresis held-set). Market DBs stay
+      # in the cache above.
       - name: Commit durable state
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f data/signal_ledger.db data/stock_names.json data/scan_state 2>/dev/null || true
+          git add -f data/signal_ledger.db data/portfolio_ledger.db \
+                     data/stock_names.json data/scan_state 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "no state changes to commit"
           else
