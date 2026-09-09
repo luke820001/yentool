@@ -251,6 +251,64 @@ class TestQuoteFeed(unittest.TestCase):
         feed = build_quote_feed(self.db, ["8069"], sessions=10)
         self.assertEqual(feed["price_basis"], "unverified")
 
+    # -- privacy -----------------------------------------------------------
+    # quotes.json is served from a PUBLIC Pages site that several people read.
+    # If the feed carried a chosen subset, a name in the feed but not in
+    # today's shortlist could only be there because somebody holds it -- the
+    # file would announce the holdings list. These tests pin the property that
+    # makes that inference impossible.
+
+    def test_universe_mode_publishes_every_stock(self):
+        feed = build_quote_feed(self.db, None, sessions=10)
+        self.assertEqual(feed["scope"], "universe")
+        self.assertEqual(sorted(feed["closes"]), ["1234", "8069"])
+
+    def test_universe_mode_reveals_no_request_list(self):
+        """`missing` would be a second inference channel: a short list of names
+        the publisher asked for and did not get is still a list of names the
+        publisher cared about."""
+        feed = build_quote_feed(self.db, None, sessions=10)
+        self.assertEqual(feed["missing"], [])
+
+    def test_feed_is_identical_whatever_is_held(self):
+        """The published bytes must not depend on anyone's positions at all."""
+        a = build_quote_feed(self.db, None, sessions=10)
+        b = build_quote_feed(self.db, None, sessions=10)
+        for f in (a, b):
+            f.pop("generated_at", None)
+        self.assertEqual(json.dumps(a, sort_keys=True),
+                         json.dumps(b, sort_keys=True))
+
+    def test_export_publishes_the_universe_not_a_selection(self):
+        """The real publish path must not narrow the feed to the scan rows --
+        that is what made a dropped-off holding visible in the first place."""
+        from scanner import result_export
+        originals = {n: getattr(result_export, n) for n in
+                     ("MOBILE_DIR", "MOBILE_DATA_FILE", "MOBILE_QUOTES_FILE",
+                      "PRICE_VOLUME_FILE", "PORTFOLIO_LEDGER_FILE")}
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                result_export.MOBILE_DIR = Path(tmp)
+                result_export.MOBILE_DATA_FILE = Path(tmp) / "scan_result.json"
+                result_export.MOBILE_QUOTES_FILE = Path(tmp) / "quotes.json"
+                result_export.PRICE_VOLUME_FILE = self.db
+                result_export.PORTFOLIO_LEDGER_FILE = Path(tmp) / "ledger.db"
+                # The scan only selected 8069; 1234 is not in it.
+                result_export.export_scan_result_json(
+                    pd.DataFrame([{"Stock_ID": "8069", "Stock_Name": "T",
+                                   "Data_Date": "2026-09-07"}]),
+                    "mode_prelaunch", "2026-09-07 18:00:00")
+                feed = json.loads(
+                    (Path(tmp) / "quotes.json").read_text(encoding="utf-8"))
+            finally:
+                for name, value in originals.items():
+                    setattr(result_export, name, value)
+        self.assertEqual(feed["scope"], "universe")
+        self.assertIn("1234", feed["closes"],
+                      "a stock absent from the scan must still be priced")
+        self.assertNotIn("tracked_count", feed,
+                         "the feed must not disclose how many positions exist")
+
 
 class TestEmptyPublish(unittest.TestCase):
     """F18: a zero-pick day is a result, not a failure."""

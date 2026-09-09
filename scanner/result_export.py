@@ -97,25 +97,30 @@ def _calendar_tail(n=40):
 
 
 def _publish_quotes(df, names=None):
-    """Write quotes.json covering the scan AND everything the ledger tracks.
+    """Write quotes.json covering the WHOLE price universe, not a chosen subset.
 
-    The union is the point (F04): a position is priced because the USER holds
-    it, not because today's scan happened to like it.
+    F04 needs a holding to stay priced after it drops off the shortlist. The
+    obvious way to do that is to publish the scan UNION whatever the ledger
+    tracks -- and that is what this did first. It leaks.
+
+    quotes.json is served from a public GitHub Pages site that several people
+    read. A stock that is NOT in today's shortlist but IS in the feed can only
+    be there because somebody holds it, so the file quietly announces the
+    holdings list to every viewer. The prices never left the device; the
+    position ITSELF did. A `tracked_count` field spelled out the number too.
+
+    Publishing every stock removes the inference entirely: presence in the feed
+    says nothing about anyone, because everything is present. Measured cost is
+    1,953 stocks x 30 sessions = 334KB raw, 102KB gzipped over the wire. That is
+    a small price for a privacy property that holds by construction rather than
+    by remembering to be careful.
+
+    It is also strictly better for F04: a position in a stock the scanner has
+    NEVER picked is now priced too, which the union approach could only manage
+    if the server-side ledger happened to know about it.
     """
-    ids = set()
-    if df is not None and not df.empty and "Stock_ID" in df.columns:
-        ids.update(str(s).strip() for s in df["Stock_ID"])
-    try:
-        from portfolio.sync import open_position_ids
-        tracked = open_position_ids(PORTFOLIO_LEDGER_FILE)
-        ids.update(tracked)
-    except Exception as e:
-        print("  [quotes] ledger ids unavailable: {}".format(str(e)[:80]))
-        tracked = set()
-
     from scanner.quote_feed import build_quote_feed, write_quote_feed
-    payload = build_quote_feed(PRICE_VOLUME_FILE, ids, names=names)
-    payload["tracked_count"] = len(tracked)
+    payload = build_quote_feed(PRICE_VOLUME_FILE, None, names=names)
     write_quote_feed(MOBILE_QUOTES_FILE, payload)
     return payload
 

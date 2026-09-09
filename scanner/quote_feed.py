@@ -19,8 +19,12 @@ So the feed carries a WINDOW of recent closes, not a single quote:
     private holding has to be sent anywhere to be valued. That is what makes
     the static GitHub Pages deployment viable at all.
 
-Size: ~600 stocks x 30 sessions of one float is a few hundred KB before gzip,
-which is an acceptable price for the phone never going blind again.
+The feed covers the WHOLE universe rather than a chosen subset, because a
+chosen subset is readable: this file is public, and a name in it that is not in
+today's shortlist could only be there because somebody holds it. Publishing
+everything makes presence carry no information. Measured 2026-09-09: 1,953
+stocks x 30 sessions = 334KB raw, 102KB gzipped over the wire -- cheap enough
+that the privacy property can hold by construction instead of by vigilance.
 """
 import json
 import sqlite3
@@ -43,13 +47,22 @@ def build_quote_feed(price_db, stock_ids, sessions=FEED_SESSIONS,
                      names=None):
     """Return the quote-feed payload for `stock_ids`.
 
+    `stock_ids=None` means EVERY stock with a bar in the window. That is the
+    mode the published feed uses, and it is a privacy property, not an
+    optimisation: a feed containing a chosen subset lets a reader infer why
+    each name is there, and for a name that is not in today's shortlist the
+    only available reason is that somebody holds it. Publishing everything
+    makes presence in the feed carry no information about anyone.
+
     Closes are positional against `sessions`, with null where a stock has no
     bar for that date. A null is meaningful and must survive to the client: it
     is the difference between "did not trade" and "we never looked", and the
     report is emphatic that filling gaps with the previous price is a
     falsification (section 4.3).
     """
-    wanted = {str(s).strip() for s in stock_ids if str(s).strip()}
+    everything = stock_ids is None
+    wanted = set() if everything else {
+        str(s).strip() for s in stock_ids if str(s).strip()}
     payload = {
         "as_of": "",
         "sessions": [],
@@ -62,7 +75,7 @@ def build_quote_feed(price_db, stock_ids, sessions=FEED_SESSIONS,
         "price_basis": "unverified",
         "note": "close only; see F08 before reconciling against a broker statement",
     }
-    if not wanted:
+    if not wanted and not everything:
         return payload
 
     conn = None
@@ -82,7 +95,7 @@ def build_quote_feed(price_db, stock_ids, sessions=FEED_SESSIONS,
             (session_list[0],))
         for stock_id, date, close in cursor:
             sid = str(stock_id).strip()
-            if sid not in wanted:
+            if not everything and sid not in wanted:
                 continue
             slot = index.get(str(date)[:10])
             if slot is None or close is None:
@@ -109,7 +122,12 @@ def build_quote_feed(price_db, stock_ids, sessions=FEED_SESSIONS,
                             if sid in names}
     # Names we were asked for but found no bar for at all. The phone shows
     # these as "price unavailable" rather than silently omitting the position.
-    payload["missing"] = sorted(wanted - set(payload["closes"]))
+    # In universe mode there is no request list to fall short of, and listing
+    # what the market does not have would be a second inference channel, so it
+    # stays empty by construction.
+    payload["missing"] = ([] if everything
+                          else sorted(wanted - set(payload["closes"])))
+    payload["scope"] = "universe" if everything else "requested"
     payload["count"] = len(payload["closes"])
     payload["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return payload
