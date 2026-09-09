@@ -18,17 +18,29 @@ from ingestion.price_volume_multi import resolve_market
 class ScanWorker:
 
     def __init__(self, on_progress, on_result, on_error, on_done,
-                 scan_mode="mode_squeeze"):
+                 scan_mode="mode_squeeze", on_notice=None):
         self._on_progress = on_progress
         self._on_result   = on_result
         self._on_error    = on_error
         self._on_done     = on_done
+        # Feed-health notice (degraded string, or None when healthy). Optional so
+        # callers that do not render it are unaffected.
+        self._on_notice   = on_notice
         self._scan_mode   = scan_mode
         self._thread      = None
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def _notify(self, degraded):
+        """Best effort: a UI notice must never be able to abort a scan."""
+        if self._on_notice is None:
+            return
+        try:
+            self._on_notice(degraded)
+        except Exception as e:
+            print("  [notice] skipped: {}".format(e))
 
     def _run(self):
         try:
@@ -56,6 +68,11 @@ class ScanWorker:
                     health.get("tse_rows"), health.get("otc_rows"))
                 print("  [guard] {} -> held_ids/ledger NOT updated".format(
                     degraded))
+            # Tell the UI too. This used to reach export_scan_result only, so a
+            # partial market feed was invisible on the desktop: the shortened
+            # list read as "nothing else qualified" instead of "one exchange did
+            # not answer". Sent even when healthy, so the banner clears.
+            self._notify(degraded)
 
             total = len(candidates)
 
