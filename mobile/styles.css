@@ -1,297 +1,375 @@
+/* ============================================================================
+ * YenTool mobile PWA styles.
+ *
+ * Two colour languages, kept strictly apart (report 7.4):
+ *   TRADE STATE   .state-* on a card, and .notice tones -- "what is happening
+ *                 to this position / this feed".
+ *   SCORE TIER    .score-* -- "how the technical score ranks", a chip only.
+ * They used to be mixed, and worse, the DATA-notice class `.stale` shared its
+ * name with the card modifier `.stale`, so `.stale{display:none}` silently hid
+ * every overdue holding (F10). Nothing in this file hides a card. The only
+ * display:none rules are on [hidden] and on empty containers, which the app
+ * toggles explicitly. No selector in this file can hide a stock card.
+ * ==========================================================================*/
+
 :root {
   --bg: #1E1E24;
   --surface: #25262D;
+  --surface2: #2B2D36;
   --header: #2B2D36;
-  --hover: #3A3D4A;
+  --line: #3A3D4A;
   --accent: #4A90E2;
   --fg: #E0E0E0;
-  --dim: #757575;
+  --dim: #9296A3;
+  --dimmer: #757986;
   --green: #4CAF50;
+  --green-t: #9ed7a1;
   --gold: #FFD740;
   --orange: #FF8A3D;
   --red: #E57373;
-  --row-high: #2E2A14;
-  --row-mid: #2E2014;
+  --red-t: #f0b3b3;
+  --tap: 44px;              /* minimum touch target */
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
+html, body { margin: 0; }
+
 body {
-  margin: 0;
   background: var(--bg);
   color: var(--fg);
   font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
   font-size: 15px;
-  padding-bottom: env(safe-area-inset-bottom);
+  line-height: 1.45;
+  /* room for the fixed tab bar plus the iPhone home indicator */
+  padding-bottom: calc(64px + env(safe-area-inset-bottom));
 }
 
+[hidden] { display: none !important; }
+
+/* --- header ---------------------------------------------------------------*/
 #topbar {
   position: sticky;
   top: 0;
   z-index: 10;
   background: var(--header);
-  padding: calc(env(safe-area-inset-top) + 10px) 12px 10px;
+  padding: calc(env(safe-area-inset-top) + 8px) 12px 8px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
 }
-
-.title-row { display: flex; align-items: center; justify-content: space-between; }
-.title-row h1 { font-size: 18px; margin: 0; font-weight: 600; }
+.title-row { display: flex; align-items: center; gap: 8px; }
+.title-row h1 { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: 0.5px; }
+.asof { font-size: 11.5px; color: var(--dim); margin-left: auto; text-align: right; }
 #refresh {
   background: var(--surface);
   color: var(--fg);
-  border: none;
-  border-radius: 8px;
-  width: 38px; height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-width: var(--tap); height: var(--tap);
   font-size: 20px;
-  active: none;
+  flex: 0 0 auto;
 }
-#refresh:active { background: var(--hover); }
+#refresh:active { background: var(--line); }
 
-.meta { font-size: 12px; color: var(--dim); margin-top: 4px; }
-
-.regime {
+/* --- data notices (NOT card states) --------------------------------------*/
+.notices:empty { display: none; }
+.notice {
   margin-top: 6px;
-  padding: 5px 10px;
-  border-radius: 6px;
-  font-size: 12.5px;
-  font-weight: 600;
-  display: none;
-}
-/* stale-data notice: shown while the shipped scan lags the latest expected
-   session; the app polls in the background and clears it on fresh data */
-.stale {
-  display: none;
-  margin-top: 6px;
-  padding: 6px 10px;
-  border-radius: 6px;
-  font-size: 12.5px;
-  background: rgba(255,138,61,0.16);
-  color: var(--orange);
-}
-.stale.show { display: block; }
-
-.regime.on  { display: block; background: rgba(76,175,80,0.15);  color: #9ed7a1; }
-.regime.mid { display: block; background: rgba(255,215,64,0.15);  color: var(--gold); }
-.regime.off { display: block; background: rgba(229,115,115,0.15); color: #eaa; }
-
-/* data-fault banner: an exchange snapshot failed its sanity floor -- the
-   missing market is NOT a no-trade signal (see meta.degraded) */
-.degraded {
-  display: none;
-  margin-top: 6px;
-  padding: 6px 10px;
-  border-radius: 6px;
-  font-size: 12.5px;
-  font-weight: 600;
-  background: rgba(229,115,115,0.2);
-  border: 1px solid var(--red);
-  color: #f0b3b3;
-}
-.degraded.show { display: block; }
-
-/* buy-rule counter: N tradeable names today, or an explicit "normal no-trade
-   day" so an empty OTC never again reads as a mystery */
-.tradeable {
-  display: none;
-  margin-top: 6px;
-  padding: 5px 10px;
-  border-radius: 6px;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-.tradeable.show { display: block; }
-.tradeable.on  { background: rgba(255,215,64,0.15); color: var(--gold); }
-.tradeable.off { background: var(--surface); color: var(--dim); }
-
-.core {
-  font-size: 10.5px;
-  color: var(--gold);
-  border: 1px solid var(--gold);
-  border-radius: 4px;
-  padding: 0 5px;
-  font-weight: 600;
-}
-/* CORE+ = top-20 AND entry-quality gate (near 52w high, not extended) --
-   the only rows the validated trading rule actually buys */
-.core.plus {
-  color: #1E1E24;
-  background: var(--gold);
-}
-/* Passed the entry-quality gate but the FULL rule still refuses it today
-   (market gate shut, or the name is already in a hold). Must not look like a
-   buy: same badge slot, no gold fill, reason spelled out. */
-.core.muted {
-  color: var(--dim);
-  border-color: #3a3d4a;
-  background: none;
-  font-weight: 500;
-}
-
-.decision-card {
-  margin-top: 8px;
-  padding: 8px 10px;
+  padding: 7px 10px;
   border-radius: 8px;
   font-size: 12.5px;
-  line-height: 1.5;
-  background: rgba(74,144,226,0.12);
-  border-left: 3px solid var(--accent);
-  color: #cfe0f3;
-  display: none;
+  font-weight: 600;
+  line-height: 1.4;
 }
-.decision-card.red   { background: rgba(229,115,115,0.12); border-left-color: var(--red); color: #f0c9c9; }
-.decision-card.dim   { background: var(--surface); border-left-color: var(--dim); color: var(--dim); }
-.decision-card.show  { display: block; }
+.notice.info { background: var(--surface); color: var(--dim); }
+.notice.ok   { background: rgba(76,175,80,0.15);  color: var(--green-t); }
+.notice.warn { background: rgba(255,138,61,0.16); color: var(--orange); }
+.notice.err  { background: rgba(229,115,115,0.2); border: 1px solid var(--red); color: var(--red-t); }
 
-#controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 8px;
-  flex-wrap: wrap;
+/* --- pages ---------------------------------------------------------------*/
+.page { padding: 10px 12px 8px; display: flex; flex-direction: column; gap: 10px; }
+.sec { display: flex; flex-direction: column; gap: 8px; }
+.sec h2 {
+  font-size: 12.5px; color: var(--accent); margin: 6px 0 0;
+  font-weight: 700; letter-spacing: 0.4px;
 }
+.hint { font-size: 11.5px; color: var(--dim); line-height: 1.5; }
+.sm { font-size: 11px; color: var(--dim); }
+.empty-inline {
+  padding: 14px 12px; border-radius: 10px; background: var(--surface);
+  color: var(--dim); font-size: 13px; text-align: center;
+}
+.status { text-align: center; color: var(--dimmer); font-size: 11.5px; padding: 10px 0 4px; }
+
+/* --- overview -------------------------------------------------------------*/
+.asof-block {
+  background: var(--surface); border-radius: 10px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.asof-line { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; }
+.asof-line span { color: var(--dim); flex: 0 0 auto; }
+.asof-line b { font-weight: 600; text-align: right; }
+
+.totals { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.total {
+  background: var(--surface); border-radius: 10px; padding: 9px 11px;
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+}
+.total:first-child { grid-column: 1 / -1; }
+.total .t-l { font-size: 11px; color: var(--dim); }
+.total .t-v { font-size: 17px; font-weight: 700; word-break: break-all; }
+.total:first-child .t-v { font-size: 22px; }
+.total .t-s { font-size: 10.5px; color: var(--dimmer); line-height: 1.35; }
+
+/* Sign colours. Always paired with a sign and a word in the text itself, so
+   the number still reads correctly in greyscale (report 7.4). */
+.pos { color: var(--green-t); }
+.neg { color: var(--red-t); }
+.flat { color: var(--fg); }
+.gold { color: var(--gold); }
+
+.chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.stat {
+  flex: 1 1 auto; min-height: var(--tap); min-width: 84px;
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 10px;
+  font-size: 13px; font-weight: 600; padding: 6px 8px;
+}
+.stat.alert { border-color: var(--orange); color: var(--orange); }
+.stat:active { background: var(--line); }
+
+.pending { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.pending li {
+  background: var(--surface); border-radius: 10px; padding: 9px 11px;
+  font-size: 13px; line-height: 1.5; border-left: 3px solid var(--dim);
+}
+.pending li.p-d10   { border-left-color: var(--gold); }
+.pending li.p-gap   { border-left-color: var(--orange); }
+.pending li.p-trail { border-left-color: var(--accent); }
+.pending li.p-stop  { border-left-color: var(--red); }
+.pending li.p-shares{ border-left-color: var(--orange); }
+
+/* --- collapsible strategy card (report 7.4) -------------------------------*/
+.strategy {
+  background: rgba(74,144,226,0.12); border-left: 3px solid var(--accent);
+  border-radius: 8px; padding: 8px 10px; font-size: 12.5px; color: #cfe0f3;
+}
+.strategy.red { background: rgba(229,115,115,0.12); border-left-color: var(--red); color: var(--red-t); }
+.strategy.dim { background: var(--surface); border-left-color: var(--dim); color: var(--dim); }
+.strategy summary { cursor: pointer; font-weight: 600; line-height: 1.5; min-height: 24px; }
+.strategy-body { margin-top: 8px; white-space: pre-wrap; line-height: 1.6; color: var(--fg); font-size: 12.5px; }
+.strategy-meta { margin-top: 8px; font-size: 11px; color: var(--dim); }
+
+/* --- controls -------------------------------------------------------------*/
+.controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .chips { display: flex; gap: 4px; }
 .chip {
-  background: var(--surface);
-  color: var(--dim);
-  border: 1px solid #3a3d4a;
-  border-radius: 14px;
-  padding: 3px 11px;
-  font-size: 12.5px;
-  font-weight: 600;
+  background: var(--surface); color: var(--dim);
+  border: 1px solid var(--line); border-radius: 16px;
+  padding: 8px 14px; font-size: 13px; font-weight: 600; min-height: 36px;
 }
 .chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
 .sort {
-  background: var(--surface);
-  color: var(--fg);
-  border: 1px solid #3a3d4a;
-  border-radius: 8px;
-  padding: 4px 6px;
-  font-size: 12px;
+  background: var(--surface); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 6px; font-size: 12.5px; min-height: 36px; flex: 1 1 40%;
 }
-.ai-btn {
-  background: rgba(74,144,226,0.15);
-  color: #9fc3ee;
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  padding: 4px 10px;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-.ai-btn:active { background: var(--accent); color: #fff; }
 .count { margin-left: auto; color: var(--dim); font-size: 12px; }
-.ai-panel {
-  display: none;
-  margin-top: 8px;
-  padding: 10px 12px;
-  border-radius: 8px;
+.search {
+  width: 100%; padding: 11px 12px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--fg); font-size: 15px;
+}
+.search::placeholder { color: var(--dimmer); }
+
+/* --- cards ---------------------------------------------------------------*/
+.card {
   background: var(--surface);
-  border-left: 3px solid var(--accent);
-  color: var(--fg);
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  max-height: 45vh;
-  overflow-y: auto;
+  border-radius: 12px;
+  padding: 11px 12px;
+  border-left: 3px solid var(--line);
+  display: flex; flex-direction: column; gap: 8px;
 }
-.ai-panel.show { display: block; }
+/* Trade state. NONE of these hide or fade a card: report 7.4 requires expired,
+   data-broken and awaiting-entry positions to stay visible and pinned. */
+.card.state-holding   { border-left-color: var(--green); }
+.card.state-exit      { border-left-color: var(--gold); }
+.card.state-overdue   { border-left-color: var(--red); }
+.card.state-attention { border-left-color: var(--orange); }
+.card.state-buy       { border-left-color: var(--gold); }
+.card.state-closed    { border-left-color: var(--dimmer); }
+.card.pin { order: -1; box-shadow: 0 0 0 1px var(--orange) inset; }
 
-#search {
-  width: 100%;
-  margin-top: 10px;
-  padding: 9px 12px;
-  border-radius: 8px;
-  border: 1px solid #3a3d4a;
-  background: var(--surface);
-  color: var(--fg);
-  font-size: 15px;
+.card-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.card-head .rank { color: var(--dim); font-size: 12px; min-width: 20px; }
+.card-head .name { font-weight: 700; font-size: 16px; }
+.card-head .code { color: var(--dim); font-size: 12px; }
+.card-head .market {
+  margin-left: auto; font-size: 11px; color: var(--dim);
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
 }
-#search::placeholder { color: var(--dim); }
 
-#list { padding: 10px 12px 24px; display: flex; flex-direction: column; gap: 8px; }
-
-/* my-holdings: pinned section fed from localStorage, independent of the scan
-   list so a bought name keeps its exit tracking after dropping off the list */
-.holdings { display: none; padding: 10px 12px 0; flex-direction: column; gap: 8px; }
-.holdings.show { display: flex; }
-.holdings-title { font-size: 12px; color: var(--gold); font-weight: 600; }
-.hstock { border-left-color: var(--gold); }
-.hgone {
-  font-size: 10.5px;
-  color: var(--orange);
-  border: 1px solid var(--orange);
-  border-radius: 4px;
-  padding: 0 4px;
+.state-chip {
+  margin-left: auto; font-size: 11.5px; font-weight: 700;
+  border-radius: 6px; padding: 3px 8px; background: var(--surface2); color: var(--dim);
 }
-.hadd, .hremove {
-  background: var(--surface);
-  color: #9fc3ee;
-  border: 1px solid var(--accent);
-  border-radius: 6px;
-  padding: 2px 8px;
-  font-size: 11.5px;
-  font-weight: 600;
-  margin-left: auto;
+.state-chip.holding   { background: rgba(76,175,80,0.16);  color: var(--green-t); }
+.state-chip.exit      { background: rgba(255,215,64,0.2);  color: var(--gold); }
+.state-chip.overdue   { background: rgba(229,115,115,0.2); color: var(--red-t); }
+.state-chip.attention { background: rgba(255,138,61,0.2);  color: var(--orange); }
+
+/* Technical-score tier: a chip tint only, never the card and never opacity. */
+.badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.verdict { font-size: 11px; font-weight: 700; border-radius: 5px; padding: 2px 7px; }
+.verdict.ok   { background: var(--gold); color: #1E1E24; }
+.verdict.no   { border: 1px solid var(--line); color: var(--dim); }
+.verdict.held { border: 1px solid var(--accent); color: #9fc3ee; }
+.card.score-high .card-head .name { text-decoration: underline; text-decoration-color: var(--gold); text-underline-offset: 4px; }
+.card.score-mid  .card-head .name { text-decoration: underline; text-decoration-color: var(--orange); text-underline-offset: 4px; }
+
+/* --- two-column info grid (report 7.4: 4-column small type moved to detail) */
+.kv2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+.kv { display: flex; flex-direction: column; min-width: 0; }
+.kv-l { font-size: 10.5px; color: var(--dim); }
+.kv-v { font-size: 15px; font-weight: 700; word-break: break-all; }
+.kv-s { font-size: 10px; color: var(--dimmer); line-height: 1.35; }
+
+.pl-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pl { display: flex; flex-direction: column; background: var(--surface2); border-radius: 8px; padding: 7px 9px; }
+.pl-l { font-size: 10.5px; color: var(--dim); }
+.pl-v { font-size: 16px; font-weight: 700; }
+.pl-s { font-size: 10px; color: var(--dimmer); line-height: 1.35; }
+
+.plan {
+  font-size: 12px; line-height: 1.5; color: var(--dim);
+  background: var(--surface2); border-radius: 8px; padding: 7px 9px;
 }
-.hadd.held { color: var(--gold); border-color: var(--gold); }
-.hadd:active, .hremove:active { background: var(--hover); }
-.hremove { color: #eaa; border-color: var(--red); }
-/* when the add button is present it takes the auto margin; keep the market tag tight */
-.stock-head .hadd + .market, .stock-head .hremove + .market { margin-left: 0; }
+.plan.armed { color: var(--gold); background: rgba(255,215,64,0.12); }
+.plan.alert { color: var(--orange); background: rgba(255,138,61,0.14); font-weight: 600; }
 
-.stock {
-  background: var(--surface);
-  border-radius: 10px;
-  padding: 10px 12px;
-  border-left: 3px solid transparent;
+.btns { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn {
+  flex: 1 1 auto; min-height: var(--tap); min-width: 96px;
+  background: var(--surface2); color: #9fc3ee;
+  border: 1px solid var(--line); border-radius: 10px;
+  font-size: 13px; font-weight: 600; padding: 8px 10px;
 }
-.stock.tier-high { background: var(--row-high); border-left-color: var(--gold); }
-.stock.tier-mid  { background: var(--row-mid);  border-left-color: var(--orange); }
-/* Past its own exit date: still listed (hysteresis retains it down to rank 80)
-   but it is history, not a candidate. Dimmed so it stops competing for
-   attention with the rows that are actually actionable. */
-.stock.stale { opacity: 0.55; }
-.stock.stale.open { opacity: 1; }
+.btn.primary { background: rgba(74,144,226,0.18); border-color: var(--accent); color: #bcd7f5; }
+.btn:active { background: var(--line); }
 
-.stock-head { display: flex; align-items: baseline; gap: 8px; }
-.rank { color: var(--dim); font-size: 12px; min-width: 22px; }
-.name { font-weight: 600; font-size: 16px; }
-.code { color: var(--dim); font-size: 12px; }
-.market { margin-left: auto; font-size: 11px; color: var(--dim); border: 1px solid #3a3d4a; border-radius: 4px; padding: 1px 5px; }
+/* --- tables ---------------------------------------------------------------*/
+.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.tbl th, .tbl td { padding: 6px 5px; text-align: right; border-bottom: 1px solid var(--line); }
+.tbl th:first-child, .tbl td:first-child { text-align: left; }
+.tbl th { color: var(--dim); font-weight: 600; font-size: 11px; }
+.tbl tr.hl td { background: rgba(255,215,64,0.1); font-weight: 700; }
 
-.hold {
-  margin-top: 8px;
-  padding: 5px 9px;
-  border-radius: 6px;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-.hold.pending  { background: rgba(74,144,226,0.15); color: #9fc3ee; }
-.hold.holding  { background: rgba(76,175,80,0.12);  color: #9ed7a1; }
-.hold.delay    { background: rgba(255,138,61,0.16);  color: var(--orange); }
-.hold.exit     { background: rgba(255,215,64,0.18);  color: var(--gold); }
-.hold.overdue  { background: rgba(229,115,115,0.14); color: #eaa; }
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 6px 8px;
-  margin-top: 8px;
-}
-.cell { display: flex; flex-direction: column; }
-.cell .lbl { font-size: 10.5px; color: var(--dim); }
-.cell .val { font-size: 14px; font-weight: 600; }
-.val.pos { color: var(--green); }
-.val.neg { color: var(--red); }
-.val.gold { color: var(--gold); }
-
-.detail { display: none; margin-top: 10px; border-top: 1px solid #34353d; padding-top: 8px; }
-.stock.open .detail { display: block; }
-.sec-title { font-size: 11px; color: var(--accent); margin: 8px 0 4px; }
-.drow { display: flex; justify-content: space-between; font-size: 13px; padding: 2px 0; }
-.drow .k { color: var(--dim); }
+/* detail rows */
+.drow { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 3px 0; border-bottom: 1px solid rgba(58,61,74,0.5); }
+.drow .k { color: var(--dim); flex: 0 0 auto; }
+.drow span:last-child { text-align: right; word-break: break-all; }
+.sec-title { font-size: 11px; color: var(--accent); margin: 12px 0 4px; font-weight: 700; }
 .lights { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-.light { font-size: 11px; padding: 2px 7px; border-radius: 10px; background: #34353d; color: var(--dim); }
-.light.on { background: rgba(76,175,80,0.18); color: var(--green); }
+.light { font-size: 11px; padding: 3px 8px; border-radius: 10px; background: var(--surface2); color: var(--dimmer); }
+.light.on { background: rgba(76,175,80,0.18); color: var(--green-t); }
 
-.status { text-align: center; color: var(--dim); font-size: 12px; padding: 8px; }
-.empty { text-align: center; color: var(--dim); padding: 40px 0; }
+/* --- tab bar --------------------------------------------------------------*/
+.tabs {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+  display: flex; background: var(--header);
+  border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+  box-shadow: 0 -2px 10px rgba(0,0,0,0.4);
+}
+.tab {
+  flex: 1 1 0; min-height: 56px; background: none; border: none;
+  color: var(--dim); font-size: 13px; font-weight: 600; padding: 6px 2px;
+}
+.tab.on { color: var(--gold); box-shadow: inset 0 -2px 0 var(--gold); }
+.tab:active { background: var(--surface); }
+
+/* --- modal / forms --------------------------------------------------------*/
+.modal {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0,0,0,0.6);
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.sheet {
+  width: 100%; max-width: 520px; max-height: 92vh;
+  background: var(--bg); border-radius: 16px 16px 0 0;
+  display: flex; flex-direction: column;
+  border-top: 1px solid var(--line);
+}
+.sheet-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; border-bottom: 1px solid var(--line);
+}
+.sheet-head h3 { margin: 0; font-size: 15px; font-weight: 700; flex: 1 1 auto; }
+.sheet-head .x {
+  background: var(--surface); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 8px; width: var(--tap); height: 36px; font-size: 15px;
+}
+.sheet-body {
+  padding: 12px 14px; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.sheet-foot {
+  display: flex; gap: 8px; padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+}
+.sheet-foot .btn { flex: 1 1 50%; }
+
+.form-title { font-size: 15px; font-weight: 700; }
+.field { display: flex; flex-direction: column; gap: 3px; }
+.f-l { font-size: 12px; color: var(--dim); font-weight: 600; }
+.f-i {
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 11px 12px; font-size: 16px;   /* 16px stops iOS zooming on focus */
+  min-height: var(--tap); width: 100%;
+}
+.f-h { font-size: 10.5px; color: var(--dimmer); line-height: 1.4; }
+.f-e { font-size: 12px; color: var(--red-t); font-weight: 600; }
+.f-e:empty { display: none; }
+.calc {
+  background: var(--surface2); border-radius: 8px; padding: 9px 11px;
+  font-size: 13px; font-weight: 600; color: var(--gold);
+}
+.exe { background: var(--surface); border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 5px; }
+.exe.dead { border: 1px dashed var(--line); }
+.exe.dead .exe-h b { color: var(--dimmer); text-decoration: line-through; }
+.exe-h { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+
+/* --- toast ----------------------------------------------------------------*/
+.toast {
+  position: fixed; left: 12px; right: 12px; z-index: 60;
+  bottom: calc(72px + env(safe-area-inset-bottom));
+  background: var(--surface2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 11px 13px; font-size: 13px; font-weight: 600;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+}
+
+/* --- narrow phones (375px) ------------------------------------------------*/
+@media (max-width: 380px) {
+  body { font-size: 14.5px; }
+  .total:first-child .t-v { font-size: 20px; }
+  .kv-v { font-size: 14px; }
+  .tab { font-size: 12px; }
+  .btn { min-width: 84px; font-size: 12.5px; }
+}
+
+/* --- wide phones / small tablets (>=430px) --------------------------------*/
+@media (min-width: 430px) {
+  .totals { grid-template-columns: repeat(2, 1fr); }
+  .kv2 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (min-width: 700px) {
+  #pages { max-width: 760px; margin: 0 auto; }
+  .kv2 { grid-template-columns: repeat(4, 1fr); }
+  .modal { align-items: center; }
+  .sheet { border-radius: 16px; }
+}
+
+/* Users who prefer reduced motion get no transitions anywhere; there are none
+   to remove today, but the tap states are kept instant for the same reason. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

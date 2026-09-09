@@ -1,493 +1,1598 @@
 "use strict";
+/* ============================================================================
+ * YenTool mobile PWA.
+ *
+ * Five pages (report 7.1): overview / today's recommendations / my positions /
+ * performance & history / research & data status.
+ *
+ * Three rules shape everything below and are worth stating once:
+ *
+ *  1. THE BACKEND DECIDES, THE CLIENT RENDERS. The buy rule lives in
+ *     scanner/scan_mode.mark_buy_ready() and arrives as Buy_Ready/Buy_Block.
+ *     This file may only DOWNGRADE that verdict (mark it stale), never upgrade
+ *     a refusal into a buy (F07). Re-deriving the rule here is what let the
+ *     phone and the desktop disagree about what was tradable.
+ *
+ *  2. A POSITION IS DERIVED FROM ITS EXECUTIONS. Nothing writes a fill by
+ *     overwriting a field; a correction is a new execution revision and the
+ *     whole position is rebuilt from history. Mirrors portfolio/ledger.py so
+ *     both ends produce the same numbers to the cent.
+ *
+ *  3. PRICES FOR POSITIONS COME FROM quotes.json, NEVER FROM THE SCAN ROWS.
+ *     A holding that drops off the shortlist has not stopped existing; only
+ *     our willingness to price it had (F04).
+ *
+ * Money is integer cents end to end (see section 2). Traditional Chinese in
+ * the UI strings, English in the comments.
+ * ==========================================================================*/
 
-// Decision cards mirror gui/app.py MODE_RULE_CARDS. Chinese lives here (frontend),
-// not in the Python backend, per the project's ASCII-in-.py rule.
-const MODE_CARDS = {
-  mode_prelaunch: [
-    "只買標「核心+ 可買」的列(大盤站上20/60MA + OTC + 前20名 + 貼近52週高/未起漲/振幅≥4.5% + 第一天入榜) · 隔日開盤進 · -15%災難停損 · 漲6%後鎖利+2% · 觸+20%停利 · 抱10天(大盤弱可延至20天) · 順風年回測~71%(6年全周期~64%) · 其餘列是觀察/持倉追蹤，不是買點",
-    "accent",
-  ],
-  mode_momentum_leader: [
-    "警告：此模式照建議操作的實戰紀錄為負期望值（勝率 23%、59% 觸發停損），建議停用，僅供觀察",
-    "red",
-  ],
+/* ============================================================================
+ * 0. Configuration
+ * ==========================================================================*/
+
+const DATA_URL = "./scan_result.json";
+const QUOTES_URL = "./quotes.json";
+const TZ = "Asia/Taipei";
+
+// The strategy parameters the old UI hard-coded. They are the CURRENT strategy
+// version's numbers, not proven optima (report 5.4 is explicit about that), so
+// they live in one labelled place and every position stores the version that
+// priced it.
+const STRATEGY = {
+  version: "prelaunch-2026-06",
+  stopPct: -15,      // initial stop, from the real average cost
+  armPct: 6,         // gain that ARMS the trailing lock (a condition, not a state)
+  lockPct: 2,        // stop moves here once armed; ratchets up only
+  targetPct: 20,     // take-profit target
+  horizon: 10,       // base hold, trading days
+  cap: 20,           // maximum hold when the exit is delayed by a weak market
 };
-const MODE_CARD_DEFAULT = ["此模式尚無實戰驗證數據（ledger 累積中），交易計畫僅供參考", "dim"];
 
-// Sort options (label -> {key, dir}). "rank" keeps the shipped Launch_Score order.
+// Strategy blurb. Report 7.4: this used to be a fixed header block eating half
+// a phone screen, so it is now a one-line summary with an expandable body.
+const MODE_CARDS = {
+  mode_prelaunch: {
+    tone: "accent",
+    summary: "起漲前埋伏：只買後端標示「可買」的列，隔日開盤計畫進場，抱 10 天",
+    body:
+      "買進條件（全部成立才算可買）：大盤站上 20MA 與 60MA · 上櫃 · 出貨排名前 20 · 通過核心+ 品質閘門 · 資料完整性通過 · 當日資料 · 第一天入榜的新訊號。\n" +
+      "出場計畫：災難停損 -15% · 獲利 +6% 後鎖利上調至 +2% · 目標 +20% · 基本抱 10 個交易日（大盤轉弱時最晚延至 20 天）。\n" +
+      "回測：順風年約 71%、6 年全周期約 64%，皆為含條件的歷史統計，不是未來勝率。\n" +
+      "名單上其餘的列是觀察與持倉追蹤，不是買點。",
+  },
+  mode_momentum_leader: {
+    tone: "red",
+    summary: "警告：此模式實戰為負期望值，建議停用，僅供觀察",
+    body:
+      "照建議操作的實戰紀錄：勝率 23%、59% 觸發停損。此模式僅保留觀察用途，不應據以下單。",
+  },
+};
+const MODE_CARD_DEFAULT = {
+  tone: "dim",
+  summary: "此模式尚無實戰驗證數據，交易計畫僅供參考",
+  body: "ledger 仍在累積樣本。沒有回測與實戰紀錄的模式，畫面上的價位只是規則推算值。",
+};
+
+// F22: colour by the score the mode actually RANKS on. The old card tinted by
+// Explosion_Score while the desktop ranked and sorted by something else, so the
+// same stock looked "hot" on one screen and ordinary on the other.
+const RANK_SCORE = {
+  mode_prelaunch: { key: "Launch_Score", label: "起漲條件分" },
+  mode_momentum_leader: { key: "Surge_Score", label: "動能分" },
+};
+const RANK_SCORE_DEFAULT = { key: "Launch_Score", label: "起漲條件分" };
+
+// Sort options. Labels follow report section 8's naming table.
 const SORTS = [
-  ["排序：起漲分/名次", "rank", "asc"],
-  ["起漲分 高→低", "Launch_Score", "desc"],
-  ["蓄勢分 高→低", "Explosion_Score", "desc"],
-  ["3月漲幅 高→低", "Gain_3M_Pct", "desc"],
-  ["風險% 低→高", "Risk_Pct", "asc"],
+  ["排序：後端名次", "rank", "asc"],
+  ["起漲條件分 高→低", "Launch_Score", "desc"],
+  ["動能分 高→低", "Surge_Score", "desc"],
+  ["盤整蓄勢分 高→低", "Explosion_Score", "desc"],
+  ["近63日漲幅 高→低", "Gain_3M_Pct", "desc"],
+  ["停損距離% 低→高", "Risk_Pct", "asc"],
   ["外資5日 高→低", "Foreign_Net_5D", "desc"],
-  ["距52週高 近→遠", "Dist_52W_High_Pct", "asc"],
+  ["距近一年最高收盤 近→遠", "Dist_52W_High_Pct", "asc"],
 ];
 
+// Buy_Block reason codes from scanner/scan_mode.mark_buy_ready(). "unknown"
+// and "no_rule" must read as REFUSALS: report section 8, "未知不能當通過".
+const BLOCK_TEXT = {
+  regime: "大盤未站上20/60MA",
+  stale: "資料非當日，需重新確認",
+  integrity: "資料完整性未通過",
+  rank: "非前20名",
+  market: "非上櫃",
+  quality: "未過品質閘門",
+  held: "已進場·非新訊號",
+  unknown: "後端未提供買進判定（不視為可買）",
+  no_rule: "此模式未定義買進規則",
+};
+
+const DATA_STATUS_TEXT = {
+  current: "當日收盤",
+  stale: "沿用前一交易日收盤",
+  missing: "無報價",
+};
+
+const PAGES = [
+  ["today", "總覽"],
+  ["picks", "建議"],
+  ["positions", "持倉"],
+  ["perf", "績效"],
+  ["research", "研究"],
+];
+
+/* ============================================================================
+ * 1. Tiny helpers
+ * ==========================================================================*/
+
 const $ = (s) => document.querySelector(s);
-let ALL_ROWS = [];       // every pick, each tagged with _rank (shipped order)
-let REPORTS = {};        // {ALL,OTC,TSE} pre-generated AI reports
-let MARKET = "ALL";      // current market filter
-let SORT_I = 0;          // index into SORTS
 
-// --- My holdings (localStorage) ----------------------------------------------
-// The scan list is a SELECTION list: a bought name can legally drop off it
-// mid-hold (normal pullback below the retention band, or a feed-failure day).
-// Holdings therefore live on the phone, keyed by stock id, and are rendered in
-// a pinned section that never depends on today's list membership. All exit
-// levels are recomputed off the user's ACTUAL fill (the validated rule:
-// stop -15%, trail arm +6% -> lock +2%, tp +20%, hold 10 bars, cap 20).
-const HOLD_KEY = "yt_holdings_v1";
-const H_STOP = 0.85, H_LOCK = 1.02, H_ARM = 1.06, H_TP = 1.20;
-
-function loadHoldings() {
-  try { return JSON.parse(localStorage.getItem(HOLD_KEY)) || {}; }
-  catch (e) { return {}; }
+// Every string that reaches innerHTML goes through this. Stock names come from
+// a JSON file we do not author; treating them as markup is a bug waiting for a
+// name with an ampersand in it.
+function esc(v) {
+  if (v === null || v === undefined) return "";
+  return String(v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
-function saveHoldings(h) {
-  try { localStorage.setItem(HOLD_KEY, JSON.stringify(h)); } catch (e) {}
-}
-let HOLDINGS = loadHoldings();
 
 function num(v) {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
+
 function fmt(v, digits, suffix) {
   const n = num(v);
   if (n === null) return "-";
   return n.toFixed(digits === undefined ? 2 : digits) + (suffix || "");
 }
+
 function fmtSigned(v, digits, suffix) {
   const n = num(v);
   if (n === null) return "-";
   const s = (n >= 0 ? "+" : "") + n.toFixed(digits === undefined ? 0 : digits);
   return s + (suffix || "");
 }
+
 function signClass(v) {
   const n = num(v);
+  if (n === null || n === 0) return "flat";
+  return n > 0 ? "pos" : "neg";
+}
+
+// Report 7.4: "do not rely on red/green alone". Every P&L therefore carries a
+// sign AND a word, so the number survives colour-blindness and greyscale.
+function signWord(v) {
+  const n = num(v);
   if (n === null) return "";
-  return n > 0 ? "pos" : n < 0 ? "neg" : "";
-}
-function tierClass(row) {
-  const e = num(row.Explosion_Score) || 0;
-  if (e >= 70) return "tier-high";
-  if (e >= 50) return "tier-mid";
-  return "";
+  if (n > 0) return "獲利";
+  if (n < 0) return "虧損";
+  return "持平";
 }
 
-function cell(lbl, valHtml) {
-  return `<div class="cell"><span class="lbl">${lbl}</span><span class="val ${valHtml.cls || ""}">${valHtml.txt}</span></div>`;
-}
-function light(label, on) {
-  return `<span class="light ${on ? "on" : ""}">${label}</span>`;
+let TOAST_TIMER = null;
+function toast(msg) {
+  const el = $("#toast");
+  el.textContent = msg;
+  el.hidden = false;
+  if (TOAST_TIMER) clearTimeout(TOAST_TIMER);
+  TOAST_TIMER = setTimeout(() => { el.hidden = true; }, 3200);
 }
 
-// --- Live holding recompute -------------------------------------------------
-// The scan runs after close (17:00/18:00), so the shipped Hold_Day/Hold_Status
-// are frozen at scan time and read one day stale the next morning. Here we
-// recompute them at VIEW time: meta.calendar_tail gives the real trading dates,
-// extended past its end by plain weekdays (holidays unknown until the next scan
-// refreshes the tail -- self-correcting approximation).
-let CAL = [];          // extended trading calendar, "YYYY-MM-DD" ascending
-let KNOWN_LAST = "";   // last REAL (db-backed) trading date in CAL
-let DISTURBED = false; // TAIEX below 20MA -> exit-delay engages
-let ENTER_OK = false;  // TAIEX above BOTH 20MA and 60MA -> new positions allowed
+/* ============================================================================
+ * 2. Exact money: integer cents
+ *
+ * Report 9.1: "do not let floating-point error decide whether there was a
+ * profit". A position 30 cents from break-even must not flip sign because
+ * 0.1 + 0.2 !== 0.3. So every amount below is an INTEGER NUMBER OF CENTS and
+ * every division rounds explicitly. This mirrors portfolio/money.py, whose
+ * Decimal arithmetic is the reference implementation.
+ * ==========================================================================*/
 
-function dstr(d) {
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+const NUMERIC_RE = /^-?\d{1,15}(\.\d+)?$/;
+
+// Integer division with half-up rounding, ties away from zero (Decimal's
+// ROUND_HALF_UP). Written the long way because Math.round() is float rounding
+// and rounds -0.5 to -0 rather than away from zero.
+function divRound(numerator, denominator) {
+  const sign = (numerator < 0) !== (denominator < 0) ? -1 : 1;
+  const a = Math.abs(numerator), b = Math.abs(denominator);
+  let q = Math.floor(a / b);
+  let r = a - q * b;
+  // Correct the float division at very large magnitudes, where a/b can land
+  // one ulp on the wrong side of an integer boundary.
+  while (r < 0) { q -= 1; r += b; }
+  while (r >= b) { q += 1; r -= b; }
+  return sign * (r * 2 >= b ? q + 1 : q);
 }
-function buildCalendar(tail, scanTime) {
-  CAL = (tail || []).slice();
-  KNOWN_LAST = CAL.length ? CAL[CAL.length - 1] : "";
-  // Unscheduled-closure detection (typhoon days): if the scan ran AFTER a
-  // weekday's close (>=15:00) and that weekday still has no bar in the real
-  // calendar, the market did not trade that day. Skip such days when
-  // extrapolating, otherwise every weekday is assumed to trade and hold-day
-  // counts run one high across the closure (observed 2026-07-10 typhoon:
-  // day counts and exit prompts were one day early until the next scan).
-  let verified = "";
-  if (scanTime) {
-    const st = new Date(String(scanTime).slice(0, 19).replace(" ", "T"));
-    if (!isNaN(st.getTime())) {
-      if (st.getHours() < 15) st.setTime(st.getTime() - 86400000);
-      verified = dstr(st);
+
+// Parse a user- or JSON-supplied amount to integer cents. Returns null for
+// anything we are not sure about -- refusing is the whole point of F11.
+function cents(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+    value = String(value);   // shortest round-tripping repr, like money.D()
+  }
+  let s = String(value).trim().replace(/,/g, "").replace(/\s+/g, "");
+  if (s === "") return null;
+  if (!NUMERIC_RE.test(s)) return null;
+  let neg = false;
+  if (s[0] === "-") { neg = true; s = s.slice(1); }
+  const dot = s.indexOf(".");
+  const whole = dot < 0 ? s : s.slice(0, dot);
+  const fracAll = dot < 0 ? "" : s.slice(dot + 1);
+  const frac = (fracAll + "00").slice(0, 2);
+  let c = Number(whole) * 100 + Number(frac);
+  // Sub-cent input rounds half-up to the cent rather than being rejected: the
+  // user's AVERAGE cost legitimately has more decimals than a quote does.
+  if (fracAll.length > 2 && Number(fracAll[2]) >= 5) c += 1;
+  if (!Number.isSafeInteger(c)) return null;
+  return neg ? -c : c;
+}
+
+// Sub-cent accumulator scale. portfolio/ledger.py carries full Decimal
+// precision through the cost-basis loop and only quantizes on write; carrying
+// 1e-4 of a cent here keeps partial-sell cost allocation matching it to the
+// cent without ever leaving integer arithmetic.
+const SUB = 10000;
+const toSub = (c) => c * SUB;
+const fromSub = (u) => divRound(u, SUB);
+
+function fmtCents(c, opts) {
+  if (c === null || c === undefined) return "-";
+  const o = opts || {};
+  const neg = c < 0;
+  const a = Math.abs(c);
+  const whole = Math.floor(a / 100);
+  const rest = a % 100;
+  let s = whole.toLocaleString("en-US");
+  // Show cents only when there are any: "+12,350" reads better than
+  // "+12,350.00" on a phone, but 9,359.05 must never be shown as 9,359.
+  if (rest !== 0 || o.always) s += "." + String(rest).padStart(2, "0");
+  const sign = o.signed ? (neg ? "-" : "+") : (neg ? "-" : "");
+  return sign + s;
+}
+
+// A PRICE always shows two decimals: "144" and "144.00" are the same number,
+// but only the second one reads as a quote. Amounts (P&L, fees) keep the
+// trailing cents only when they have any.
+function fmtPrice(c) {
+  return c === null || c === undefined ? "-" : fmtCents(c, { always: true });
+}
+
+// Money with its sign AND a word (報告 7.4).
+function fmtPnl(c) {
+  if (c === null || c === undefined) return "-";
+  return signWord(c) + " " + fmtCents(c, { signed: true }) + " 元";
+}
+
+// Percentage as a 2dp string, computed on integers so a 9.804 never becomes
+// 9.81 by accident. Returns null when the denominator is absent -- "no cost
+// basis yet" and "flat" are different answers (money.pct's rationale).
+function pctOf(numeratorCents, denominatorCents) {
+  if (!denominatorCents) return null;
+  const bp = divRound(numeratorCents * 10000, denominatorCents);
+  return bp / 100;
+}
+
+function fmtPct(p, digits) {
+  if (p === null || p === undefined) return "-";
+  const d = digits === undefined ? 2 : digits;
+  return (p >= 0 ? "+" : "") + p.toFixed(d) + "%";
+}
+
+/* ============================================================================
+ * 3. Fee schedules and tick sizes  (mirrors portfolio/money.py)
+ * ==========================================================================*/
+
+// Rates are integer numerator/denominator pairs so the fee is one rounding
+// step, not a chain of float multiplications. Report 6.3: 0.1425% is the
+// undiscounted convention, NOT everyone's actual rate -- hence a versioned
+// record the user can change, and every execution stores the version that
+// priced it.
+const FEE_SCHEDULES = {
+  "tw-equity-v1": {
+    version: "tw-equity-v1",
+    label: "台股一般（0.1425%、最低 20 元、元位無條件捨去）",
+    feeNum: 1425, feeDen: 1000000,
+    discNum: 1, discDen: 1,
+    taxNum: 3, taxDen: 1000,
+    minFeeCents: 2000,
+    roundToDollar: true,
+  },
+  "tw-equity-exact": {
+    version: "tw-equity-exact",
+    label: "台股未取整（對帳與文件核算用）",
+    feeNum: 1425, feeDen: 1000000,
+    discNum: 1, discDen: 1,
+    taxNum: 3, taxDen: 1000,
+    minFeeCents: 0,
+    roundToDollar: false,
+  },
+};
+const DEFAULT_SCHEDULE = "tw-equity-v1";
+
+function schedule(version) {
+  return FEE_SCHEDULES[version] || FEE_SCHEDULES[DEFAULT_SCHEDULE];
+}
+
+function feeFor(sched, considerationCents) {
+  let fee = divRound(considerationCents * sched.feeNum * sched.discNum,
+                     sched.feeDen * sched.discDen);
+  if (sched.roundToDollar) {
+    fee = Math.floor(fee / 100) * 100;             // brokers truncate to the dollar
+    if (fee < sched.minFeeCents) fee = sched.minFeeCents;
+  } else if (sched.minFeeCents > 0 && fee < sched.minFeeCents) {
+    fee = sched.minFeeCents;
+  }
+  return fee;
+}
+
+function taxFor(sched, considerationCents) {
+  let tax = divRound(considerationCents * sched.taxNum, sched.taxDen);
+  if (sched.roundToDollar) tax = Math.floor(tax / 100) * 100;
+  return tax;
+}
+
+// What liquidating `shares` at `price` would cost. Kept separate because the
+// report forbids it sharing a label with the book P&L (6.3).
+function exitCost(sched, priceCents, shares) {
+  if (!shares || priceCents === null) return 0;
+  const consideration = priceCents * shares;
+  return feeFor(sched, consideration) + taxFor(sched, consideration);
+}
+
+// TWSE/TPEx quote ladder, in cents: [upper bound exclusive, tick].
+const EQUITY_TICKS = [
+  [1000, 1], [5000, 5], [10000, 10], [50000, 50], [100000, 100], [null, 500],
+];
+
+function tickSize(priceCents) {
+  for (const [upper, tick] of EQUITY_TICKS) {
+    if (upper === null || priceCents < upper) return tick;
+  }
+  return 500;
+}
+
+// Snap a PLAN price onto the exchange ladder. Direction matters: a stop rounds
+// DOWN and a target UP, because doing it the other way quietly tightens the
+// claim. Never push an average cost through here -- an average legitimately
+// falls between ticks (money.round_to_tick's caveat).
+function tickRound(priceCents, dir) {
+  if (priceCents === null || priceCents <= 0) return null;
+  const t = tickSize(priceCents);
+  const steps = dir === "down" ? Math.floor(priceCents / t)
+              : dir === "up" ? Math.ceil(priceCents / t)
+              : divRound(priceCents, t);
+  return steps * t;
+}
+
+/* ============================================================================
+ * 4. Trading calendar, in Asia/Taipei
+ *
+ * F14: the old build extrapolated plain weekdays past the end of the known
+ * calendar and inferred "market closed" from the ABSENCE of data, then dated
+ * everything with the device's local clock. A phone in London therefore rolled
+ * the hold-day counter eight hours early, and every typhoon closure ran the
+ * counts one day high.
+ *
+ * Now: meta.calendar_tail and quotes.sessions are the only sources of trading
+ * dates, nothing is extended past them, and "today" is Taipei's today.
+ * ==========================================================================*/
+
+let CAL = [];        // known trading dates, ascending, no guesses
+let CAL_LAST = "";   // newest known trading date
+
+const TW_DATE_FMT = new Intl.DateTimeFormat("en-US", {
+  timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit",
+});
+const TW_TIME_FMT = new Intl.DateTimeFormat("en-US", {
+  timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false,
+});
+
+// Assembled from parts rather than trusting any locale's date order.
+function taipeiDate(d) {
+  const p = {};
+  for (const part of TW_DATE_FMT.formatToParts(d || new Date())) p[part.type] = part.value;
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+function taipeiMinutes(d) {
+  const p = {};
+  for (const part of TW_TIME_FMT.formatToParts(d || new Date())) p[part.type] = part.value;
+  const h = Number(p.hour) % 24;
+  return h * 60 + Number(p.minute);
+}
+
+function buildCalendar(tail, sessions) {
+  const seen = new Set();
+  for (const list of [tail || [], sessions || []]) {
+    for (const d of list) {
+      const s = String(d || "").slice(0, 10);
+      if (s) seen.add(s);
     }
   }
-  let d = CAL.length ? new Date(CAL[CAL.length - 1] + "T00:00:00") : new Date();
-  for (let i = 0; i < 45; i++) {
-    d = new Date(d.getTime() + 86400000);
-    const dow = d.getDay();
-    if (dow === 0 || dow === 6) continue;
-    const ds = dstr(d);
-    if (verified && ds <= verified) continue;   // known closure: no bar despite post-close scan
-    CAL.push(ds);
-  }
+  CAL = Array.from(seen).sort();
+  CAL_LAST = CAL.length ? CAL[CAL.length - 1] : "";
 }
 
-// Recompute {st, day, rem, exit, total, cap} as of NOW for any entry date.
-// Mirrors scanner/holding_tracker.py annotate_holding(). null when the entry
-// date is unknown to the calendar (too old / malformed).
-function holdCalc(entryDate, total, cap) {
-  if (!entryDate || !CAL.length) return null;
-  const iEntry = CAL.indexOf(String(entryDate).slice(0, 10));
-  if (iEntry < 0) return null;
-  const now = new Date();
-  const today = dstr(now);
-  let iToday = -1; // last trading day <= today (weekend/holiday -> previous bar)
-  for (let i = 0; i < CAL.length; i++) { if (CAL[i] <= today) iToday = i; else break; }
-  if (iToday < 0) return null;
+function calIndex(date) {
+  return CAL.indexOf(String(date || "").slice(0, 10));
+}
 
-  total = total || 10; cap = cap || 20;
-  const iExit = iEntry + total - 1, iCap = iEntry + cap - 1;
-  const day = iToday - iEntry + 1;   // trading days held incl. today
-  const rem = iExit - iToday;        // to base exit; 0 = today, <0 past
-  // Entry is at the open; before 09:00 on entry day the position isn't on yet.
-  const beforeOpen = today === CAL[iEntry] && now.getHours() < 9;
-  const afterClose = now.getHours() > 13 || (now.getHours() === 13 && now.getMinutes() >= 30);
+// Trading days from `from` to `to`, inclusive of both ends. null when either
+// end is outside the known calendar -- an honest "unknown" beats a guess
+// (portfolio/ledger._day_index makes the same choice).
+function dayIndexBetween(from, to, calendar) {
+  const cal = calendar || CAL;
+  const a = cal.indexOf(String(from || "").slice(0, 10));
+  const b = cal.indexOf(String(to || "").slice(0, 10));
+  if (a < 0 || b < 0) return null;
+  return b - a + 1;
+}
 
-  let st;
-  if (day <= 0 || beforeOpen) st = "pending";
-  else if (rem > 0) st = "holding";
-  else if (iToday >= iCap) st = iToday === iCap ? "exit_today" : "overdue";
-  else if (DISTURBED && cap > total) st = "delay";
-  else st = rem === 0 ? "exit_today" : "overdue";
+// Last known trading session on or before `date`. "" when the date precedes
+// every session we know about.
+function sessionOnOrBefore(date) {
+  let out = "";
+  for (const c of CAL) { if (c <= date) out = c; else break; }
+  return out;
+}
+
+/* ============================================================================
+ * 5. IndexedDB
+ *
+ * Four stores (the ledger tables of report 9.1, minus everything the phone has
+ * no business owning):
+ *
+ *   positions   one container per real holding. Every money field on it is
+ *               DERIVED from `executions` and rewritten on every change.
+ *   executions  the only source of truth for a trade. Append-only: an
+ *               amendment writes a new revision and demotes the old row
+ *               (is_current 0), a mis-entry is voided, nothing is deleted.
+ *   marks       one row per position per session: close, shares, cost, the
+ *               four totals and the day's P&L. Rebuilt from quotes.json, but
+ *               PERSISTED so an older deploy without quotes.json can still
+ *               show the last honest valuation and say how old it is.
+ *   meta        settings, migration flags and frozen cycle results
+ *               ("cycle:<position>:<horizon>:<basis>" -- report 5.3's D10
+ *               result, which later prices must never rewrite).
+ * ==========================================================================*/
+
+const DB_NAME = "yentool_ledger";
+const DB_VERSION = 1;
+let DB = null;
+// A private-mode or storage-blocked browser can refuse IndexedDB outright. The
+// market pages must keep working in that case, so every ledger read checks
+// this flag instead of throwing into the middle of a render.
+let DB_OK = true;
+let LEDGER_ERROR = "";
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    if (!DB_OK) return reject(new Error("本機資料庫不可用"));
+    if (DB) return resolve(DB);
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("positions")) {
+        const s = db.createObjectStore("positions", { keyPath: "position_id" });
+        s.createIndex("by_stock", "stock_id", { unique: false });
+        s.createIndex("by_status", "status", { unique: false });
+      }
+      if (!db.objectStoreNames.contains("executions")) {
+        const s = db.createObjectStore("executions", { keyPath: "execution_id" });
+        s.createIndex("by_position", "position_id", { unique: false });
+        s.createIndex("by_idem", "idempotency_key", { unique: true });
+      }
+      if (!db.objectStoreNames.contains("marks")) {
+        const s = db.createObjectStore("marks", { keyPath: ["position_id", "session_date"] });
+        s.createIndex("by_position", "position_id", { unique: false });
+      }
+      if (!db.objectStoreNames.contains("meta")) {
+        db.createObjectStore("meta", { keyPath: "key" });
+      }
+      void e;
+    };
+    req.onsuccess = () => { DB = req.result; resolve(DB); };
+    req.onerror = () => reject(req.error || new Error("IndexedDB 無法開啟"));
+  });
+}
+
+function txDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("交易中止"));
+  });
+}
+
+function reqDone(req) {
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbGetAll(store, indexName, key) {
+  const db = await openDB();
+  const tx = db.transaction(store, "readonly");
+  const src = indexName ? tx.objectStore(store).index(indexName) : tx.objectStore(store);
+  return reqDone(src.getAll(key === undefined ? undefined : key));
+}
+
+async function dbGet(store, key) {
+  const db = await openDB();
+  const tx = db.transaction(store, "readonly");
+  return reqDone(tx.objectStore(store).get(key));
+}
+
+async function dbPut(store, value) {
+  const db = await openDB();
+  const tx = db.transaction(store, "readwrite");
+  tx.objectStore(store).put(value);
+  return txDone(tx);
+}
+
+async function dbPutMany(store, values) {
+  if (!values.length) return;
+  const db = await openDB();
+  const tx = db.transaction(store, "readwrite");
+  const os = tx.objectStore(store);
+  for (const v of values) os.put(v);
+  return txDone(tx);
+}
+
+async function metaGet(key, dflt) {
+  const row = await dbGet("meta", key);
+  return row === undefined ? dflt : row.value;
+}
+
+async function metaSet(key, value) {
+  return dbPut("meta", { key, value, updated_at: nowStamp() });
+}
+
+function nowStamp() {
+  const d = new Date();
+  return taipeiDate(d) + " " + TW_TIME_FMT.format(d);
+}
+
+function newId(prefix) {
+  const rnd = (typeof crypto !== "undefined" && crypto.getRandomValues)
+    ? Array.from(crypto.getRandomValues(new Uint8Array(6)))
+        .map((b) => b.toString(16).padStart(2, "0")).join("")
+    : Math.random().toString(16).slice(2, 14);
+  return prefix + "-" + rnd;
+}
+
+/* ============================================================================
+ * 6. The ledger: positions derived from executions
+ *    (mirrors portfolio/ledger._recompute_position)
+ * ==========================================================================*/
+
+class LedgerError extends Error {}
+
+function sortExecutions(execs) {
+  return execs.slice().sort((a, b) =>
+    (a.session_date || "").localeCompare(b.session_date || "") ||
+    (a.executed_at || "").localeCompare(b.executed_at || "") ||
+    (a.recorded_at || "").localeCompare(b.recorded_at || ""));
+}
+
+function currentExecutions(execs) {
+  return sortExecutions(execs.filter((e) => e.is_current === 1));
+}
+
+// Replay the trade history up to and including `through` (all of it when
+// `through` is falsy). Moving weighted average, exactly as ledger.py: buy fees
+// go into cost_basis and stay out of gross_cost, a sell removes a pro-rata
+// slice of both, and realised P&L is proceeds minus fees, tax and that slice.
+function replay(execsSorted, through) {
+  let shares = 0;
+  let costU = 0;          // book cost incl. buy fees, in sub-cents
+  let grossU = 0;         // consideration only, in sub-cents
+  let realizedNetU = 0;
+  let realizedGrossU = 0;
+  let opened = null, closed = null, buys = 0, sells = 0;
+
+  for (const e of execsSorted) {
+    if (through && e.session_date > through) break;
+    const sh = e.shares;
+    const consideration = e.price_cents * sh;    // exact: both are integers
+    if (e.side === "BUY") {
+      buys += 1;
+      if (!opened) opened = e.session_date;
+      shares += sh;
+      costU += toSub(consideration + e.fee_cents);
+      grossU += toSub(consideration);
+      closed = null;
+    } else {
+      sells += 1;
+      if (shares <= 0) continue;   // defensive; addExecution refuses this
+      const removedBook = divRound(costU * sh, shares);
+      const removedGross = divRound(grossU * sh, shares);
+      realizedNetU += toSub(consideration - e.fee_cents - e.tax_cents) - removedBook;
+      realizedGrossU += toSub(consideration) - removedGross;
+      costU -= removedBook;
+      grossU -= removedGross;
+      shares -= sh;
+      if (shares === 0) closed = e.session_date;
+    }
+  }
+  if (shares === 0) { costU = 0; grossU = 0; }   // clear rounding residue
 
   return {
-    st, day: Math.max(day, 0), rem, total, cap,
-    entry: CAL[iEntry],
-    exit: iExit < CAL.length ? CAL[iExit] : "",
-    entryIsToday: today === CAL[iEntry],
-    afterClose,
+    shares,
+    cost_basis: fromSub(costU),
+    gross_cost: fromSub(grossU),
+    realized_net: fromSub(realizedNetU),
+    realized_gross: fromSub(realizedGrossU),
+    // Average cost is a per-share price derived from an integer total; it is
+    // NOT snapped to a tick, because an average genuinely falls between ticks.
+    avg_cost: shares ? fromSub(divRound(grossU, shares)) : 0,
+    opened_session: opened,
+    closed_session: shares === 0 ? closed : null,
+    buys, sells,
   };
 }
 
-// Row-based wrapper (scan-list rows carry their own Entry_Date/Hold_* fields).
-function liveHold(r) {
-  return holdCalc(r.Entry_Date, r.Hold_Total, r.Hold_Cap);
+function applyDerived(pos, execsSorted) {
+  const d = replay(execsSorted, null);
+  pos.open_shares = d.shares;
+  pos.avg_cost = d.avg_cost;
+  pos.cost_basis = d.cost_basis;
+  pos.gross_cost = d.gross_cost;
+  pos.realized_net = d.realized_net;
+  pos.realized_gross = d.realized_gross;
+  pos.opened_session = d.opened_session;
+  pos.closed_session = d.closed_session;
+  // An archived or voided position keeps that state; otherwise shares decide.
+  if (pos.status !== "archived" && pos.status !== "void") {
+    pos.status = d.shares > 0 ? "open" : (execsSorted.length ? "closed" : "open");
+  }
+  pos.needs_shares = execsSorted.length === 0 && pos.origin === "migrated";
+  pos.updated_at = nowStamp();
+  return pos;
 }
 
-// --- The buy rule -----------------------------------------------------------
-// Mirrors scanner/scan_mode.mark_buy_ready(), recomputed at VIEW time because
-// Hold_Status ages: a row shipped as "pending" last night becomes "holding" the
-// moment its entry bar opens. Buy_Ready/Buy_Block in the payload are the scan-
-// time snapshot and are used only as the fallback when the calendar is missing.
-//
-// All four conditions are load-bearing (see mark_buy_ready's comment for the
-// audit numbers):
-//   ENTER_OK   TAIEX above 20MA AND 60MA -- every published win rate for this
-//              mode is conditional on it. Used to be an advisory banner only,
-//              while the badge underneath still said "buy".
-//   rank<=20 / OTC / Core_Plus   the entry-quality gate.
-//   pending    fresh signal, not yet entered. Hysteresis keeps a name listed
-//              for weeks; the ~71% number is the first-day-in view.
-function buyRuleBlock(r) {
-  if (!ENTER_OK) return "regime";
-  if (r._rank > 20) return "rank";
-  if (String(r.Market) !== "OTC") return "market";
-  if (!r.Core_Plus) return "quality";
-  const h = liveHold(r);
-  const st = h ? h.st : r.Hold_Status;
-  if (st && st !== "pending") return "held";
-  return "";
-}
-function buyable(r) { return buyRuleBlock(r) === ""; }
+// Validate and record one fill. Deliberately strict (F11): the old code did
+// `num(raw) || ref`, so "abc" and "0" both silently stored the REFERENCE price
+// as if the user had traded at it. A price we are unsure of is not a price.
+function validateExecution(input, pos, heldShares) {
+  const errs = {};
+  const side = String(input.side || "").toUpperCase();
+  if (side !== "BUY" && side !== "SELL") errs.side = "買賣別必須是買進或賣出";
 
-const BLOCK_TEXT = {
-  regime: "大盤未站上20/60MA",
-  rank: "非前20名",
-  market: "非上櫃",
-  quality: "未過品質閘門",
-  held: "已進場·非新訊號",
+  const date = String(input.session_date || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    errs.session_date = "請填成交日期（YYYY-MM-DD）；沒有成交日就無法放上損益時間軸";
+  } else if (date > taipeiDate(new Date())) {
+    errs.session_date = "成交日期不能是未來日期";
+  }
+
+  const rawShares = String(input.shares === undefined ? "" : input.shares).trim();
+  let shares = null;
+  if (rawShares === "") errs.shares = "請填股數（1 張 = 1,000 股）";
+  else if (!/^\d{1,12}$/.test(rawShares)) errs.shares = `「${rawShares}」不是整數股數，請只填數字`;
+  else {
+    shares = Number(rawShares);
+    if (shares <= 0) errs.shares = "股數必須大於 0";
+    else if (side === "SELL" && shares > heldShares) {
+      errs.shares = `只持有 ${heldShares.toLocaleString("en-US")} 股，不能賣出 ${shares.toLocaleString("en-US")} 股`;
+    }
+  }
+
+  const rawPrice = String(input.price === undefined ? "" : input.price).trim();
+  const priceCents = cents(rawPrice);
+  if (rawPrice === "") errs.price = "請填實際成交價；系統不會用參考價代替";
+  else if (priceCents === null) errs.price = `「${rawPrice}」不是有效價格，請重新輸入數字`;
+  else if (priceCents <= 0) errs.price = "成交價必須大於 0";
+
+  const sched = schedule(input.fee_schedule || (pos && pos.fee_schedule));
+  const consideration = (priceCents && shares) ? priceCents * shares : 0;
+
+  let feeCents = null;
+  const rawFee = String(input.fee === undefined ? "" : input.fee).trim();
+  if (rawFee === "") feeCents = consideration ? feeFor(sched, consideration) : 0;
+  else {
+    feeCents = cents(rawFee);
+    if (feeCents === null || feeCents < 0) errs.fee = `「${rawFee}」不是有效手續費`;
+  }
+
+  let taxCents = null;
+  const rawTax = String(input.tax === undefined ? "" : input.tax).trim();
+  if (rawTax === "") taxCents = (side === "SELL" && consideration) ? taxFor(sched, consideration) : 0;
+  else {
+    taxCents = cents(rawTax);
+    if (taxCents === null || taxCents < 0) errs.tax = `「${rawTax}」不是有效交易稅`;
+  }
+
+  return {
+    ok: Object.keys(errs).length === 0,
+    errs,
+    value: {
+      side, session_date: date, shares, price_cents: priceCents,
+      fee_cents: feeCents, tax_cents: taxCents, fee_schedule: sched.version,
+      consideration,
+      note: String(input.note || "").slice(0, 200),
+      executed_at: String(input.executed_at || "").slice(0, 5),
+    },
+  };
+}
+
+async function addExecution(positionId, value, opts) {
+  const o = opts || {};
+  const pos = await dbGet("positions", positionId);
+  if (!pos) throw new LedgerError("找不到這筆持倉");
+  const execs = await dbGetAll("executions", "by_position", positionId);
+  const row = {
+    execution_id: newId("exe"),
+    position_id: positionId,
+    side: value.side,
+    session_date: value.session_date,
+    executed_at: value.executed_at || "",
+    shares: value.shares,
+    price_cents: value.price_cents,
+    fee_cents: value.fee_cents,
+    tax_cents: value.tax_cents,
+    fee_schedule: value.fee_schedule,
+    note: value.note || "",
+    is_current: 1,
+    revision: o.revision || 1,
+    supersedes: o.supersedes || null,
+    void_reason: null,
+    idempotency_key: o.idempotency_key || newId("idem"),
+    recorded_at: nowStamp(),
+  };
+  const db = await openDB();
+  const tx = db.transaction(["executions", "positions"], "readwrite");
+  const eos = tx.objectStore("executions");
+  if (o.supersedes) {
+    const old = execs.find((e) => e.execution_id === o.supersedes);
+    if (old) {
+      old.is_current = 0;
+      old.superseded_by = row.execution_id;
+      eos.put(old);
+    }
+  }
+  eos.put(row);
+  const kept = execs.filter((e) => e.execution_id !== o.supersedes);
+  kept.push(row);
+  applyDerived(pos, currentExecutions(kept));
+  tx.objectStore("positions").put(pos);
+  await txDone(tx);
+  // A corrected fill changes the ten-day result, so the frozen snapshot has to
+  // be restated rather than silently kept (report 11.6). The old value is kept
+  // inside the meta record's revision list.
+  if (o.supersedes) await restateCycle(positionId, "成交更正");
+  return row;
+}
+
+// 撤銷誤登: the execution never happened. It is NOT deleted -- report 5.2
+// requires the event to survive even when it is cancelled.
+async function voidExecution(executionId, reason) {
+  const exe = await dbGet("executions", executionId);
+  if (!exe) throw new LedgerError("找不到這筆成交紀錄");
+  const pos = await dbGet("positions", exe.position_id);
+  if (!pos) throw new LedgerError("找不到這筆持倉");
+  exe.is_current = 0;
+  exe.void_reason = reason || "user_void";
+  exe.voided_at = nowStamp();
+  const all = await dbGetAll("executions", "by_position", exe.position_id);
+  const kept = all.map((e) => (e.execution_id === executionId ? exe : e));
+  const db = await openDB();
+  const tx = db.transaction(["executions", "positions"], "readwrite");
+  tx.objectStore("executions").put(exe);
+  applyDerived(pos, currentExecutions(kept));
+  tx.objectStore("positions").put(pos);
+  await txDone(tx);
+  await restateCycle(exe.position_id, "撤銷誤登");
+}
+
+async function createPosition(fields) {
+  const pos = Object.assign({
+    position_id: newId("pos"),
+    account_id: "default",
+    stock_id: "",
+    stock_name: "",
+    market: "",
+    strategy: STATE.meta.mode || "",
+    strategy_version: STATE.meta.strategy_version || STRATEGY.version,
+    recommendation_id: null,
+    initial_buy_price: null,     // frozen copy of the first-day recommendation
+    rec_recommended_on: null,
+    fee_schedule: STATE.settings.fee_schedule || DEFAULT_SCHEDULE,
+    horizon_days: STRATEGY.horizon,
+    cap_days: STRATEGY.cap,
+    status: "open",
+    origin: "manual",
+    note: "",
+    open_shares: 0,
+    avg_cost: 0,
+    cost_basis: 0,
+    gross_cost: 0,
+    realized_net: 0,
+    realized_gross: 0,
+    dividends: 0,
+    opened_session: null,
+    closed_session: null,
+    needs_shares: false,
+    created_at: nowStamp(),
+    updated_at: nowStamp(),
+  }, fields || {});
+  await dbPut("positions", pos);
+  return pos;
+}
+
+/* ============================================================================
+ * 7. Daily marks and the frozen ten-day cycle
+ *
+ * Report 6.2 is emphatic and gives the failing number: summing each day's
+ * CUMULATIVE P&L yields 45,000 on its own example instead of 10,000. So the
+ * cumulative total is stored per day and the DAY's P&L is the DIFFERENCE
+ * between consecutive totals -- never a sum of cumulatives.
+ * ==========================================================================*/
+
+function buildMarks(pos, execsSorted, closes, sessions, calendar) {
+  const sched = schedule(pos.fee_schedule);
+  const marks = [];
+  const opened = pos.opened_session;
+  if (!opened) return marks;
+
+  let prevGross = 0, prevBook = 0;
+  let carriedClose = null, carriedFrom = "";
+
+  for (const s of sessions) {
+    if (s < opened) continue;
+    const snap = replay(execsSorted, s);
+    if (!snap.buys) continue;                       // nothing owned yet
+
+    let close = closes ? closes[s] : undefined;
+    let status = "current";
+    let source = "quotes";
+    if (close === undefined || close === null) {
+      // A missing bar is not a zero and not a holiday. Carrying the last known
+      // close AND SAYING SO is what report 7.2's own mock does ("still valued
+      // at the 9/8 close"); inventing today's price is not an option.
+      if (carriedClose !== null) {
+        close = carriedClose; status = "stale"; source = "carried:" + carriedFrom;
+      } else {
+        close = null; status = "missing"; source = "";
+      }
+    } else {
+      carriedClose = close; carriedFrom = s;
+    }
+
+    const shares = snap.shares;
+    const marketValue = close === null ? 0 : close * shares;
+    const unrealizedBook = close === null ? 0 : marketValue - snap.cost_basis;
+    const unrealizedGross = close === null ? 0 : marketValue - snap.gross_cost;
+    const totalBook = snap.realized_net + unrealizedBook + (pos.dividends || 0);
+    const totalGross = snap.realized_gross + unrealizedGross;
+    const netIfLiq = close === null ? null
+      : totalBook - (shares ? exitCost(sched, close, shares) : 0);
+
+    marks.push({
+      position_id: pos.position_id,
+      session_date: s,
+      day_index: dayIndexBetween(opened, s, calendar),
+      close_price: close,
+      price_source: source,
+      price_basis: STATE.quotes ? (STATE.quotes.price_basis || "unverified") : "",
+      open_shares: shares,
+      cost_basis: snap.cost_basis,
+      gross_cost: snap.gross_cost,
+      market_value: marketValue,
+      unrealized_book: unrealizedBook,
+      unrealized_gross: unrealizedGross,
+      realized_net: snap.realized_net,
+      total_book: totalBook,
+      total_gross: totalGross,
+      day_pnl_gross: totalGross - prevGross,
+      day_pnl_book: totalBook - prevBook,
+      net_if_liquidated: netIfLiq,
+      data_status: status,
+      computed_at: nowStamp(),
+    });
+    prevGross = totalGross;
+    prevBook = totalBook;
+
+    // Stop the day after the position closed: after D4's sale, D5's market
+    // move must not touch this trade's P&L (report 5.3).
+    if (snap.shares === 0 && snap.sells) break;
+  }
+  return marks;
+}
+
+async function rebuildMarks() {
+  if (!DB_OK) return;
+  const sessions = STATE.quotes && STATE.quotes.sessions ? STATE.quotes.sessions : [];
+  if (!sessions.length) return;   // no feed: keep the marks we already have
+  const closesAll = (STATE.quotes && STATE.quotes.closes) || {};
+  const fresh = [];
+  for (const pos of STATE.positions) {
+    if (pos.status === "void") continue;
+    const execs = currentExecutions(STATE.execsByPos[pos.position_id] || []);
+    if (!execs.length) continue;
+    const series = closesAll[pos.stock_id];
+    const closes = {};
+    if (series) {
+      sessions.forEach((s, i) => {
+        const c = cents(series[i]);
+        if (c !== null) closes[s] = c;
+      });
+    }
+    for (const m of buildMarks(pos, execs, closes, sessions, CAL)) fresh.push(m);
+  }
+  await dbPutMany("marks", fresh);
+  await freezeDueCycles(fresh);
+}
+
+// Report 5.3: at D10 the ten-day result is FIXED. If the user still holds, the
+// position keeps being valued (D11, D12...) and stays on the 待處理 list, but
+// this number stops moving.
+async function freezeDueCycles(marks) {
+  const byPos = {};
+  for (const m of marks) {
+    (byPos[m.position_id] = byPos[m.position_id] || []).push(m);
+  }
+  for (const [posId, list] of Object.entries(byPos)) {
+    const pos = STATE.positions.find((p) => p.position_id === posId);
+    if (!pos) continue;
+    const horizon = pos.horizon_days || STRATEGY.horizon;
+    const key = `cycle:${posId}:${horizon}:position`;
+    if (await metaGet(key)) continue;                 // already frozen: leave it
+    let mark = list.find((m) => m.day_index === horizon);
+    if (!mark && pos.status === "closed") mark = list[list.length - 1];
+    if (!mark) continue;
+    await metaSet(key, cycleFrom(pos, mark, horizon));
+  }
+}
+
+function cycleFrom(pos, mark, horizon) {
+  const initial = pos.initial_buy_price;
+  return {
+    position_id: pos.position_id,
+    stock_id: pos.stock_id,
+    stock_name: pos.stock_name,
+    horizon_days: horizon,
+    basis: "position",
+    session_date: mark.session_date,
+    day_index: mark.day_index,
+    close_price: mark.close_price,
+    open_shares: mark.open_shares,
+    cost_basis: mark.cost_basis,
+    total_gross: mark.total_gross,
+    total_book: mark.total_book,
+    net_if_liquidated: mark.net_if_liquidated,
+    return_vs_initial: (initial && mark.close_price !== null)
+      ? pctOf(mark.close_price - initial, initial) : null,
+    return_vs_cost: (pos.avg_cost && mark.close_price !== null)
+      ? pctOf(mark.close_price - pos.avg_cost, pos.avg_cost) : null,
+    still_open: pos.status === "open",
+    frozen_at: nowStamp(),
+    revisions: [],
+  };
+}
+
+// An amended or voided fill changes history. The frozen result is REPLACED,
+// and the superseded value is kept inside the record so "yesterday's number
+// changed" stays answerable.
+async function restateCycle(posId, reason) {
+  const pos = await dbGet("positions", posId);
+  if (!pos) return;
+  const horizon = pos.horizon_days || STRATEGY.horizon;
+  const key = `cycle:${posId}:${horizon}:position`;
+  const old = await metaGet(key);
+  if (!old) return;
+  old.restated_reason = reason;
+  old.restated_at = nowStamp();
+  const revisions = (old.revisions || []).concat([{
+    total_gross: old.total_gross, total_book: old.total_book,
+    net_if_liquidated: old.net_if_liquidated, frozen_at: old.frozen_at,
+    reason,
+  }]);
+  await metaSet(key, Object.assign({}, old, { revisions, needs_rebuild: true }));
+}
+
+async function loadCycles() {
+  const rows = await dbGetAll("meta");
+  const out = {};
+  for (const r of rows) {
+    if (String(r.key).startsWith("cycle:")) out[r.value.position_id] = r.value;
+  }
+  return out;
+}
+
+/* ============================================================================
+ * 8. Application state and data loading
+ * ==========================================================================*/
+
+const STATE = {
+  meta: {},
+  rows: [],
+  reports: {},
+  quotes: null,
+  quotesError: "",
+  scanError: "",
+  positions: [],
+  execsByPos: {},
+  marksByPos: {},
+  cycles: {},
+  settings: { fee_schedule: DEFAULT_SCHEDULE },
+  page: "today",
+  market: "ALL",
+  sortIndex: 0,
+  query: "",
+  loadedAt: "",
 };
 
-// Holding-day banner, recomputed live (see scanner/holding_tracker.py).
-function holdBanner(r) {
-  if (!r.Hold_Status) return "";
-  const h = liveHold(r);
-  // Fallback: shipped scan-time snapshot (calendar missing from older JSON).
-  const st = h ? h.st : r.Hold_Status;
-  const day = h ? h.day : r.Hold_Day;
-  const rem = h ? h.rem : r.Hold_Remaining;
-  const exit = h ? h.exit : (r.Exit_Date || "");
-  const total = (h ? h.total : r.Hold_Total) || 10;
-  const cap = (h ? h.cap : r.Hold_Cap) || 20;
-  let txt, cls;
-  if (st === "pending") {
-    txt = h && h.entryIsToday ? "今日開盤進場（09:00）"
-        : h && h.entry ? `${h.entry} 開盤進場` : "明日開盤進場";
-    cls = "pending";
-  }
-  else if (st === "delay") { txt = `⏸ 第 ${day} 天 · 大盤弱(20MA下)續抱觀察 · 最晚第 ${cap} 天`; cls = "delay"; }
-  else if (st === "exit_today") {
-    txt = h && h.afterClose ? `★ 已到期，今日收盤出場（第 ${day} 天）` : `★ 今日收盤出場（第 ${day} 天）`;
-    cls = "exit";
-  }
-  else if (st === "overdue") { txt = `已第 ${day} 天 · 應已出場${exit ? "（" + exit + "）" : ""}`; cls = "overdue"; }
-  else { txt = `持有第 ${day}/${total} 天 · 還有 ${rem} 個交易日${exit ? " · 出場 " + exit : ""}`; cls = "holding"; }
-  return `<div class="hold ${cls}">${txt}</div>`;
+async function fetchJson(url) {
+  // No cache-busting query string. F20: `?t=<Date.now()>` made every request a
+  // unique cache key, so caches.match() never matched offline and the cache
+  // grew one dead entry per app open. The service worker keys on the bare URL
+  // and `cache: "no-store"` is what actually defeats the HTTP cache.
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const text = await res.text();
+  if (!text.trim()) throw new Error("檔案是空的");
+  return JSON.parse(text);
 }
 
-// Full detail parity with the desktop DetailDialog (gui/app.py DETAIL_SECTIONS).
-function detailHtml(r) {
-  const row = (k, v) => `<div class="drow"><span class="k">${k}</span><span>${v}</span></div>`;
-  const grp = (title, body) => `<div class="sec-title">${title}</div>${body}`;
-  const lgrp = (title, chips) => `<div class="sec-title">${title}</div><div class="lights">${chips}</div>`;
-
-  const inst =
-    row("外資買賣超", fmtSigned(r.Foreign_Net, 0)) +
-    row("投信買賣超", fmtSigned(r.Trust_Net, 0)) +
-    row("外資5日累計", fmtSigned(r.Foreign_Net_5D, 0)) +
-    row("外資5日買超天", fmt(r.Inst_Buy_Days, 0));
-  const chip =
-    row("400張+持股%", fmt(r.Large_Holder_Pct, 2, "%")) +
-    row("大戶週增減", fmtSigned(r.Large_Pct_Change, 4)) +
-    row("散戶持股%", fmt(r.Retail_Pct, 2, "%")) +
-    row("散戶週增減", fmtSigned(r.Retail_Pct_Change, 4));
-  const signals =
-    light("箱縮", r.Cond_A) + light("吸籌", r.Cond_C) + light("大戶B", r.Cond_B) +
-    light("MA多頭", r.MA_Bull_Align) + light("Donchian突破", r.Donchian_Break) +
-    light("MACD金叉", r.MACD_Cross);
-  const dist =
-    row("距支撐%", fmt(r.Sup_Gap_Pct, 1, "%")) +
-    row("距壓力%", fmt(r.Res_Gap_Pct, 1, "%")) +
-    row("距52週高%", fmt(r.Dist_52W_High_Pct, 1, "%")) +
-    row("RS超額%", fmtSigned(r.RS_Score, 1, "%"));
-  const aux =
-    light("MA糾結", r.MA_Squeeze) + light("趨勢線突破", r.Trend_Breakout) +
-    light("MACD柱轉正", r.MACD_Hist_Turn) + light("52週高位", r.Near_52W_High) +
-    light("RS強勢", r.RS_Strong) + light("夾縫爆發", r.Squeeze);
-  const ma =
-    row("5MA", fmt(r.MA5, 2)) + row("10MA", fmt(r.MA10, 2)) +
-    row("20MA", fmt(r.MA20, 2)) + row("60MA", fmt(r.MA60, 2));
-  const sr =
-    row("關鍵支撐", fmt(r.Support_Used, 2)) +
-    row("60日高(壓)", fmt(r.Resist_60H, 2)) +
-    row("20日低(近撐)", fmt(r.Support_20L, 2)) +
-    row("60日低(底)", fmt(r.Support_60L, 2)) +
-    row("整數關卡", fmt(r.Round_Level, 2)) +
-    row("Zone 1", fmt(r.VP_Zone1, 2)) +
-    row("Zone 2", fmt(r.VP_Zone2, 2)) +
-    row("Zone 3", fmt(r.VP_Zone3, 2));
-  const gap =
-    row("跳空支撐", fmt(r.Gap_Up_Sup, 2)) +
-    row("跳空壓力", fmt(r.Gap_Dn_Res, 2));
-  const tech =
-    row("起漲分", fmt(r.Launch_Score, 1)) +
-    row("噴發分", fmt(r.Surge_Score, 1)) +
-    row("近5日漲幅%", fmtSigned(r.Ret_5D_Pct, 1, "%")) +
-    row("波動度ATR%", fmt(r.ATR_Pct, 2, "%")) +
-    row("蓄勢分", fmt(r.Explosion_Score, 1)) +
-    row("箱型壓縮度", fmt(r.Range_Tightness, 4)) +
-    row("量能萎縮比", fmt(r.Volume_Dryup, 4)) +
-    row("吸籌偏多度", fmt(r.Volume_Bias, 4));
-
-  return `<div class="detail">
-    ${grp("每日法人買賣超（張）", inst)}
-    ${grp("集保籌碼（週更新）", chip)}
-    ${lgrp("訊號燈號", signals)}
-    ${grp("距離（%）", dist)}
-    ${lgrp("線型輔助指標", aux)}
-    ${grp("均線", ma)}
-    ${grp("壓力 / 支撐 / 量集中區", sr)}
-    ${grp("缺口", gap)}
-    ${grp("噴發要素 / 原始技術指標", tech)}
-  </div>`;
+async function loadScan() {
+  const data = await fetchJson(DATA_URL);
+  const meta = data.meta || {};
+  STATE.meta = meta;
+  STATE.reports = meta.reports || {};
+  // The shipped order IS the rank. A user's sort must never change it
+  // (report 7.4: sorting changes the view, not the recommendation).
+  STATE.rows = (data.rows || []).map((r, i) => Object.assign({}, r, { _rank: i + 1 }));
+  STATE.scanError = "";
 }
 
-function stockHtml(r) {
-  // Two different cards, because a row is one of two different things:
-  //
-  //   not entered yet -> a candidate. Its levels come off the signal close and
-  //                      that is correct: the fill does not exist yet.
-  //   already entered -> a position in progress. Hysteresis keeps names listed
-  //                      for weeks, and the close-based Strict_Stop_Loss /
-  //                      Target_Price / Trail_Lock_Price then drift with the
-  //                      market instead of staying anchored to what was paid.
-  //                      Entry_Open + the Fill_* columns (holding_tracker) are
-  //                      the levels that actually govern the position, so an
-  //                      entered row shows those and never a "buy here" price.
-  const fill = num(r.Entry_Open);
-  const close = num(r.Close_Price);
-  const pl = fill && close ? (close / fill - 1) * 100 : null;
-  const grid = fill === null
-    ? cell("收盤價", { txt: fmt(r.Close_Price, 2) }) +
-      cell("進場參考", { txt: fmt(r.Suggested_Buy_Price, 2), cls: "gold" }) +
-      cell("停損價", { txt: fmt(r.Strict_Stop_Loss, 2) }) +
-      cell("停利目標", { txt: fmt(r.Target_Price, 2), cls: "gold" }) +
-      cell("起漲分", { txt: fmt(r.Launch_Score, 1) }) +
-      cell("鎖利價(漲6%後)", { txt: fmt(r.Trail_Lock_Price, 2), cls: "gold" }) +
-      cell("3月漲幅", { txt: fmtSigned(r.Gain_3M_Pct, 1, "%"), cls: signClass(r.Gain_3M_Pct) }) +
-      cell("外資5日", { txt: fmtSigned(r.Foreign_Net_5D, 0), cls: signClass(r.Foreign_Net_5D) })
-    : cell("收盤價", { txt: fmt(r.Close_Price, 2) }) +
-      cell("進場開盤價", { txt: fmt(fill, 2), cls: "gold" }) +
-      cell("停損價(依進場價)", { txt: fmt(r.Fill_Stop_Loss, 2) }) +
-      cell("停利目標(依進場價)", { txt: fmt(r.Fill_Target_Price, 2), cls: "gold" }) +
-      cell("起漲分", { txt: fmt(r.Launch_Score, 1) }) +
-      cell("鎖利價(漲6%後)", { txt: fmt(r.Fill_Trail_Lock_Price, 2), cls: "gold" }) +
-      cell("訊號後損益", { txt: fmtSigned(pl, 1, "%"), cls: signClass(pl) }) +
-      cell("外資5日", { txt: fmtSigned(r.Foreign_Net_5D, 0), cls: signClass(r.Foreign_Net_5D) });
-
-  // 核心+ 可買 = every condition of the validated rule, market gate included.
-  // A row that clears the quality gate but fails the gate/freshness test gets
-  // the greyed badge with the reason -- the old UI showed it as plain 核心+,
-  // which read as "buy" on days the banner above said "do not open".
-  const block = buyRuleBlock(r);
-  const quality = r._rank <= 20 && r.Core_Plus && String(r.Market) === "OTC";
-  let badge = "";
-  if (!block) badge = '<span class="core plus">核心+ 可買</span>';
-  else if (quality) badge = `<span class="core muted">核心+ 暫不可買·${BLOCK_TEXT[block] || block}</span>`;
-  else if (r._rank <= 20) badge = '<span class="core">核心</span>';
-
-  const h = liveHold(r);
-  const st = h ? h.st : r.Hold_Status;
-  const stale = st === "overdue" ? " stale" : "";
-  const held = !!HOLDINGS[String(r.Stock_ID)];
-  return `
-    <div class="stock ${tierClass(r)}${stale}" data-id="${r.Stock_ID}">
-      <div class="stock-head">
-        <span class="rank">${r._rank}</span>
-        <span class="name">${r.Stock_Name || r.Stock_ID}</span>
-        <span class="code">${r.Stock_ID}</span>
-        ${badge}
-        <button class="hadd${held ? " held" : ""}" data-add="${r.Stock_ID}">${held ? "✓追蹤中" : "＋持有"}</button>
-        <span class="market">${r.Market || ""}</span>
-      </div>
-      ${holdBanner(r)}
-      <div class="grid">${grid}</div>
-      ${detailHtml(r)}
-    </div>`;
-}
-
-// --- My-holdings section ------------------------------------------------------
-function addHolding(r) {
-  const sid = String(r.Stock_ID);
-  if (HOLDINGS[sid]) return;
-  // Default to the OPEN on the entry date -- that is the price the rule pays.
-  // Falling back to Suggested_Buy_Price (= today's close) put a month-old
-  // position's fill 15-25% off for anything that had run since its signal.
-  const entered = num(r.Entry_Open);
-  const ref = entered || num(r.Suggested_Buy_Price) || num(r.Close_Price);
-  const label = entered ? `${String(r.Entry_Date || "").slice(0, 10)} 開盤價`
-                        : "進場參考價";
-  const raw = prompt(`「${r.Stock_Name || sid}」實際成交價？\n（預設 = ${label} ${ref === null ? "-" : ref}）`, ref === null ? "" : ref);
-  if (raw === null) return;                       // cancelled
-  const fill = num(String(raw).trim()) || ref;
-  if (!fill || fill <= 0) { alert("價格無效，未加入"); return; }
-  // Entry anchor: the shipped Entry_Date (next open after the signal), else the
-  // first calendar day after the row's data date.
-  let entry = String(r.Entry_Date || "").slice(0, 10);
-  if (!entry) {
-    const bar = String(r.Data_Date || "").slice(0, 10);
-    entry = CAL.find((d) => d > bar) || "";
+async function loadQuotes() {
+  try {
+    const q = await fetchJson(QUOTES_URL);
+    if (!q || !Array.isArray(q.sessions)) throw new Error("格式不符");
+    STATE.quotes = q;
+    STATE.quotesError = "";
+  } catch (e) {
+    // An older deploy has no quotes.json at all. That is a degraded state, not
+    // a crash: positions fall back to the marks already in IndexedDB and the
+    // valuation date is shown so nobody mistakes them for today's.
+    STATE.quotes = null;
+    STATE.quotesError = e.message || String(e);
   }
-  HOLDINGS[sid] = {
-    id: sid, name: r.Stock_Name || sid, market: r.Market || "",
-    entry, fill,
-    total: r.Hold_Total || 10, cap: r.Hold_Cap || 20,
-    added: dstr(new Date()),
+}
+
+async function loadLedger() {
+  if (!DB_OK) return;
+  STATE.positions = await dbGetAll("positions");
+  const execs = await dbGetAll("executions");
+  STATE.execsByPos = {};
+  for (const e of execs) {
+    (STATE.execsByPos[e.position_id] = STATE.execsByPos[e.position_id] || []).push(e);
+  }
+  const marks = await dbGetAll("marks");
+  STATE.marksByPos = {};
+  for (const m of marks) {
+    (STATE.marksByPos[m.position_id] = STATE.marksByPos[m.position_id] || []).push(m);
+  }
+  for (const list of Object.values(STATE.marksByPos)) {
+    list.sort((a, b) => a.session_date.localeCompare(b.session_date));
+  }
+  STATE.cycles = await loadCycles();
+}
+
+async function load() {
+  setStatus("載入中…");
+  try {
+    await loadScan();
+  } catch (e) {
+    // Report 7.4: a failed refresh keeps the last data on screen and labels it,
+    // instead of blanking the app.
+    STATE.scanError = e.message || String(e);
+  }
+  await loadQuotes();
+  buildCalendar(STATE.meta.calendar_tail, STATE.quotes && STATE.quotes.sessions);
+  await loadLedger();
+  await rebuildMarks();
+  await loadLedger();               // pick the rebuilt marks back up
+  STATE.loadedAt = nowStamp();
+  render();
+  setStatus(STATE.scanError ? "更新失敗，顯示上次資料" : "更新於 " + STATE.loadedAt);
+}
+
+function setStatus(text) {
+  const el = $("#status");
+  if (el) el.textContent = text;
+}
+
+/* ============================================================================
+ * 9. Derived views
+ * ==========================================================================*/
+
+// The bar date the ROWS actually represent. An older backend ships no
+// meta.data_date, and falling back to "the newest session we know about" made
+// a July scan announce itself as today's -- the exact confusion report section
+// 8 warns about (Data_Date and Scan_Time are different facts). So fall back to
+// the rows themselves, and only then admit we do not know.
+function effectiveDataDate() {
+  const m = String(STATE.meta.data_date || "").slice(0, 10);
+  if (m) return m;
+  let best = "";
+  for (const r of STATE.rows) {
+    const d = String(r.Data_Date || "").slice(0, 10);
+    if (d > best) best = d;
+  }
+  return best;
+}
+
+function rankScore() {
+  return RANK_SCORE[STATE.meta.mode] || RANK_SCORE_DEFAULT;
+}
+
+// F22: the technical-score tier tints a CHIP, never the whole card, so it can
+// never be confused with the trade-state colour (and never hides anything).
+function scoreTier(row) {
+  const v = num(row[rankScore().key]);
+  if (v === null) return "";
+  if (v >= 70) return "score-high";
+  if (v >= 50) return "score-mid";
+  return "";
+}
+
+// The regime, as ONE source for both the banner and the rule. The old build
+// had a banner saying "neutral, be conservative" while buyRuleBlock() hard-
+// blocked every buy -- two different sentences about the same fact.
+function regimeView() {
+  const reg = STATE.meta.regime || {};
+  if (!reg.ok) {
+    return { tone: "off", text: "大盤狀態無法判讀 · 不視為順風，暫停開新倉", enterOk: false, asOf: reg.as_of_date || "" };
+  }
+  const asOf = reg.as_of_date || "";
+  // F15: a cached regime that merely LOOKS like a tailwind is not one.
+  if (reg.is_current === false) {
+    return {
+      tone: "off", enterOk: false, asOf,
+      text: `大盤判定非最新（資料日 ${asOf || "未知"}）· 不視為順風，暫停開新倉`,
+    };
+  }
+  if (reg.enter_ok && reg.strong) {
+    return { tone: "on", enterOk: true, asOf, text: "大盤強順風 · 可開新倉" };
+  }
+  if (reg.enter_ok) {
+    return { tone: "on", enterOk: true, asOf, text: "大盤順風（20MA 上緣 <2.2%）· 可開新倉、部位減量" };
+  }
+  if (reg.risk_on) {
+    return { tone: "mid", enterOk: false, asOf, text: "大盤中性（跌破 20MA）· 依規則暫停開新倉" };
+  }
+  return { tone: "off", enterOk: false, asOf, text: "大盤逆風（跌破 60MA）· 暫緩開新倉、減碼" };
+}
+
+// F07: read the backend's verdict. The ONLY thing we may do locally is
+// downgrade -- an old data date, or a regime that is no longer current, turns
+// a "buy" into "confirm first". We never turn a refusal into a buy.
+function buyVerdict(row) {
+  const backendReady = row.Buy_Ready === true;
+  const backendBlock = String(row.Buy_Block || "");
+
+  if (row.Buy_Ready === undefined && !backendBlock) {
+    return { ok: false, code: "unknown", text: BLOCK_TEXT.unknown, source: "client" };
+  }
+  if (!backendReady) {
+    const code = backendBlock || "unknown";
+    return { ok: false, code, text: BLOCK_TEXT[code] || code, source: "backend" };
+  }
+  // Downgrades, most actionable first.
+  const bar = String(row.Data_Date || "").slice(0, 10);
+  if (CAL_LAST && bar && bar < CAL_LAST) {
+    return { ok: false, code: "stale", text: `${BLOCK_TEXT.stale}（資料 ${bar}，最新交易日 ${CAL_LAST}）`, source: "client" };
+  }
+  const validUntil = String(row.Rec_Valid_Until || "").slice(0, 10);
+  if (validUntil && CAL_LAST && validUntil < CAL_LAST) {
+    return { ok: false, code: "stale", text: `建議有效期已過（${validUntil}）`, source: "client" };
+  }
+  const reg = regimeView();
+  if (!reg.enterOk) {
+    return { ok: false, code: "regime", text: reg.text, source: "client" };
+  }
+  return { ok: true, code: "", text: "可買", source: "backend" };
+}
+
+function latestMark(posId) {
+  const list = STATE.marksByPos[posId];
+  return list && list.length ? list[list.length - 1] : null;
+}
+
+function activePlan(pos) {
+  // Stop and target are derived from the REAL average cost and stored as a
+  // strategy snapshot, not from a drifting close price. Report 5.4: the
+  // protective stop ratchets UP only -- a falling market must never recompute
+  // a lower stop and quietly widen the risk.
+  if (!pos.open_shares || !pos.avg_cost) return null;
+  const base = pos.avg_cost;
+  const stop0 = divRound(base * (100 + STRATEGY.stopPct), 100);
+  const arm = divRound(base * (100 + STRATEGY.armPct), 100);
+  const lock = divRound(base * (100 + STRATEGY.lockPct), 100);
+  const target = divRound(base * (100 + STRATEGY.targetPct), 100);
+  const marks = STATE.marksByPos[pos.position_id] || [];
+  let high = null, highOn = "";
+  for (const m of marks) {
+    if (m.close_price !== null && (high === null || m.close_price > high)) {
+      high = m.close_price; highOn = m.session_date;
+    }
+  }
+  const armed = high !== null && high >= arm;
+  return {
+    stop: armed ? Math.max(stop0, lock) : stop0,
+    stop_orderable: tickRound(armed ? Math.max(stop0, lock) : stop0, "down"),
+    initial_stop: stop0,
+    arm, lock, target,
+    target_orderable: tickRound(target, "up"),
+    armed, armed_on: armed ? highOn : "",
+    highest_close: high,
   };
-  saveHoldings(HOLDINGS);
-  renderHoldings();
-  apply();
 }
 
-function removeHolding(sid) {
-  const h = HOLDINGS[sid];
-  if (!h) return;
-  if (!confirm(`移除持倉「${h.name}」？（已出場後移除即可）`)) return;
-  delete HOLDINGS[sid];
-  saveHoldings(HOLDINGS);
-  renderHoldings();
-  apply();
-}
+// The one place that decides what needs a human today (report 7.2).
+function pendingItems() {
+  const out = [];
+  for (const pos of STATE.positions) {
+    if (pos.status === "void" || pos.status === "archived") continue;
+    const name = `${pos.stock_name || pos.stock_id}（${pos.stock_id}）`;
 
-function holdingHtml(h) {
-  const live = holdCalc(h.entry, h.total, h.cap);
-  const row = ALL_ROWS.find((r) => String(r.Stock_ID) === h.id);
-  const close = row ? num(row.Close_Price) : null;
-  const pl = close && h.fill ? (close / h.fill - 1) * 100 : null;
+    if (pos.needs_shares) {
+      out.push({ kind: "shares", pos, text: `${name}：由舊版匯入，缺少股數，請補登實際成交` });
+      continue;
+    }
+    if (pos.status === "closed") continue;
 
-  // Status banner: same wording family as the list cards.
-  let banner;
-  if (!live) {
-    banner = `<div class="hold overdue">進場日 ${h.entry || "?"} 已超出追蹤範圍，請手動確認出場</div>`;
-  } else {
-    const fake = { Hold_Status: "x", Entry_Date: h.entry, Hold_Total: h.total, Hold_Cap: h.cap };
-    banner = holdBanner(fake);
+    const m = latestMark(pos.position_id);
+    if (!m) {
+      out.push({ kind: "gap", pos, text: `${name}：尚無任何收盤估值（quotes.json 未涵蓋此檔）` });
+      continue;
+    }
+    const horizon = pos.horizon_days || STRATEGY.horizon;
+    if (m.day_index !== null && m.day_index >= horizon && pos.open_shares > 0) {
+      out.push({
+        kind: "d10", pos,
+        text: `${name}：第 ${m.day_index} 個交易日已到（計畫 ${horizon} 天），尚未登錄賣出`,
+      });
+    }
+    if (m.data_status === "missing") {
+      out.push({
+        kind: "gap", pos,
+        text: `${name}：${m.session_date} 無收盤價，未實現損益無法估值（不影響其他持倉）`,
+      });
+    } else if (m.data_status !== "current") {
+      out.push({
+        kind: "gap", pos,
+        text: `${name}：資料缺漏，損益仍以 ${m.price_source.replace("carried:", "")} 收盤估值`,
+      });
+    }
+    const plan = activePlan(pos);
+    if (plan && plan.armed) {
+      out.push({
+        kind: "trail", pos,
+        text: `${name}：鎖利條件已成立（曾達 ${fmtPrice(plan.highest_close)}），查看下個交易日計畫`,
+      });
+    }
+    if (plan && m.close_price !== null && m.close_price <= plan.stop) {
+      out.push({
+        kind: "stop", pos,
+        text: `${name}：收盤 ${fmtPrice(m.close_price)} 已在有效停損 ${fmtPrice(plan.stop)} 之下，請確認出場計畫`,
+      });
+    }
   }
-  const grid =
-    cell("成交價", { txt: fmt(h.fill, 2), cls: "gold" }) +
-    cell("現價", { txt: close === null ? "-" : fmt(close, 2), cls: signClass(pl) }) +
-    cell("損益", { txt: pl === null ? "-" : fmtSigned(pl, 1, "%"), cls: signClass(pl) }) +
-    cell("停損 -15%", { txt: fmt(h.fill * H_STOP, 2) }) +
-    cell("鎖利 +2%(漲6%後)", { txt: fmt(h.fill * H_LOCK, 2), cls: "gold" }) +
-    cell("停利 +20%", { txt: fmt(h.fill * H_TP, 2), cls: "gold" }) +
-    cell("進場日", { txt: h.entry || "-" }) +
-    cell("出場日", { txt: live && live.exit ? live.exit : "-" });
-  return `
-    <div class="stock hstock" data-hid="${h.id}">
-      <div class="stock-head">
-        <span class="name">${h.name}</span>
-        <span class="code">${h.id}</span>
-        ${row ? "" : '<span class="hgone">已不在名單·追蹤持續</span>'}
-        <button class="hremove" data-remove="${h.id}">出場/移除</button>
-        <span class="market">${h.market}</span>
-      </div>
-      ${banner}
-      <div class="grid">${grid}</div>
+  return out;
+}
+
+// Report 6.4: amounts add up, PERCENTAGES DO NOT, and a total built from mixed
+// valuation dates has to say so.
+function portfolioSummary() {
+  let totalBook = 0, totalGross = 0, realized = 0, dayPnl = 0, invested = 0;
+  let netIfLiq = 0, netIfLiqKnown = true;
+  let openN = 0, valuationDate = "";
+  const staleList = [];
+  const unpriced = [];
+  let dayPnlComplete = true;
+
+  // Only a VOIDED position leaves the totals. Archiving files a finished trade
+  // away from the working list; it does not un-earn the money, and a realised
+  // profit that disappears when you tidy up is a falsified history.
+  for (const pos of STATE.positions) {
+    if (pos.status === "void") continue;
+    realized += pos.realized_net || 0;
+    if (pos.status === "open") { openN += 1; invested += pos.cost_basis || 0; }
+    const m = latestMark(pos.position_id);
+    if (!m) {
+      if (pos.status === "open") staleList.push({ pos, as_of: null });
+      continue;
+    }
+    if (!valuationDate || m.session_date > valuationDate) valuationDate = m.session_date;
+  }
+  for (const pos of STATE.positions) {
+    if (pos.status === "void") continue;
+    const m = latestMark(pos.position_id);
+    if (!m) continue;
+    totalBook += m.total_book;
+    totalGross += m.total_gross;
+    // An unpriced holding contributes its REALISED part and nothing else. The
+    // account total therefore has a known hole in it, and must say so.
+    if (m.close_price === null && pos.status === "open") unpriced.push(pos.stock_id);
+    if (m.net_if_liquidated === null) netIfLiqKnown = false;
+    else netIfLiq += m.net_if_liquidated;
+    if (m.session_date === valuationDate) dayPnl += m.day_pnl_gross;
+    else if (pos.status === "open") {
+      // Only a position we still HOLD can be under-valued. A trade that closed
+      // last week is not "stale"; it is finished.
+      dayPnlComplete = false;
+      staleList.push({ pos, as_of: m.session_date });
+    }
+    if (m.data_status !== "current" && pos.status === "open") {
+      staleList.push({ pos, as_of: m.session_date });
+    }
+  }
+
+  return {
+    open_positions: openN,
+    invested_cost: invested,
+    total_book: totalBook,
+    total_gross: totalGross,
+    realized_net: realized,
+    day_pnl: dayPnl,
+    day_pnl_complete: dayPnlComplete,
+    net_if_liquidated: netIfLiqKnown ? netIfLiq : null,
+    return_on_cost: invested > 0 ? pctOf(totalBook, invested) : null,
+    valuation_date: valuationDate,
+    valuation_complete: staleList.length === 0,
+    stale: staleList,
+    unpriced,
+  };
+}
+
+// Everything that still needs a human. A CLOSED position stays here until the
+// user archives it: 登錄賣出 and 封存 are two different actions (report 7.4),
+// and auto-hiding a position the moment its last share is sold would leave
+// 封存 with nothing to act on.
+function activePositions() {
+  return STATE.positions.filter((p) => p.status !== "void" && p.status !== "archived");
+}
+
+/* ============================================================================
+ * 10. Shared render pieces
+ * ==========================================================================*/
+
+function kv(label, value, cls, sub) {
+  return `<div class="kv"><span class="kv-l">${esc(label)}</span>` +
+    `<span class="kv-v ${cls || ""}">${value}</span>` +
+    (sub ? `<span class="kv-s">${esc(sub)}</span>` : "") + `</div>`;
+}
+
+function drow(k, v) {
+  return `<div class="drow"><span class="k">${esc(k)}</span><span>${v}</span></div>`;
+}
+
+function lightChip(label, on) {
+  return `<span class="light ${on ? "on" : ""}">${esc(label)}</span>`;
+}
+
+function noticeHtml(tone, text) {
+  return `<div class="notice ${tone}">${esc(text)}</div>`;
+}
+
+function btn(action, label, cls, data) {
+  const attrs = Object.entries(data || {})
+    .map(([k, v]) => ` data-${k}="${esc(v)}"`).join("");
+  return `<button type="button" class="btn ${cls || ""}" data-act="${esc(action)}"${attrs}>${esc(label)}</button>`;
+}
+
+// Global banners: scan/quote faults, degraded feed, stale scan. These use
+// .notice, which is a DATA notice. F10: the old build shared the class name
+// `.stale` between "the data is old" (display:none until shown) and "this card
+// is past its exit date", so an overdue holding inherited display:none and
+// became completely invisible. Data notices and card states now have
+// disjoint class namespaces, and no card state ever hides anything.
+function renderNotices() {
+  const out = [];
+  const m = STATE.meta;
+  if (LEDGER_ERROR) {
+    out.push(noticeHtml("err", `⚠ 無法開啟本機資料庫，持倉功能停用（${LEDGER_ERROR}）· 行情與建議仍可使用`));
+  }
+  if (STATE.scanError) {
+    out.push(noticeHtml("err", `⚠ 無法更新掃描結果（${STATE.scanError}）· 以下為上次成功載入的資料`));
+  }
+  if (m.degraded) {
+    out.push(noticeHtml("err", `⚠ 資料源異常（${m.degraded}）· 缺漏市場≠空手 · 持倉照常追蹤，狀態未被覆寫`));
+  }
+  if (STATE.quotesError) {
+    out.push(noticeHtml("warn",
+      `⚠ 報價檔 quotes.json 無法讀取（${STATE.quotesError}）· 持倉沿用先前估值，日期見各卡片`));
+  }
+  const dataDate = effectiveDataDate();
+  if (dataDate && CAL_LAST && dataDate < CAL_LAST) {
+    out.push(noticeHtml("warn", `⏳ 掃描結果為 ${dataDate}，已知最新交易日為 ${CAL_LAST}，建議重新整理`));
+  }
+  if (!STATE.meta.data_date && dataDate) {
+    out.push(noticeHtml("info", `ℹ 舊版資料格式（未附 meta.data_date），行情日期取自個股 Data_Date：${dataDate}`));
+  }
+  if (m.empty_ok) {
+    out.push(noticeHtml("info", "今日 0 檔入選 · 這是正常的空結果（資料源正常，非故障）"));
+  }
+  $("#notices").innerHTML = out.join("");
+}
+
+function tabBar() {
+  return PAGES.map(([id, label]) =>
+    `<button type="button" class="tab ${STATE.page === id ? "on" : ""}" data-act="page" data-page="${id}">${esc(label)}</button>`).join("");
+}
+
+function render() {
+  renderNotices();
+  $("#tabs").innerHTML = tabBar();
+  const dd = effectiveDataDate();
+  $("#asof").textContent = dd ? `行情截至 ${dd} 收盤` : "尚無行情日期";
+  for (const [id] of PAGES) {
+    const el = document.getElementById("page-" + id);
+    el.hidden = id !== STATE.page;
+  }
+  const fn = { today: renderToday, picks: renderPicks, positions: renderPositions,
+               perf: renderPerf, research: renderResearch }[STATE.page];
+  if (fn) fn();
+}
+
+/* ============================================================================
+ * 11. The five pages
+ * ==========================================================================*/
+
+// --- 11.1 今日總覽 (report 7.2) ---------------------------------------------
+function renderToday() {
+  const s = portfolioSummary();
+  const pending = pendingItems();
+  const picks = STATE.rows.filter((r) => buyVerdict(r).ok);
+  const reg = regimeView();
+  const m = STATE.meta;
+  const horizon = STRATEGY.horizon;
+  const d10 = pending.filter((p) => p.kind === "d10").length;
+
+  const head = `
+    <div class="asof-block">
+      <div class="asof-line"><span>行情截至</span><b>${esc(effectiveDataDate() || "未知")} 收盤</b></div>
+      <div class="asof-line"><span>最近成功更新</span><b>${esc(String(m.scan_time || "未知"))}</b></div>
+      <div class="asof-line"><span>資料完整度</span><b>${esc(dataCompletenessText())}</b></div>
+      <div class="asof-line"><span>估值日期</span><b>${esc(s.valuation_date || "尚無估值")}${s.valuation_complete ? "" : " · 估值不完整"}</b></div>
     </div>`;
+
+  // The four totals stay apart. Report 6.3 forbids gross / book / net-if-
+  // liquidated sharing one "總獲利" label, so each carries its own basis.
+  const totals = `
+    <div class="totals">
+      ${totalCard("帳面總損益", s.total_book,
+        "已實現淨損益＋未實現帳面損益（未扣未來賣出費稅）" +
+        (s.unpriced.length ? `｜${s.unpriced.length} 檔無報價未計入未實現部分：${s.unpriced.join("、")}` : ""))}
+      ${totalCard("今日損益", s.day_pnl, s.day_pnl_complete ? "同一估值日的價差變動" : "部分持倉估值日不同，僅計最新估值日")}
+      ${totalCard("已實現淨損益", s.realized_net, "已扣實際手續費與交易稅")}
+      ${totalCard("價差總損益", s.total_gross, "只算價差，不含任何費稅")}
+      ${totalCard("若今日全數賣出估計淨損益", s.net_if_liquidated, "帳面總損益扣掉賣出費稅的估計值")}
+    </div>
+    <div class="hint">報酬率不可相加：帳面總損益 ÷ 投入成本 ${
+      s.return_on_cost === null ? "（尚無成本基礎）" : "＝ " + fmtPct(s.return_on_cost)
+    }（靜態同批投入口徑）</div>`;
+
+  const chips = `
+    <div class="chip-row">
+      <button type="button" class="stat ${pending.length ? "alert" : ""}" data-act="page" data-page="positions">待處理 ${pending.length}</button>
+      <button type="button" class="stat" data-act="page" data-page="picks">今日新建議 ${picks.length}</button>
+      <button type="button" class="stat" data-act="page" data-page="positions">持倉 ${s.open_positions}</button>
+      <button type="button" class="stat ${d10 ? "alert" : ""}" data-act="page" data-page="positions">D${horizon}到期 ${d10}</button>
+    </div>`;
+
+  const pendingHtml = pending.length
+    ? `<ul class="pending">${pending.map((p) =>
+        `<li class="p-${esc(p.kind)}">${esc(p.text)}</li>`).join("")}</ul>`
+    : `<div class="empty-inline">目前沒有待處理事項。</div>`;
+
+  document.getElementById("page-today").innerHTML =
+    head +
+    `<div class="sec"><h2>總損益</h2>${totals}</div>` +
+    chips +
+    `<div class="sec"><h2>待處理 ${pending.length}</h2>${pendingHtml}</div>` +
+    `<div class="sec"><h2>大盤</h2><div class="notice ${reg.tone === "on" ? "ok" : reg.tone === "mid" ? "warn" : "err"}">` +
+      `${esc(reg.text)}${reg.asOf ? esc(` · 判定資料日 ${reg.asOf}`) : ""}</div>` +
+      (m.regime && m.regime.text ? `<div class="hint">${esc(m.regime.text)}</div>` : "") +
+    `</div>` +
+    strategyCardHtml();
 }
 
-function renderHoldings() {
-  const sec = $("#holdings");
-  const items = Object.values(HOLDINGS)
-    .sort((a, b) => (a.entry || "").localeCompare(b.entry || ""));
-  if (!items.length) { sec.className = "holdings"; sec.innerHTML = ""; return; }
-  sec.className = "holdings show";
-  sec.innerHTML =
-    `<div class="holdings-title">我的持倉（${items.length}）· 存在手機，不隨名單消失</div>` +
-    items.map(holdingHtml).join("");
-  sec.querySelectorAll("[data-remove]").forEach((b) => {
-    b.addEventListener("click", (e) => { e.stopPropagation(); removeHolding(b.dataset.remove); });
-  });
+function totalCard(label, valueCents, sub) {
+  const cls = valueCents === null ? "flat" : signClass(valueCents);
+  const val = valueCents === null ? "-" : fmtPnl(valueCents);
+  return `<div class="total"><span class="t-l">${esc(label)}</span>` +
+    `<span class="t-v ${cls}">${esc(val)}</span>` +
+    `<span class="t-s">${esc(sub)}</span></div>`;
 }
 
-function render(rows) {
-  const list = $("#list");
-  if (!rows.length) {
-    list.innerHTML = `<div class="empty">沒有符合的股票</div>`;
-    return;
+function dataCompletenessText() {
+  const q = STATE.meta.quotes || {};
+  const missing = Array.isArray(q.missing) ? q.missing.length : 0;
+  if (!STATE.quotes) return "報價檔缺席（沿用先前估值）";
+  const parts = [`報價 ${STATE.quotes.count || 0} 檔 / ${(STATE.quotes.sessions || []).length} 個交易日`];
+  if (missing) parts.push(`待補 ${missing} 檔`);
+  if (STATE.quotes.price_basis && STATE.quotes.price_basis !== "raw") {
+    parts.push(`價格基準 ${STATE.quotes.price_basis}（尚未與券商對帳）`);
   }
-  list.innerHTML = rows.map(stockHtml).join("");
-  list.querySelectorAll(".stock").forEach((el) => {
-    el.addEventListener("click", () => el.classList.toggle("open"));
-  });
-  list.querySelectorAll("[data-add]").forEach((b) => {
-    b.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const r = ALL_ROWS.find((x) => String(x.Stock_ID) === b.dataset.add);
-      if (!r) return;
-      if (HOLDINGS[b.dataset.add]) removeHolding(b.dataset.add);
-      else addHolding(r);
-    });
-  });
+  return parts.join(" · ");
 }
 
-// market filter -> search -> sort, then render. Rank/core stay tied to the
-// original shipped order (r._rank), not the display position.
-function apply() {
-  let rows = ALL_ROWS;
-  if (MARKET !== "ALL") rows = rows.filter((r) => String(r.Market) === MARKET);
-  const q = $("#search").value.trim().toLowerCase();
-  if (q) rows = rows.filter((r) =>
-    String(r.Stock_ID).includes(q) ||
-    String(r.Stock_Name || "").toLowerCase().includes(q));
-  const [, key, dir] = SORTS[SORT_I];
-  rows = rows.slice().sort((a, b) => {
+// Report 7.4: the long strategy blurb becomes a collapsible summary instead of
+// a fixed header eating the top of a 375px screen.
+function strategyCardHtml() {
+  const card = MODE_CARDS[STATE.meta.mode] || MODE_CARD_DEFAULT;
+  return `<details class="strategy ${card.tone}">
+    <summary>${esc(card.summary)}</summary>
+    <div class="strategy-body">${esc(card.body)}</div>
+    <div class="strategy-meta">模式 ${esc(STATE.meta.mode || "未知")}｜策略版本 ${esc(STATE.meta.strategy_version || "未提供")}</div>
+  </details>`;
+}
+
+// --- 11.2 今日建議 -----------------------------------------------------------
+function renderPicks() {
+  const rows = filteredRows();
+  const ready = rows.filter((r) => buyVerdict(r).ok);
+  const others = rows.filter((r) => !buyVerdict(r).ok);
+  const reg = regimeView();
+
+  const controls = `
+    <div class="controls">
+      <div class="chips">${["ALL", "OTC", "TSE"].map((k) =>
+        `<button type="button" class="chip ${STATE.market === k ? "on" : ""}" data-act="market" data-market="${k}">${k === "ALL" ? "全部" : k}</button>`).join("")}</div>
+      <select class="sort" data-act="sort">${SORTS.map(([label], i) =>
+        `<option value="${i}"${i === STATE.sortIndex ? " selected" : ""}>${esc(label)}</option>`).join("")}</select>
+      <span class="count">${rows.length} 檔</span>
+    </div>
+    <input id="search" class="search" type="search" placeholder="搜尋代號 / 名稱" value="${esc(STATE.query)}" data-act="search" />`;
+
+  const banner = `<div class="notice ${reg.enterOk ? "ok" : "warn"}">${esc(reg.text)}${
+    reg.asOf ? esc(` · 判定資料日 ${reg.asOf}`) : ""}</div>` +
+    `<div class="hint">買進資格由後端 Buy_Ready / Buy_Block 決定，本畫面只會把過期資料降級，不會把「不可買」改成「可買」。</div>`;
+
+  const readyHtml = ready.length
+    ? ready.map(pickCard).join("")
+    : `<div class="empty-inline">今日 0 檔符合完整買進規則${reg.enterOk ? "（資料源正常，屬正常空手日）" : "（原因：" + esc(reg.text) + "）"}。</div>`;
+
+  const aiText = STATE.reports[STATE.market] || STATE.reports.ALL || "";
+  const ai = `<details class="strategy dim"><summary>AI 報告${STATE.market === "ALL" ? "" : "（" + esc(STATE.market) + "）"}</summary>` +
+    `<div class="strategy-body">${esc(aiText || "（本次掃描沒有 AI 報告；於雲端設定 API 金鑰後即會出現）")}</div></details>`;
+
+  document.getElementById("page-picks").innerHTML =
+    banner + controls +
+    `<div class="sec"><h2>符合買進規則 ${ready.length}</h2>${readyHtml}</div>` +
+    `<div class="sec"><h2>其他候選 ${others.length}（附不成立原因）</h2>${
+      others.length ? others.map(pickCard).join("") : `<div class="empty-inline">沒有其他候選。</div>`}</div>` +
+    ai;
+
+  const box = document.getElementById("search");
+  if (box) {
+    box.addEventListener("input", () => { STATE.query = box.value; renderPicks(); });
+    if (STATE.query) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+  }
+}
+
+function filteredRows() {
+  let rows = STATE.rows;
+  if (STATE.market !== "ALL") rows = rows.filter((r) => String(r.Market) === STATE.market);
+  const q = STATE.query.trim().toLowerCase();
+  if (q) {
+    rows = rows.filter((r) => String(r.Stock_ID).includes(q) ||
+      String(r.Stock_Name || "").toLowerCase().includes(q));
+  }
+  const [, key, dir] = SORTS[STATE.sortIndex];
+  return rows.slice().sort((a, b) => {
     if (key === "rank") return a._rank - b._rank;
     const av = num(a[key]), bv = num(b[key]);
     if (av === null && bv === null) return 0;
@@ -495,221 +1600,955 @@ function apply() {
     if (bv === null) return -1;
     return dir === "asc" ? av - bv : bv - av;
   });
-  $("#count").textContent = rows.length + " 檔";
-  render(rows);
 }
 
-// Data-fault banner (meta.degraded): an exchange snapshot failed its sanity
-// floor this scan. Distinct from a normal no-trade day -- the missing market's
-// absence carries NO information. State (held_ids/ledger) was not overwritten.
-function renderDegraded(degraded) {
-  const el = $("#degraded");
-  if (!degraded) { el.className = "degraded"; el.textContent = ""; return; }
-  el.className = "degraded show";
-  el.textContent = `⚠ 資料源異常（${degraded}）· 缺漏市場≠空手 · 持倉照常追蹤，狀態未被覆寫`;
+function pickCard(r) {
+  const v = buyVerdict(r);
+  const sc = rankScore();
+  const held = STATE.positions.some((p) =>
+    p.stock_id === String(r.Stock_ID) && p.status === "open");
+
+  // Report section 8 / 5.1: the FIXED first-day price and today's recomputed
+  // reference are two different facts and must never share a column name.
+  const initial = cents(r.Initial_Buy_Price);
+  const latestRef = cents(r.Suggested_Buy_Price);
+  const close = cents(r.Close_Price);
+  const dataDate = String(r.Data_Date || "").slice(0, 10);
+
+  const badge = v.ok
+    ? `<span class="verdict ok">可買</span>`
+    : `<span class="verdict no">不可買 · ${esc(v.text)}</span>`;
+
+  const grid =
+    kv("最新收盤價", esc(fmtPrice(close)), "", dataDate ? `資料日 ${dataDate}` : "") +
+    (initial !== null
+      ? kv("首日建議價", esc(fmtPrice(initial)), "gold", `固定 · ${esc(String(r.Recommended_On || "").slice(0, 10) || "首次建議日未提供")}`)
+      : kv("首日建議價", "-", "", "後端尚未提供固定首日價")) +
+    kv("最新觀察參考", esc(fmtPrice(latestRef)), "", "每次掃描重算，非新的買進指令") +
+    kv("停損距離%", esc(fmt(r.Risk_Pct, 1, "%")), "", "價格到停損的距離，不是虧損機率") +
+    kv("參考停損", esc(fmtPrice(cents(r.Strict_Stop_Loss))), "", "依參考價推算，未成交前非實際風控") +
+    kv("參考停利目標", esc(fmtPrice(cents(r.Target_Price))), "gold", "條件價，不代表已達成") +
+    kv(sc.label, esc(fmt(r[sc.key], 1)), "", "規則分數，不是上漲機率") +
+    kv("外資5日", esc(fmtSigned(r.Foreign_Net_5D, 0)), signClass(r.Foreign_Net_5D), "最近5筆法人資料（張）");
+
+  const valid = String(r.Rec_Valid_Until || "").slice(0, 10);
+  const recLine = r.Recommendation_ID
+    ? `<div class="hint">建議編號 ${esc(r.Recommendation_ID)}｜狀態 ${esc(r.Rec_Status || "未提供")}${valid ? `｜有效至 ${esc(valid)}` : ""}</div>`
+    : `<div class="hint">此列尚無固定建議編號（後端未建立 recommendation）。</div>`;
+
+  return `<article class="card pick ${scoreTier(r)} ${v.ok ? "state-buy" : ""}">
+    <div class="card-head">
+      <span class="rank">${r._rank}</span>
+      <span class="name">${esc(r.Stock_Name || r.Stock_ID)}</span>
+      <span class="code">${esc(r.Stock_ID)}</span>
+      <span class="market">${esc(r.Market || "")}</span>
+    </div>
+    <div class="badges">${badge}${held ? '<span class="verdict held">已有持倉</span>' : ""}${
+      r.Integrity_OK === false ? '<span class="verdict no">資料完整性未通過</span>' : ""}</div>
+    ${recLine}
+    <div class="kv2">${grid}</div>
+    <div class="btns">
+      ${btn("buy", "登錄買入", "primary", { id: r.Stock_ID })}
+      ${btn("detail", "指標詳情", "", { id: r.Stock_ID })}
+    </div>
+  </article>`;
 }
 
-// Buy-rule counter: how many rows the validated rule actually buys today --
-// the FULL rule (market gate + top-20 + OTC + 核心+ + fresh signal), not just
-// the quality gate. 0 with a healthy feed = a NORMAL no-trade day; the old UI
-// could not distinguish that from a broken feed, and worse, it counted names
-// on days the market gate said "open nothing" (2026-07/08: 10 of 25 days).
-function renderTradeable(degraded) {
-  const el = $("#tradeable");
-  if (degraded) { el.className = "tradeable"; el.textContent = ""; return; }
-  const n = ALL_ROWS.filter(buyable).length;
-  if (n > 0) {
-    el.textContent = `今日符合買進規則（順風 + OTC 核心+ 新訊號）：${n} 檔`;
-    el.className = "tradeable show on";
-  } else if (!ENTER_OK) {
-    // Name the blocker: the list is not empty, the gate is shut.
-    const q = ALL_ROWS.filter((r) =>
-      r._rank <= 20 && r.Core_Plus && String(r.Market) === "OTC").length;
-    el.textContent = q > 0
-      ? `今日 0 檔可買 · 大盤未站上 20/60MA，${q} 檔過品質閘門但一律不開新倉`
-      : "今日 0 檔可買 · 大盤未站上 20/60MA，暫停開新倉";
-    el.className = "tradeable show off";
-  } else {
-    el.textContent = "今日 0 檔符合買進規則 · 正常空手日（資料源正常，非故障）";
-    el.className = "tradeable show off";
-  }
-}
+// --- 11.3 我的持倉 (report 7.3) ----------------------------------------------
+function renderPositions() {
+  const list = activePositions();
+  const pending = pendingItems();
+  const pendingIds = new Set(pending.map((p) => p.pos.position_id));
 
-function renderRegime(reg) {
-  const el = $("#regime");
-  if (!reg || !reg.ok) { el.className = "regime"; el.textContent = ""; return; }
-  // strong = TAIEX >=2.2% above its 20MA (sandbox C2, sizing hint only --
-  // weaker tailwind days were the losing years' habitat in the 6y replay).
-  if (reg.enter_ok && reg.strong) { el.textContent = "大盤強順風 · 可開新倉"; el.className = "regime on"; }
-  else if (reg.enter_ok) { el.textContent = "大盤順風（20MA上緣 <2.2%）· 可開新倉、部位減量"; el.className = "regime on"; }
-  else if (reg.risk_on) { el.textContent = "大盤中性（跌破 20MA）· 新倉保守"; el.className = "regime mid"; }
-  else { el.textContent = "大盤逆風（跌破 60MA）· 暫緩開新倉、減碼"; el.className = "regime off"; }
-}
-
-// AI report for the CURRENT market filter (OTC filter shows the OTC report),
-// matching the desktop "summarize what is shown" behaviour.
-function renderReport() {
-  const panel = $("#aiPanel");
-  const txt = REPORTS[MARKET] || REPORTS.ALL || "";
-  if (!txt) { panel.textContent = "（本次掃描沒有 AI 報告；於雲端設定 API 金鑰後即會出現）"; return; }
-  panel.textContent = (MARKET === "ALL" ? "" : "【" + MARKET + " 專屬】\n") + txt;
-}
-
-function buildControls() {
-  // Market chips
-  const mk = $("#market");
-  [["ALL", "全部"], ["OTC", "OTC"], ["TSE", "TSE"]].forEach(([k, label]) => {
-    const b = document.createElement("button");
-    b.textContent = label;
-    b.className = "chip" + (MARKET === k ? " on" : "");
-    b.onclick = () => {
-      MARKET = k;
-      mk.querySelectorAll(".chip").forEach((c) => c.classList.remove("on"));
-      b.classList.add("on");
-      renderReport();
-      apply();
-    };
-    mk.appendChild(b);
+  // Report 7.4: anything expired, data-broken or awaiting a fill is PINNED to
+  // the top and can never be hidden by a score or by dropping off the list.
+  const bucket = (p) => (pendingIds.has(p.position_id) ? 0 : p.status === "closed" ? 2 : 1);
+  list.sort((a, b) => {
+    const d = bucket(a) - bucket(b);
+    if (d) return d;
+    return String(a.opened_session || "").localeCompare(String(b.opened_session || ""));
   });
-  // Sort select
-  const sel = $("#sort");
-  SORTS.forEach(([label], i) => {
-    const o = document.createElement("option");
-    o.value = i; o.textContent = label; sel.appendChild(o);
+
+  const backup = `<div class="notice warn">🔒 持倉與成交只存在這支手機（IndexedDB），清除瀏覽器資料就會消失。請定期「匯出備份」。</div>
+    <div class="btns">${btn("export", "匯出備份 JSON", "")}${btn("import", "匯入備份", "")}</div>`;
+
+  const body = list.length
+    ? list.map((p) => positionCard(p, pendingIds.has(p.position_id))).join("")
+    : `<div class="empty-inline">尚未登錄任何持倉。到「建議」頁選一檔後按「登錄買入」，或按下方手動新增。</div>`;
+
+  document.getElementById("page-positions").innerHTML =
+    backup +
+    `<div class="btns">${btn("buy", "手動新增持倉", "primary", { id: "" })}</div>` +
+    body;
+}
+
+function positionCard(pos, pinned) {
+  const m = latestMark(pos.position_id);
+  const plan = activePlan(pos);
+  const horizon = pos.horizon_days || STRATEGY.horizon;
+  const inList = STATE.rows.some((r) => String(r.Stock_ID) === pos.stock_id);
+
+  if (pos.needs_shares) {
+    return `<article class="card pos state-attention pin">
+      <div class="card-head">
+        <span class="name">${esc(pos.stock_name || pos.stock_id)}</span>
+        <span class="code">${esc(pos.stock_id)}</span>
+        <span class="state-chip attention">待補股數</span>
+      </div>
+      <div class="notice warn">由舊版手機資料匯入。舊格式沒有股數，系統不會替你猜一個數量，請補登實際成交。</div>
+      ${kv("匯入的成交價參考", esc(pos.legacy_fill ? fmtPrice(pos.legacy_fill) : "-"), "",
+           pos.legacy_entry ? `舊資料進場日 ${pos.legacy_entry}` : "")}
+      <div class="btns">
+        ${btn("buy", "補登實際成交", "primary", { pos: pos.position_id })}
+        ${btn("void-pos", "撤銷誤登", "", { pos: pos.position_id })}
+      </div>
+    </article>`;
+  }
+
+  // The holding-day count comes from the CALENDAR, not from the price feed:
+  // a missing quote should not also cost us the answer to "how long have I
+  // held this". Only a date the calendar does not know yields "unknown".
+  // A closed position is settled: its P&L is realised, there is nothing left to
+  // value and no exit plan to follow. It stays listed until 封存 so that
+  // "sold" and "filed away" remain two separate, explicit steps.
+  if (pos.status === "closed") {
+    return `<article class="card pos state-closed">
+      <div class="card-head">
+        <span class="name">${esc(pos.stock_name || pos.stock_id)}</span>
+        <span class="code">${esc(pos.stock_id)}</span>
+        <span class="state-chip">已平倉 · 待封存</span>
+      </div>
+      <div class="kv2">
+        ${kv("已實現淨損益", esc(fmtPnl(pos.realized_net)), signClass(pos.realized_net), "已扣實際手續費與交易稅")}
+        ${kv("持有期間", esc(`${pos.opened_session || "?"} → ${pos.closed_session || "?"}`), "",
+             `共 ${dayIndexBetween(pos.opened_session, pos.closed_session, CAL) || "?"} 個交易日`)}
+      </div>
+      <div class="plan">此筆已無持股，之後的行情不再影響它的損益。封存後仍可在「績效與歷史」查到。</div>
+      <div class="btns">
+        ${btn("archive", "封存已結束紀錄", "primary", { pos: pos.position_id })}
+        ${btn("execs", "補登／更正成交", "", { pos: pos.position_id })}
+        ${btn("cycle", `${horizon}日明細`, "", { pos: pos.position_id })}
+      </div>
+    </article>`;
+  }
+
+  const dayIdx = (m && m.day_index !== null)
+    ? m.day_index
+    : dayIndexBetween(pos.opened_session, sessionOnOrBefore(taipeiDate(new Date())), CAL);
+  let stateText, stateCls;
+  if (dayIdx === null) { stateText = "持有中 · 天數未知（日期不在已知交易日曆內）"; stateCls = "attention"; }
+  else if (dayIdx > horizon) { stateText = `已超過計畫 · D${dayIdx} / ${horizon}`; stateCls = "overdue"; }
+  else if (dayIdx === horizon) { stateText = `第 ${horizon} 天已到 · 待登錄賣出`; stateCls = "exit"; }
+  else { stateText = `持有中 · D${dayIdx} / ${horizon}`; stateCls = "holding"; }
+
+  // With no close there is no valuation, and "持平 +0 元" would be a lie of the
+  // exact kind report 4.3 forbids: a missing bar is not a flat day.
+  const priced = !!(m && m.close_price !== null);
+  const cum = priced ? m.total_gross : null;
+  const cumPct = (priced && pos.avg_cost)
+    ? pctOf(m.close_price - pos.avg_cost, pos.avg_cost) : null;
+  const day = priced ? m.day_pnl_gross : null;
+
+  const pl = `<div class="pl-row">
+    <div class="pl">
+      <span class="pl-l">累計損益（價差）</span>
+      <span class="pl-v ${signClass(cum)}">${cum === null ? "無法估值" : esc(fmtPnl(cum))}</span>
+      <span class="pl-s">${cumPct === null ? "此檔無收盤價，僅已實現部分為確定值"
+        : esc(fmtPct(cumPct)) + "（未扣未來賣出費稅）"}</span>
+    </div>
+    <div class="pl">
+      <span class="pl-l">今日損益</span>
+      <span class="pl-v ${signClass(day)}">${day === null ? "無法估值" : esc(fmtPnl(day))}</span>
+      <span class="pl-s">${m ? esc(`估值：${m.session_date} ${DATA_STATUS_TEXT[m.data_status] || ""}`) : "尚無估值"}</span>
+    </div>
+  </div>`;
+
+  const grid =
+    kv("實際成本（移動加權平均）", esc(fmtPrice(pos.avg_cost)), "gold",
+       `帳面成本 ${fmtCents(pos.cost_basis)} 元（含買入手續費）`) +
+    kv("持有股數", esc(pos.open_shares.toLocaleString("en-US")) + " 股",
+       "", `${(pos.open_shares / 1000).toFixed(pos.open_shares % 1000 ? 3 : 0)} 張`) +
+    kv("最新收盤價", m && m.close_price !== null ? esc(fmtPrice(m.close_price)) : "-", "",
+       m ? `${m.session_date}｜${DATA_STATUS_TEXT[m.data_status] || m.data_status}` : "無報價") +
+    kv("首日建議價", pos.initial_buy_price ? esc(fmtPrice(pos.initial_buy_price)) : "-", "",
+       pos.initial_buy_price ? "固定，不隨掃描改動" : "此持倉未連結固定建議") +
+    kv("有效停損", plan ? esc(fmtPrice(plan.stop)) : "-", "",
+       plan ? `可掛單 ${fmtPrice(plan.stop_orderable)}（依升降單位）` : "") +
+    kv("停利目標", plan ? esc(fmtPrice(plan.target)) : "-", "gold",
+       plan ? `條件價 · 可掛單 ${fmtPrice(plan.target_orderable)}` : "") +
+    kv("已實現淨損益", esc(fmtPnl(pos.realized_net)), signClass(pos.realized_net), "已扣實際費稅") +
+    kv("若今日全數賣出", m && m.net_if_liquidated !== null ? esc(fmtPnl(m.net_if_liquidated)) : "-",
+       m && m.net_if_liquidated !== null ? signClass(m.net_if_liquidated) : "",
+       "估計值，扣掉賣出費稅");
+
+  // Report 5.4: "+2% 這個數字不代表已經保住該獲利" -- the threshold is a
+  // CONDITION, and armed / not-armed must look obviously different.
+  const trail = plan
+    ? (plan.armed
+        ? `<div class="plan armed">鎖利：已啟動（曾達 ${esc(fmtPrice(plan.highest_close))}，${esc(plan.armed_on)}）· 有效停損已上調至 ${esc(fmtPrice(plan.stop))}，只升不降</div>`
+        : `<div class="plan">鎖利：尚未啟動；啟動門檻 ${esc(fmtPrice(plan.arm))}（條件，非已達成）· 未啟動前停損維持 ${esc(fmtPrice(plan.initial_stop))}</div>`)
+    : "";
+
+  const advice = dayIdx === null
+    ? `<div class="plan">建議：無法計算持有天數，請確認成交日期。</div>`
+    : dayIdx >= horizon
+      ? `<div class="plan alert">建議：第 ${horizon} 個交易日已到，依策略應於收盤出場；實際賣出以你的成交回報為準。</div>`
+      : `<div class="plan">建議：續抱，下一個交易日重新評估（收盤後更新）。</div>`;
+
+  return `<article class="card pos state-${stateCls}${pinned ? " pin" : ""}">
+    <div class="card-head">
+      <span class="name">${esc(pos.stock_name || pos.stock_id)}</span>
+      <span class="code">${esc(pos.stock_id)}</span>
+      <span class="state-chip ${stateCls}">${esc(stateText)}</span>
+    </div>
+    ${inList ? "" : `<div class="hint">已不在今日名單 · 追蹤與估值持續（報價來自 quotes.json）</div>`}
+    ${pl}
+    <div class="kv2">${grid}</div>
+    ${trail}
+    ${advice}
+    <div class="btns">
+      ${btn("sell", "登錄賣出", "primary", { pos: pos.position_id })}
+      ${btn("execs", "補登／更正成交", "", { pos: pos.position_id })}
+      ${btn("cycle", `${horizon}日明細`, "", { pos: pos.position_id })}
+      ${pos.open_shares === 0 ? btn("archive", "封存已結束紀錄", "", { pos: pos.position_id }) : ""}
+    </div>
+  </article>`;
+}
+
+// --- 11.4 績效與歷史 ---------------------------------------------------------
+function renderPerf() {
+  const closed = STATE.positions.filter((p) => p.status === "closed" || p.status === "archived");
+  const voided = STATE.positions.filter((p) => p.status === "void");
+  const cycles = Object.values(STATE.cycles);
+  const s = portfolioSummary();
+
+  const cycleRows = cycles.length ? `<table class="tbl">
+    <thead><tr><th>股票</th><th>估值日</th><th>D</th><th>價差損益</th><th>相對首日建議</th><th>相對實際成本</th><th>狀態</th></tr></thead>
+    <tbody>${cycles.map((c) => `<tr>
+      <td>${esc(c.stock_name || c.stock_id)}<br><span class="sm">${esc(c.stock_id)}</span></td>
+      <td>${esc(c.session_date)}</td>
+      <td>${c.day_index === null ? "-" : c.day_index}</td>
+      <td class="${signClass(c.total_gross)}">${esc(fmtCents(c.total_gross, { signed: true }))}</td>
+      <td>${esc(fmtPct(c.return_vs_initial))}</td>
+      <td>${esc(fmtPct(c.return_vs_cost))}</td>
+      <td>${c.still_open ? "仍持有" : "已平倉"}${c.restated_at ? " · 已更正" : ""}</td>
+    </tr>`).join("")}</tbody></table>
+    <div class="hint">十日成果在第 ${STRATEGY.horizon} 個交易日凍結，之後的價格不會改寫它；仍持有的部位另在「持倉」頁繼續估值。</div>`
+    : `<div class="empty-inline">尚無已凍結的十日成果（需要持倉滿 ${STRATEGY.horizon} 個交易日，或提前平倉）。</div>`;
+
+  const closedRows = closed.length ? `<table class="tbl">
+    <thead><tr><th>股票</th><th>期間</th><th>已實現淨損益</th><th>狀態</th></tr></thead>
+    <tbody>${closed.map((p) => `<tr>
+      <td>${esc(p.stock_name || p.stock_id)}<br><span class="sm">${esc(p.stock_id)}</span></td>
+      <td>${esc(p.opened_session || "?")} → ${esc(p.closed_session || "?")}</td>
+      <td class="${signClass(p.realized_net)}">${esc(fmtPnl(p.realized_net))}</td>
+      <td>${p.status === "archived" ? "已封存" : "已平倉"}</td>
+    </tr>`).join("")}</tbody></table>`
+    : `<div class="empty-inline">尚無已平倉紀錄。</div>`;
+
+  const gapNote = s.valuation_complete ? ""
+    : `<div class="notice warn">估值不完整：${esc(s.stale.map((x) =>
+        `${x.pos.stock_id}${x.as_of ? "（沿用 " + x.as_of + "）" : "（無估值）"}`).join("、"))}</div>`;
+
+  document.getElementById("page-perf").innerHTML =
+    gapNote +
+    `<div class="sec"><h2>已凍結的十日成果</h2>${cycleRows}</div>` +
+    `<div class="sec"><h2>已平倉／封存</h2>${closedRows}</div>` +
+    (voided.length ? `<div class="sec"><h2>已撤銷（誤登）</h2><div class="hint">資料保留、不計入損益：${
+      esc(voided.map((p) => p.stock_id).join("、"))}</div></div>` : "") +
+    `<div class="sec"><h2>建議 vs 實際</h2><div class="hint">
+      「相對首日建議」用固定的 Initial_Buy_Price 當分母，「相對實際成本」用你的移動加權平均成本。
+      兩個數字都可能是對的，但不能共用同一個標題（報告 6.2）。</div></div>`;
+}
+
+// --- 11.5 研究與資料狀態 ------------------------------------------------------
+function renderResearch() {
+  const m = STATE.meta;
+  const q = STATE.quotes;
+  const test = selfTest();
+  const reg = m.regime || {};
+
+  const quality = m.quality && Object.keys(m.quality).length
+    ? Object.entries(m.quality).map(([k, v]) =>
+        drow(k, esc(typeof v === "object" ? JSON.stringify(v) : String(v)))).join("")
+    : `<div class="hint">本次掃描沒有附品質欄位。</div>`;
+
+  const quotesBlock = q
+    ? drow("報價檔", `${esc(q.as_of || "?")}｜${q.count || 0} 檔｜${(q.sessions || []).length} 個交易日`) +
+      drow("涵蓋持倉", esc(String(q.tracked_count === undefined ? "未提供" : q.tracked_count))) +
+      drow("價格基準", `${esc(q.price_basis || "未標示")}${
+        q.price_basis === "unverified" ? "（尚未與券商對帳，僅供估值）" : ""}`) +
+      drow("缺漏", esc((q.missing || []).join("、") || "無"))
+    : `<div class="notice warn">quotes.json 不可用（${esc(STATE.quotesError || "未知")}）。持倉估值沿用先前存在裝置上的 marks，日期見各卡片。</div>`;
+
+  const calBlock =
+    drow("已知交易日", `${CAL.length} 天${CAL.length ? `（${esc(CAL[0])} → ${esc(CAL_LAST)}）` : ""}`) +
+    drow("今日（台北時區）", esc(taipeiDate(new Date()))) +
+    drow("對應最後交易日", esc(sessionOnOrBefore(taipeiDate(new Date())) || "未知")) +
+    drow("超出日曆之後的日期", "顯示為未知，不外推平日（F14）");
+
+  const testBlock = `<div class="notice ${test.pass ? "ok" : "err"}">
+      內建計算自我檢查（報告 6.2 例子）：${test.pass ? "通過" : "失敗"}</div>
+    <table class="tbl"><thead><tr><th>項目</th><th>應為</th><th>實際</th></tr></thead><tbody>
+    ${test.checks.map((c) => `<tr class="${c.ok ? "" : "neg"}"><td>${esc(c.name)}</td><td>${esc(c.want)}</td><td>${esc(c.got)}</td></tr>`).join("")}
+    </tbody></table>
+    <div class="hint">此檢查在你的手機上實際跑一次持倉引擎：建議價 100、成交 102、1,000 股，10 天收盤
+      103,101,105,106,104,108,107,110,109,112。它同時驗證「不可把每日累計值相加」——相加會得到 45,000。</div>`;
+
+  const glossary = [
+    ["最新收盤價", "本次分析序列的最新收盤，附資料日期；不是盤中價"],
+    ["首日建議價", "第一次通過完整買進規則時固定下來，之後不再改動"],
+    ["最新觀察參考", "每次掃描重算的參考價，不是新的買進指令"],
+    ["停損距離%", "價格到停損價的距離，不是虧損機率，也不是帳戶風險"],
+    ["20日平均日振幅%", "20日平均 (最高-最低)/收盤，未含前收跳空，故不等於標準 ATR"],
+    ["通道上緣接近", "壓縮區間且收盤接近前40日高的97%，不一定真的突破"],
+    ["近3日均量/20日均量", "量能萎縮比，不是當日單日量縮"],
+    ["距近一年最高收盤", "比較約252筆的收盤最高，不是盤中歷史最高"],
+    ["起漲條件分 / 動能分 / 盤整蓄勢分", "都是規則分數，不是上漲機率"],
+    ["上漲日量能占比", "上漲日成交量佔上漲＋下跌日成交量的比例，不等於主力吸籌證據"],
+  ].map(([k, v]) => drow(k, esc(v))).join("");
+
+  document.getElementById("page-research").innerHTML =
+    `<div class="sec"><h2>資料狀態</h2>` +
+      drow("模式", esc(m.mode || "未知")) +
+      drow("策略版本", esc(m.strategy_version || "未提供")) +
+      drow("掃描時間", esc(m.scan_time || "未知")) +
+      drow("行情資料日", esc(effectiveDataDate() || "未知") + (m.data_date ? "" : "（取自個股 Data_Date）")) +
+      drow("交易日 session", esc(m.session_date || "未知")) +
+      drow("入選檔數", esc(String(m.count === undefined ? STATE.rows.length : m.count))) +
+      drow("資料源異常", esc(m.degraded || "無")) +
+      quotesBlock +
+    `</div>` +
+    `<div class="sec"><h2>大盤判定</h2>` +
+      drow("可否開新倉", reg.enter_ok ? "是" : "否") +
+      drow("判定資料日", esc(reg.as_of_date || "未提供")) +
+      drow("判定是否為最新", reg.is_current === false ? "否（不視為順風）" : reg.is_current === true ? "是" : "未提供") +
+      drow("說明", esc(reg.text || "-")) +
+    `</div>` +
+    `<div class="sec"><h2>交易日曆</h2>${calBlock}</div>` +
+    `<div class="sec"><h2>掃描品質欄位</h2>${quality}</div>` +
+    `<div class="sec"><h2>自我檢查</h2>${testBlock}</div>` +
+    `<div class="sec"><h2>資料管理</h2>
+      <div class="hint">持倉資料只存在本機瀏覽器，換手機或清除資料都會消失。</div>
+      <div class="btns">${btn("export", "匯出備份 JSON", "primary")}${btn("import", "匯入備份", "")}</div>
+      <div class="hint">費率設定：${esc(schedule(STATE.settings.fee_schedule).label)}</div>
+      <div class="btns">${btn("fees", "切換費率版本", "")}</div>
+    </div>` +
+    `<div class="sec"><h2>欄位含義（報告第 8 節）</h2>${glossary}</div>` +
+    strategyCardHtml() +
+    `<div class="sec"><h2>免責</h2><div class="hint">所有分數與價位都是規則計算結果，不是報酬保證。「隔日開盤進場」是計畫，實際成交依券商回報；集合競價只接受限價委託，不保證以開盤價成交。</div></div>`;
+}
+
+/* ============================================================================
+ * 12. Modal, forms and actions
+ * ==========================================================================*/
+
+function openModal(title, bodyHtml, opts) {
+  const o = opts || {};
+  const modal = $("#modal");
+  modal.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+    <div class="sheet-head"><h3>${esc(title)}</h3>
+      <button type="button" class="x" data-act="close">✕</button></div>
+    <div class="sheet-body">${bodyHtml}</div>
+    ${o.noFoot ? "" : `<div class="sheet-foot">${
+      btn("close", "取消", "")}${o.submit ? btn(o.submit, o.submitLabel || "儲存", "primary", o.submitData || {}) : ""}</div>`}
+  </div>`;
+  modal.hidden = false;
+  if (o.onOpen) o.onOpen(modal);
+}
+
+function closeModal() {
+  const modal = $("#modal");
+  modal.hidden = true;
+  modal.innerHTML = "";
+}
+
+function field(name, label, value, opts) {
+  const o = opts || {};
+  return `<label class="field">
+    <span class="f-l">${esc(label)}</span>
+    <input class="f-i" name="${esc(name)}" type="${o.type || "text"}"
+      inputmode="${o.inputmode || "text"}" value="${esc(value === null || value === undefined ? "" : value)}"
+      placeholder="${esc(o.placeholder || "")}" ${o.attrs || ""} />
+    ${o.hint ? `<span class="f-h">${esc(o.hint)}</span>` : ""}
+    <span class="f-e" data-err="${esc(name)}"></span>
+  </label>`;
+}
+
+// The buy / sell / amend form. F11: this replaces prompt(). Bad input is
+// REFUSED with the reason, never silently swapped for a reference price.
+async function openExecutionForm(cfg) {
+  const pos = cfg.position || null;
+  const row = cfg.row || null;
+  const editing = cfg.execution || null;
+  const side = cfg.side || (editing ? editing.side : "BUY");
+  const isBuy = side === "BUY";
+  const held = pos ? pos.open_shares : 0;
+
+  const today = taipeiDate(new Date());
+  const defDate = editing ? editing.session_date
+    : (sessionOnOrBefore(today) || today);
+  const defPrice = editing ? (editing.price_cents / 100).toFixed(2) : "";
+  const defShares = editing ? String(editing.shares) : "";
+
+  const stockLine = pos
+    ? `${pos.stock_name || pos.stock_id}（${pos.stock_id}）`
+    : row ? `${row.Stock_Name || row.Stock_ID}（${row.Stock_ID}）` : "";
+
+  const refNote = [];
+  if (row) {
+    const init = cents(row.Initial_Buy_Price);
+    if (init !== null) refNote.push(`首日建議價 ${fmtCents(init)}（固定）`);
+    const ref = cents(row.Suggested_Buy_Price);
+    if (ref !== null) refNote.push(`最新觀察參考 ${fmtCents(ref)}`);
+    const close = cents(row.Close_Price);
+    if (close !== null) refNote.push(`最新收盤 ${fmtCents(close)}`);
+  }
+
+  const manual = !pos && !row;
+  const body = `
+    ${stockLine ? `<div class="form-title">${esc(stockLine)}</div>` : ""}
+    ${manual ? field("stock_id", "股票代號", "", { inputmode: "numeric", hint: "例如 3088" }) +
+               field("stock_name", "股票名稱（可留空）", "") : ""}
+    ${refNote.length ? `<div class="hint">參考價：${esc(refNote.join("｜"))}。這些只是參考，系統不會替你填成交價。</div>` : ""}
+    ${field("session_date", "成交日期", defDate, { type: "date", hint: "沒有成交日就無法放上損益時間軸" })}
+    ${field("price", isBuy ? "實際成交價" : "實際賣出價", defPrice, { inputmode: "decimal", hint: "必填。輸入非數字或 0 會被拒絕，不會用參考價代替" })}
+    ${field("shares", "股數", defShares, { inputmode: "numeric",
+      hint: isBuy ? "1 張 = 1,000 股；零股請直接填股數" : `目前持有 ${held.toLocaleString("en-US")} 股，可部分賣出` })}
+    ${field("fee", "手續費（留空＝依費率自動計算）", editing ? (editing.fee_cents / 100).toFixed(2) : "", { inputmode: "decimal" })}
+    ${isBuy ? "" : field("tax", "交易稅（留空＝賣出金額 0.3%）", editing ? (editing.tax_cents / 100).toFixed(2) : "", { inputmode: "decimal" })}
+    ${field("note", "備註", editing ? editing.note : "")}
+    <div class="calc" id="calcBox">－</div>
+    <div class="hint">費率版本：${esc(schedule(STATE.settings.fee_schedule).label)}。與券商對帳單不同時，直接填入對帳單金額。</div>`;
+
+  openModal(isBuy ? (editing ? "更正買入成交" : "登錄買入") : (editing ? "更正賣出成交" : "登錄賣出"), body, {
+    submit: "exec-save",
+    submitLabel: "儲存",
+    submitData: {
+      pos: pos ? pos.position_id : "",
+      row: row ? row.Stock_ID : "",
+      side,
+      edit: editing ? editing.execution_id : "",
+    },
+    onOpen(modal) {
+      const recalc = () => {
+        const v = readForm(modal);
+        const p = cents(v.price), sh = /^\d+$/.test(String(v.shares || "")) ? Number(v.shares) : null;
+        const box = modal.querySelector("#calcBox");
+        if (!p || !sh) { box.textContent = "填入成交價與股數後顯示總金額"; return; }
+        const sched = schedule(STATE.settings.fee_schedule);
+        const consideration = p * sh;
+        const fee = cents(v.fee) !== null && String(v.fee).trim() !== "" ? cents(v.fee) : feeFor(sched, consideration);
+        const tax = isBuy ? 0
+          : (cents(v.tax) !== null && String(v.tax).trim() !== "" ? cents(v.tax) : taxFor(sched, consideration));
+        box.textContent = isBuy
+          ? `成交金額 ${fmtCents(consideration)}＋手續費 ${fmtCents(fee)} ＝ 總投入 ${fmtCents(consideration + fee)} 元`
+          : `賣出金額 ${fmtCents(consideration)}－手續費 ${fmtCents(fee)}－交易稅 ${fmtCents(tax)} ＝ 淨收 ${fmtCents(consideration - fee - tax)} 元`;
+      };
+      modal.querySelectorAll("input").forEach((i) => i.addEventListener("input", recalc));
+      recalc();
+    },
   });
-  sel.onchange = () => { SORT_I = Number(sel.value); apply(); };
-  // AI report toggle
-  $("#aiBtn").onclick = () => $("#aiPanel").classList.toggle("show");
 }
 
-// --- Freshness watchdog -------------------------------------------------------
-// "Opening the app" on iOS usually RESUMES a backgrounded PWA, so nothing
-// reloads by itself: without this block the user stares at yesterday's scan
-// until they hit the refresh button. Rules:
-//   * every resume (visibilitychange -> visible) re-fetches the JSON and
-//     re-renders, which also refreshes the live holding-day math to "now";
-//   * the newest session we EXPECT data for = today once the 14:30 cloud scan
-//     has had time to publish (~15:30), else the previous weekday
-//     (holiday-naive: on a holiday the notice shows, wording covers it);
-//   * while the shipped data is older than that, an amber notice shows and the
-//     app silently re-polls every 5 minutes until fresh data lands.
-const STALE_POLL_MS = 5 * 60 * 1000;
-const PUBLISH_HM = 15 * 60 + 30;   // today's scan should be on Pages by 15:30
-let STALE_TIMER = null;
-
-function expectedDataDate() {
-  const now = new Date();
-  const d = new Date(now);
-  if (now.getHours() * 60 + now.getMinutes() < PUBLISH_HM) d.setDate(d.getDate() - 1);
-  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
-  return dstr(d);
+function readForm(modal) {
+  const out = {};
+  modal.querySelectorAll("input").forEach((i) => { out[i.name] = i.value; });
+  return out;
 }
 
-function updateStale(dataDate) {
-  const el = $("#stale");
-  // Clamp the naive weekday expectation onto the closure-aware calendar, so an
-  // unscheduled closure (typhoon 2026-07-10) is not waited on forever.
-  let want = expectedDataDate();
-  if (CAL.length) {
-    let w = "";
-    for (const c of CAL) { if (c <= want) w = c; else break; }
-    if (w) want = w;
-  }
-  const stale = !!dataDate && dataDate.slice(0, 10) < want;
-  if (STALE_TIMER) { clearTimeout(STALE_TIMER); STALE_TIMER = null; }
-  if (stale) {
-    el.textContent = `⏳ 等待 ${want} 掃描結果（目前為 ${dataDate}；假日則無新資料）· 每 5 分鐘自動重試`;
-    el.className = "stale show";
-    STALE_TIMER = setTimeout(load, STALE_POLL_MS);
-  } else {
-    el.className = "stale";
-    el.textContent = "";
+function showErrors(modal, errs) {
+  modal.querySelectorAll("[data-err]").forEach((e) => { e.textContent = ""; });
+  for (const [k, v] of Object.entries(errs)) {
+    const el = modal.querySelector(`[data-err="${k}"]`);
+    if (el) el.textContent = v;
   }
 }
 
-// iOS fires different events depending on how the PWA comes back (app switch,
-// bfcache restore, external-link return), so listen to all three; RESUME_GATE
-// keeps a single resume from triggering multiple parallel loads.
+async function saveExecution(data) {
+  const modal = $("#modal");
+  const v = readForm(modal);
+  let pos = data.pos ? await dbGet("positions", data.pos) : null;
+  const row = data.row ? STATE.rows.find((r) => String(r.Stock_ID) === data.row) : null;
+
+  // A manual entry needs a stock id before anything else can be validated.
+  if (!pos && !row) {
+    const sid = String(v.stock_id || "").trim();
+    if (!/^[0-9A-Za-z]{2,8}$/.test(sid)) {
+      showErrors(modal, { stock_id: "請填有效的股票代號" });
+      return;
+    }
+  }
+
+  const check = validateExecution({
+    side: data.side,
+    session_date: v.session_date,
+    price: v.price,
+    shares: v.shares,
+    fee: v.fee,
+    tax: v.tax,
+    note: v.note,
+    fee_schedule: STATE.settings.fee_schedule,
+  }, pos, pos ? pos.open_shares : 0);
+
+  if (!check.ok) { showErrors(modal, check.errs); return; }
+  showErrors(modal, {});
+
+  if (!pos) {
+    const sid = row ? String(row.Stock_ID) : String(v.stock_id || "").trim();
+    // Never open a second automatic cycle while one is still in flight
+    // (ledger._open_cycle's rule): reuse the open position for this name.
+    pos = STATE.positions.find((p) => p.stock_id === sid && p.status === "open" && !p.needs_shares) || null;
+    if (!pos) {
+      pos = await createPosition({
+        stock_id: sid,
+        stock_name: row ? (row.Stock_Name || sid) : (String(v.stock_name || "").trim() || sid),
+        market: row ? (row.Market || "") : "",
+        recommendation_id: row ? (row.Recommendation_ID || null) : null,
+        initial_buy_price: row ? cents(row.Initial_Buy_Price) : null,
+        rec_recommended_on: row ? (String(row.Recommended_On || "").slice(0, 10) || null) : null,
+        horizon_days: row && row.Hold_Total ? Number(row.Hold_Total) : STRATEGY.horizon,
+        cap_days: row && row.Hold_Cap ? Number(row.Hold_Cap) : STRATEGY.cap,
+        origin: row ? "recommended" : "manual",
+      });
+    }
+  } else if (pos.needs_shares && row === null && data.side === "BUY") {
+    pos.needs_shares = false;
+    await dbPut("positions", pos);
+  }
+
+  try {
+    await addExecution(pos.position_id, check.value,
+      data.edit ? { supersedes: data.edit, revision: 2 } : {});
+  } catch (e) {
+    showErrors(modal, { price: e.message || String(e) });
+    return;
+  }
+  closeModal();
+  toast(data.side === "BUY" ? "已登錄買入" : "已登錄賣出");
+  await load();
+}
+
+async function openExecutionList(posId) {
+  const pos = await dbGet("positions", posId);
+  const all = sortExecutions(await dbGetAll("executions", "by_position", posId));
+  const rows = all.map((e) => {
+    const dead = e.is_current !== 1;
+    return `<div class="exe ${dead ? "dead" : ""}">
+      <div class="exe-h"><b>${e.side === "BUY" ? "買進" : "賣出"}</b> ${esc(e.session_date)}
+        ${dead ? `<span class="verdict no">${esc(e.void_reason ? "已撤銷" : "已被更正取代")}</span>` : ""}</div>
+      <div class="sm">${esc(e.shares.toLocaleString("en-US"))} 股 @ ${esc(fmtCents(e.price_cents, { always: true }))}
+        ｜費 ${esc(fmtCents(e.fee_cents))}${e.side === "SELL" ? `｜稅 ${esc(fmtCents(e.tax_cents))}` : ""}
+        ｜登錄 ${esc(e.recorded_at)}</div>
+      ${dead ? "" : `<div class="btns">
+        ${btn("exec-edit", "更正這筆", "", { exe: e.execution_id })}
+        ${btn("exec-void", "撤銷誤登", "", { exe: e.execution_id })}</div>`}
+    </div>`;
+  }).join("");
+
+  openModal(`成交明細 · ${pos.stock_name || pos.stock_id}`,
+    `<div class="hint">更正會寫入新版本並保留舊紀錄；撤銷誤登不會刪除資料，只是不再計入損益。</div>` +
+    (rows || `<div class="empty-inline">尚無成交紀錄。</div>`) +
+    `<div class="btns">${btn("buy", "補登買入", "primary", { pos: posId })}${btn("sell", "補登賣出", "", { pos: posId })}</div>`,
+    { noFoot: true });
+}
+
+async function openCycleDetail(posId) {
+  const pos = await dbGet("positions", posId);
+  const marks = (STATE.marksByPos[posId] || []);
+  const cycle = STATE.cycles[posId];
+  const horizon = pos.horizon_days || STRATEGY.horizon;
+
+  const rows = marks.map((m) => `<tr class="${m.day_index === horizon ? "hl" : ""}">
+    <td>${m.day_index === null ? "?" : "D" + m.day_index}</td>
+    <td>${esc(m.session_date)}</td>
+    <td>${m.close_price === null ? "-" : esc(fmtPrice(m.close_price))}</td>
+    <td class="${signClass(m.day_pnl_gross)}">${esc(fmtCents(m.day_pnl_gross, { signed: true }))}</td>
+    <td class="${signClass(m.total_gross)}">${esc(fmtCents(m.total_gross, { signed: true }))}</td>
+    <td>${m.data_status === "current" ? "" : esc(DATA_STATUS_TEXT[m.data_status] || m.data_status)}</td>
+  </tr>`).join("");
+
+  const frozen = cycle
+    ? `<div class="notice ok">已凍結：${esc(cycle.session_date)}（D${cycle.day_index}）價差損益 ${
+        esc(fmtCents(cycle.total_gross, { signed: true }))} 元｜相對首日建議 ${esc(fmtPct(cycle.return_vs_initial))}｜相對實際成本 ${esc(fmtPct(cycle.return_vs_cost))}${
+        cycle.net_if_liquidated !== null ? `｜全數賣出估計淨額 ${esc(fmtCents(cycle.net_if_liquidated, { signed: true }))}` : ""}</div>` +
+      (cycle.revisions && cycle.revisions.length
+        ? `<div class="hint">曾更正 ${cycle.revisions.length} 次（保留舊值供追溯）。</div>` : "")
+    : `<div class="hint">尚未達第 ${horizon} 個交易日，或尚無足夠報價。</div>`;
+
+  openModal(`${horizon}日明細 · ${pos.stock_name || pos.stock_id}`,
+    frozen +
+    `<table class="tbl"><thead><tr><th>持倉日</th><th>交易日</th><th>收盤</th><th>當日損益</th><th>累計損益</th><th></th></tr></thead>
+     <tbody>${rows || `<tr><td colspan="6">尚無估值</td></tr>`}</tbody></table>
+     <div class="hint">當日損益＝當日累計 −前一日累計。累計欄不可再相加（報告 6.2）。</div>`,
+    { noFoot: true });
+}
+
+function openDetail(stockId) {
+  const r = STATE.rows.find((x) => String(x.Stock_ID) === String(stockId));
+  if (!r) return;
+  const sc = rankScore();
+  const grp = (title, body) => `<div class="sec-title">${esc(title)}</div>${body}`;
+  const lgrp = (title, chips) => `<div class="sec-title">${esc(title)}</div><div class="lights">${chips}</div>`;
+
+  const body =
+    grp("規則分數（皆為規則計算，不是機率）",
+      drow("起漲條件分" + (sc.key === "Launch_Score" ? "（本模式排序依據）" : ""), esc(fmt(r.Launch_Score, 1))) +
+      drow("動能分" + (sc.key === "Surge_Score" ? "（本模式排序依據）" : ""), esc(fmt(r.Surge_Score, 1))) +
+      drow("盤整蓄勢分", esc(fmt(r.Explosion_Score, 1))) +
+      drow("停損距離%", esc(fmt(r.Risk_Pct, 1, "%"))) +
+      drow("20日平均日振幅%", esc(fmt(r.ATR_Pct, 2, "%"))) +
+      drow("近5交易日漲幅%", esc(fmtSigned(r.Ret_5D_Pct, 1, "%"))) +
+      drow("近63交易日漲幅%", esc(fmtSigned(r.Gain_3M_Pct, 1, "%"))) +
+      drow("箱型壓縮度（比值）", esc(fmt(r.Range_Tightness, 4))) +
+      drow("近3日均量/20日均量", esc(fmt(r.Volume_Dryup, 4))) +
+      drow("上漲日量能占比", esc(fmt(r.Volume_Bias, 4)))) +
+    grp("每日法人買賣超（張）",
+      drow("外資", esc(fmtSigned(r.Foreign_Net, 0))) +
+      drow("投信", esc(fmtSigned(r.Trust_Net, 0))) +
+      drow("外資近5筆累計", esc(fmtSigned(r.Foreign_Net_5D, 0))) +
+      drow("外資近5筆買超天數", esc(fmt(r.Inst_Buy_Days, 0)))) +
+    grp("集保籌碼（週更新，400,001股以上級距）",
+      drow("400張+持股%", esc(fmt(r.Large_Holder_Pct, 2, "%"))) +
+      drow("大戶變動（百分點）", esc(fmtSigned(r.Large_Pct_Change, 4))) +
+      drow("散戶持股%", esc(fmt(r.Retail_Pct, 2, "%"))) +
+      drow("散戶變動（百分點）", esc(fmtSigned(r.Retail_Pct_Change, 4)))) +
+    lgrp("訊號燈號",
+      lightChip("箱縮", r.Cond_A) + lightChip("上漲日量能偏多", r.Cond_C) +
+      lightChip("大戶增加", r.Cond_B) + lightChip("MA多頭排列", r.MA_Bull_Align) +
+      lightChip("通道上緣接近", r.Donchian_Break) + lightChip("MACD金叉", r.MACD_Cross)) +
+    grp("距離（%）",
+      drow("距支撐%", esc(fmt(r.Sup_Gap_Pct, 1, "%"))) +
+      drow("距壓力%", esc(fmt(r.Res_Gap_Pct, 1, "%"))) +
+      drow("距近一年最高收盤%", esc(fmt(r.Dist_52W_High_Pct, 1, "%"))) +
+      drow("RS超額（百分點，對 TAIEX）", esc(fmtSigned(r.RS_Score, 1)))) +
+    lgrp("線型輔助指標",
+      lightChip("MA糾結", r.MA_Squeeze) + lightChip("趨勢線突破", r.Trend_Breakout) +
+      lightChip("MACD柱轉正", r.MACD_Hist_Turn) + lightChip("近一年高位", r.Near_52W_High) +
+      lightChip("RS強勢", r.RS_Strong) + lightChip("夾縫爆發", r.Squeeze)) +
+    grp("均線",
+      drow("5MA", esc(fmt(r.MA5, 2))) + drow("10MA", esc(fmt(r.MA10, 2))) +
+      drow("20MA", esc(fmt(r.MA20, 2))) + drow("60MA", esc(fmt(r.MA60, 2)))) +
+    grp("壓力 / 支撐 / 收盤價量分布區",
+      drow("關鍵支撐", esc(fmt(r.Support_Used, 2))) +
+      drow("前60交易日高", esc(fmt(r.Resist_60H, 2))) +
+      drow("20日低", esc(fmt(r.Support_20L, 2))) +
+      drow("60日低", esc(fmt(r.Support_60L, 2))) +
+      drow("整數關卡", esc(fmt(r.Round_Level, 2))) +
+      drow("Zone 1", esc(fmt(r.VP_Zone1, 2))) +
+      drow("Zone 2", esc(fmt(r.VP_Zone2, 2))) +
+      drow("Zone 3", esc(fmt(r.VP_Zone3, 2)))) +
+    grp("缺口（不保證仍未回補）",
+      drow("跳空支撐", esc(fmt(r.Gap_Up_Sup, 2))) +
+      drow("跳空壓力", esc(fmt(r.Gap_Dn_Res, 2)))) +
+    grp("資料品質",
+      drow("完整性", r.Integrity_OK === false ? "未通過" : r.Integrity_OK === true ? "通過" : "未提供") +
+      drow("旗標", esc(r.Integrity_Flags || "無")) +
+      drow("資料日", esc(String(r.Data_Date || "").slice(0, 10) || "未知")));
+
+  openModal(`${r.Stock_Name || r.Stock_ID}（${r.Stock_ID}）`, body, { noFoot: true });
+}
+
+/* ============================================================================
+ * 13. Migration, export and import
+ * ==========================================================================*/
+
+const LEGACY_KEY = "yt_holdings_v1";
+
+// Report 11.5: import the phone's old localStorage holdings, but the old shape
+// {id,name,market,entry,fill,total,cap,added} has NO SHARE COUNT. Inventing a
+// quantity would fabricate a P&L, so the position is created empty, flagged
+// 待補股數, and the user is asked. The legacy blob is kept in `meta` untouched.
+async function migrateLegacy() {
+  if (await metaGet("migrated_localstorage")) return 0;
+  let legacy = {};
+  try { legacy = JSON.parse(localStorage.getItem(LEGACY_KEY)) || {}; }
+  catch (e) { legacy = {}; }
+  const items = Object.values(legacy);
+  await metaSet("legacy_backup", legacy);
+  let n = 0;
+  for (const h of items) {
+    const sid = String(h.id || "").trim();
+    if (!sid) continue;
+    if (STATE.positions.some((p) => p.stock_id === sid && p.origin === "migrated")) continue;
+    await createPosition({
+      stock_id: sid,
+      stock_name: h.name || sid,
+      market: h.market || "",
+      origin: "migrated",
+      needs_shares: true,
+      legacy_fill: cents(h.fill),
+      legacy_entry: String(h.entry || "").slice(0, 10) || null,
+      horizon_days: Number(h.total) || STRATEGY.horizon,
+      cap_days: Number(h.cap) || STRATEGY.cap,
+      note: "由舊版 localStorage 匯入，缺少股數",
+    });
+    n += 1;
+  }
+  await metaSet("migrated_localstorage", { at: nowStamp(), count: n });
+  return n;
+}
+
+async function exportBackup() {
+  const positions = await dbGetAll("positions");
+  const executions = await dbGetAll("executions");
+  const meta = await dbGetAll("meta");
+  const payload = {
+    schema: "yentool-mobile-ledger",
+    version: 1,
+    exported_at: nowStamp(),
+    positions, executions,
+    meta: meta.filter((m) => !String(m.key).startsWith("legacy_backup")),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `yentool-ledger-${taipeiDate(new Date())}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  toast("已匯出備份檔");
+}
+
+function openImport() {
+  openModal("匯入備份", `
+    <div class="notice warn">匯入會以檔案內容覆蓋相同 ID 的持倉與成交紀錄。建議先匯出目前資料。</div>
+    <input class="f-i" type="file" id="importFile" accept="application/json,.json" />
+    <div class="f-e" id="importErr"></div>`, {
+    submit: "import-run", submitLabel: "匯入",
+  });
+}
+
+async function runImport() {
+  const input = document.getElementById("importFile");
+  const err = document.getElementById("importErr");
+  const file = input && input.files && input.files[0];
+  if (!file) { err.textContent = "請先選擇檔案"; return; }
+  let data;
+  try { data = JSON.parse(await file.text()); }
+  catch (e) { err.textContent = "不是有效的 JSON 檔"; return; }
+  if (!data || data.schema !== "yentool-mobile-ledger" || !Array.isArray(data.positions)) {
+    err.textContent = "檔案格式不符（需要 YenTool 匯出的備份）";
+    return;
+  }
+  // Validate before writing anything: report 11.5 requires stock id, price and
+  // date to be checked on import rather than trusted.
+  for (const p of data.positions) {
+    if (!p.position_id || !p.stock_id) { err.textContent = "持倉資料缺少必要欄位"; return; }
+  }
+  for (const e of (data.executions || [])) {
+    if (!e.execution_id || !e.position_id || !Number.isInteger(e.shares) ||
+        !Number.isInteger(e.price_cents) || !/^\d{4}-\d{2}-\d{2}$/.test(String(e.session_date || ""))) {
+      err.textContent = `成交紀錄 ${e.execution_id || "?"} 欄位不完整或格式錯誤`;
+      return;
+    }
+  }
+  await dbPutMany("positions", data.positions);
+  await dbPutMany("executions", data.executions || []);
+  for (const m of (data.meta || [])) {
+    if (m && m.key) await dbPut("meta", m);
+  }
+  closeModal();
+  toast(`已匯入 ${data.positions.length} 筆持倉`);
+  await load();
+}
+
+/* ============================================================================
+ * 14. Self-test: report section 6.2's worked example
+ *
+ * This runs on the user's own device, on the same code path the app uses, so
+ * "the numbers match the spec" is something the phone can demonstrate rather
+ * than something the README claims.
+ * ==========================================================================*/
+
+function selfTest() {
+  const sessions = ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09",
+                    "2026-01-12", "2026-01-13", "2026-01-14", "2026-01-15", "2026-01-16"];
+  const closeList = [103, 101, 105, 106, 104, 108, 107, 110, 109, 112];
+  const closes = {};
+  sessions.forEach((s, i) => { closes[s] = cents(closeList[i]); });
+
+  // The report's example is stated "without broker dollar rounding", which is
+  // exactly what the tw-equity-exact schedule is for.
+  const sched = FEE_SCHEDULES["tw-equity-exact"];
+  const priceCents = cents(102);
+  const shares = 1000;
+  const buyFee = feeFor(sched, priceCents * shares);
+  const pos = {
+    position_id: "selftest", stock_id: "0000", stock_name: "自我檢查",
+    fee_schedule: "tw-equity-exact", dividends: 0,
+    opened_session: sessions[0], horizon_days: 10,
+    initial_buy_price: cents(100), avg_cost: priceCents,
+  };
+  const execs = [{
+    execution_id: "t1", position_id: "selftest", side: "BUY",
+    session_date: sessions[0], executed_at: "", shares,
+    price_cents: priceCents, fee_cents: buyFee, tax_cents: 0, is_current: 1,
+    recorded_at: "",
+  }];
+  const marks = buildMarks(pos, execs, closes, sessions, sessions);
+  const last = marks[marks.length - 1];
+
+  const days = marks.map((m) => m.day_pnl_gross);
+  const wantDays = [1000, -2000, 4000, 1000, -2000, 4000, -1000, 3000, -1000, 3000]
+    .map((v) => v * 100);
+  // The trap the report names: summing the CUMULATIVE column gives 45,000.
+  const sumCumulative = marks.reduce((a, m) => a + m.total_gross, 0);
+  const retInitial = pctOf(last.close_price - pos.initial_buy_price, pos.initial_buy_price);
+  const retCost = pctOf(last.close_price - priceCents, priceCents);
+
+  const checks = [
+    { name: "買入手續費", want: "145.35", got: fmtCents(buyFee, { always: true }) },
+    { name: "D10 累計價差損益", want: "10,000.00", got: fmtCents(last.total_gross, { always: true }) },
+    { name: "D10 全數賣出估計淨額", want: "9,359.05", got: fmtCents(last.net_if_liquidated, { always: true }) },
+    { name: "相對首日建議價 100", want: "+12.00%", got: fmtPct(retInitial) },
+    { name: "相對實際成本 102", want: "+9.80%", got: fmtPct(retCost) },
+    { name: "每日損益序列", want: wantDays.map((v) => v / 100).join(","), got: days.map((v) => v / 100).join(",") },
+    { name: "累計值相加（示範不可這樣算）", want: "45,000.00", got: fmtCents(sumCumulative, { always: true }) },
+    { name: "D10 天數索引", want: "10", got: String(last.day_index) },
+  ].map((c) => Object.assign(c, { ok: c.want === c.got }));
+
+  return { pass: checks.every((c) => c.ok), checks, marks };
+}
+
+/* ============================================================================
+ * 15. Events, resume watchdog, boot
+ * ==========================================================================*/
+
+// One delegated listener. Re-rendering a page therefore never leaks handlers
+// and never leaves a dead button behind.
+document.addEventListener("click", async (ev) => {
+  const el = ev.target.closest("[data-act]");
+  if (!el) return;
+  const act = el.dataset.act;
+  const d = el.dataset;
+  try {
+    if (act === "page") { STATE.page = d.page; render(); window.scrollTo(0, 0); return; }
+    if (act === "market") { STATE.market = d.market; renderPicks(); return; }
+    if (act === "close") { closeModal(); return; }
+    if (act === "refresh") { await load(); return; }
+    if (act === "detail") { openDetail(d.id); return; }
+    if (act === "export") { await exportBackup(); return; }
+    if (act === "import") { openImport(); return; }
+    if (act === "import-run") { await runImport(); return; }
+    if (act === "cycle") { await openCycleDetail(d.pos); return; }
+    if (act === "execs") { await openExecutionList(d.pos); return; }
+    if (act === "fees") { await toggleFees(); return; }
+
+    if (act === "buy") {
+      const pos = d.pos ? await dbGet("positions", d.pos) : null;
+      const row = d.id ? STATE.rows.find((r) => String(r.Stock_ID) === d.id) : null;
+      await openExecutionForm({ side: "BUY", position: pos, row });
+      return;
+    }
+    if (act === "sell") {
+      const pos = await dbGet("positions", d.pos);
+      if (!pos || pos.open_shares <= 0) { toast("這筆持倉沒有可賣股數"); return; }
+      await openExecutionForm({ side: "SELL", position: pos });
+      return;
+    }
+    if (act === "exec-save") { await saveExecution(d); return; }
+    if (act === "exec-edit") {
+      const exe = await dbGet("executions", d.exe);
+      const pos = await dbGet("positions", exe.position_id);
+      await openExecutionForm({ side: exe.side, position: pos, execution: exe });
+      return;
+    }
+    if (act === "exec-void") {
+      if (!confirm("撤銷誤登：這筆成交將不再計入損益，但紀錄會保留。確定嗎？")) return;
+      await voidExecution(d.exe, "user_void");
+      closeModal();
+      toast("已撤銷該筆成交");
+      await load();
+      return;
+    }
+    if (act === "archive") {
+      const pos = await dbGet("positions", d.pos);
+      if (pos.open_shares > 0) { toast("尚有持股，請先登錄賣出"); return; }
+      if (!confirm("封存這筆已結束的紀錄？資料會保留在「績效與歷史」，只是不再出現在持倉清單。")) return;
+      pos.status = "archived";
+      pos.archived_at = nowStamp();
+      await dbPut("positions", pos);
+      toast("已封存");
+      await load();
+      return;
+    }
+    if (act === "void-pos") {
+      if (!confirm("撤銷誤登整筆持倉？資料會保留在歷史頁，但不再計入任何損益。")) return;
+      const pos = await dbGet("positions", d.pos);
+      pos.status = "void";
+      pos.voided_at = nowStamp();
+      await dbPut("positions", pos);
+      toast("已撤銷");
+      await load();
+      return;
+    }
+  } catch (e) {
+    toast("操作失敗：" + (e.message || String(e)));
+  }
+});
+
+document.addEventListener("change", (ev) => {
+  const el = ev.target.closest("[data-act='sort']");
+  if (!el) return;
+  STATE.sortIndex = Number(el.value);
+  renderPicks();
+});
+
+async function toggleFees() {
+  const next = STATE.settings.fee_schedule === "tw-equity-v1" ? "tw-equity-exact" : "tw-equity-v1";
+  STATE.settings.fee_schedule = next;
+  await metaSet("settings", STATE.settings);
+  toast("費率版本改為：" + schedule(next).label);
+  render();
+}
+
+// Freshness watchdog. iOS usually RESUMES a backgrounded PWA rather than
+// reloading it, so without this the user stares at yesterday's scan. All three
+// events are needed because iOS picks a different one depending on how the app
+// came back (app switcher, bfcache, external link).
 let RESUME_GATE = 0;
 function onResume() {
   const now = Date.now();
   if (document.hidden || now - RESUME_GATE < 2000) return;
   RESUME_GATE = now;
   load();
-  // also check for a new app shell (deploys while the PWA slept); when one is
-  // found the controllerchange handler below reloads the page automatically
   if ("serviceWorker" in navigator && window.isSecureContext) {
-    navigator.serviceWorker.getRegistration()
-      .then((reg) => reg && reg.update())
-      .catch(() => {});
+    navigator.serviceWorker.getRegistration().then((reg) => reg && reg.update()).catch(() => {});
   }
 }
 document.addEventListener("visibilitychange", onResume);
 window.addEventListener("pageshow", onResume);
 window.addEventListener("focus", onResume);
 
-async function load() {
-  $("#status").textContent = "載入中…";
+async function boot() {
+  $("#tabs").innerHTML = tabBar();
   try {
-    const res = await fetch("./scan_result.json?t=" + Date.now(), { cache: "no-store" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    ALL_ROWS = (data.rows || []).map((r, i) => ({ ...r, _rank: i + 1 }));
-    const m = data.meta || {};
-    REPORTS = m.reports || {};
-    buildCalendar(m.calendar_tail, m.scan_time);
-    // disturbed = pullback WITHIN an uptrend (below 20MA but still above 60MA).
-    // The 60MA condition (risk_on) matters: delaying the exit into a confirmed
-    // below-60MA bear is worse than a plain 10-bar exit (sandbox_redteam2.py).
-    // Mirrors scanner/holding_tracker.py annotate_holding().
-    DISTURBED = !!(m.regime && m.regime.ok) && m.regime.above20 === false
-                && m.regime.risk_on === true;
-    // enter_ok = TAIEX above BOTH 20MA and 60MA. This is a HARD condition of
-    // the buy rule (see buyRuleBlock), not a hint. An unreadable regime blocks:
-    // "we cannot tell whether it is a tailwind" is not "it is".
-    ENTER_OK = !!(m.regime && m.regime.ok) && m.regime.enter_ok === true;
-    const dataDate = ALL_ROWS.length ? (ALL_ROWS[0].Data_Date || "") : "";
-    // Trading days elapsed since the data date, so a morning open clearly says
-    // "prices are last night's close" instead of silently looking current.
-    let age = "";
-    if (dataDate && CAL.length) {
-      const iData = CAL.indexOf(String(dataDate).slice(0, 10));
-      const today = dstr(new Date());
-      let iToday = -1;
-      for (let i = 0; i < CAL.length; i++) { if (CAL[i] <= today) iToday = i; else break; }
-      if (iData >= 0 && iToday > iData) age = `（收盤價為 ${iToday - iData} 個交易日前）`;
-    }
-    $("#meta").textContent =
-      `${m.mode || ""}｜掃描 ${m.scan_time || ""}｜資料 ${dataDate}${age}`;
-    updateStale(dataDate);
-    const [txt, cls] = MODE_CARDS[m.mode] || MODE_CARD_DEFAULT;
-    const card = $("#card");
-    card.textContent = txt;
-    card.className = "decision-card show " + cls;
-    renderRegime(m.regime);
-    renderDegraded(m.degraded);
-    renderTradeable(m.degraded);
-    renderReport();
-    renderHoldings();
-    apply();
-    $("#status").textContent = "更新於 " + new Date().toLocaleTimeString("zh-TW");
+    await openDB();
+    STATE.settings = Object.assign(STATE.settings, await metaGet("settings", {}));
+    await loadLedger();
+    const migrated = await migrateLegacy();
+    if (migrated) toast(`已從舊版匯入 ${migrated} 筆持倉，請補登股數`);
   } catch (e) {
-    $("#status").textContent = "載入失敗：" + e.message;
-    if (!ALL_ROWS.length) $("#list").innerHTML = `<div class="empty">無法載入 scan_result.json</div>`;
+    // A private-mode browser can refuse IndexedDB entirely. The market pages
+    // must still work; only the ledger is unavailable.
+    DB_OK = false;
+    LEDGER_ERROR = e.message || String(e);
   }
+  await load();
 }
 
-buildControls();
-$("#refresh").addEventListener("click", load);
-$("#search").addEventListener("input", apply);
-load();
+boot().catch((e) => {
+  setStatus("啟動失敗：" + (e.message || e));
+});
 
 // Service worker only registers in a secure context (https or localhost).
 if ("serviceWorker" in navigator && window.isSecureContext) {
   navigator.serviceWorker.register("./sw.js").catch(() => {});
-  // The freshness watchdog reloads DATA, but a suspended PWA keeps running the
-  // OLD app code forever. When a new service worker takes control (= a deploy
-  // landed), reload once so the page swaps to the new shell by itself.
+  // The data watchdog reloads DATA, but a suspended PWA keeps running the OLD
+  // app code forever. A new controller means a deploy landed: reload once.
   let swReloaded = false;
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (swReloaded) return;
@@ -717,3 +2556,9 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
     window.location.reload();
   });
 }
+
+// Exposed for the browser console and for the research page's self-check.
+window.YT = {
+  STATE, selfTest, buildMarks, replay, cents, fmtCents, pctOf, feeFor, taxFor,
+  buyVerdict, portfolioSummary, pendingItems, tickRound, taipeiDate, load,
+};

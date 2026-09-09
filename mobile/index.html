@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>YenTool 選股</title>
+  <title>YenTool</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <meta name="theme-color" content="#1E1E24" />
   <!-- iOS home-screen support -->
@@ -11,36 +11,35 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="YenTool" />
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
-  <link rel="stylesheet" href="./styles.css?v=11" />
+  <link rel="stylesheet" href="./styles.css?v=12" />
 </head>
 <body>
+  <!-- Header stays SHORT on purpose (report 7.4): the long strategy blurb used
+       to be pinned here and ate half of a 375px screen. It is now a collapsible
+       card inside the overview and research pages. -->
   <header id="topbar">
     <div class="title-row">
-      <h1>YenTool 選股</h1>
-      <button id="refresh" title="重新整理">↻</button>
+      <h1>YenTool</h1>
+      <span id="asof" class="asof"></span>
+      <button id="refresh" type="button" data-act="refresh" title="重新整理" aria-label="重新整理">↻</button>
     </div>
-    <div id="meta" class="meta"></div>
-    <div id="stale" class="stale"></div>
-    <div id="degraded" class="degraded"></div>
-    <div id="regime" class="regime"></div>
-    <div id="tradeable" class="tradeable"></div>
-    <div id="card" class="decision-card"></div>
-    <div id="controls">
-      <div id="market" class="chips"></div>
-      <select id="sort" class="sort"></select>
-      <button id="aiBtn" class="ai-btn">AI 報告</button>
-      <span id="count" class="count"></span>
-    </div>
-    <div id="aiPanel" class="ai-panel"></div>
-    <input id="search" type="search" placeholder="搜尋代號 / 名稱" />
+    <div id="notices" class="notices"></div>
   </header>
 
-  <section id="holdings" class="holdings"></section>
+  <main id="pages">
+    <section class="page" id="page-today" aria-label="今日總覽"></section>
+    <section class="page" id="page-picks" aria-label="今日建議" hidden></section>
+    <section class="page" id="page-positions" aria-label="我的持倉" hidden></section>
+    <section class="page" id="page-perf" aria-label="績效與歷史" hidden></section>
+    <section class="page" id="page-research" aria-label="研究與資料狀態" hidden></section>
+    <div id="status" class="status"></div>
+  </main>
 
-  <main id="list"></main>
+  <nav id="tabs" class="tabs" aria-label="主要頁面"></nav>
 
-  <footer id="status" class="status"></footer>
+  <div id="modal" class="modal" hidden></div>
+  <div id="toast" class="toast" hidden></div>
 
-  <script src="./app.js?v=11"></script>
+  <script src="./app.js?v=12"></script>
 </body>
 </html>

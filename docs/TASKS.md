@@ -8,6 +8,25 @@
 
 ---
 
+## 進度計算基準
+
+回報完成百分比時一律用這張表當分母，這樣不同時間點的數字才可以互相比較。
+計分：完成 = 1、部分 = 0.5、待辦 = 0。**已寫好但尚未驗收的，一律計 0**——沒驗過就不算完成。
+
+| 類別 | 項數 | 來源 |
+|---|---:|---|
+| A. 缺陷修正 F01–F26 | 26 | 報告 §3 |
+| B. P0／P1／P2 待辦 | 23 | 報告 §13（8 + 8 + 7） |
+| C. 提高勝率研究 W01–W24 | 24 | 報告 §10.2 |
+
+**A + B = 49 項，是「程式面優化」的分母。**
+C 單獨計算、不混入：報告 §14 自己就把研究列為後續工作（「本次先出報告」），
+而且 W 類多數需要重跑回測與樣本外驗證，不是寫程式就能完成的。
+把 C 併進總分母會讓程式面的進度被稀釋到看不出來；完全不提又會讓人以為優化已經全做完。
+兩個數字都報，才是誠實的講法。
+
+---
+
 ## 缺陷修正 F01–F26
 
 > 來源：報告 §3「已確認的主要問題與優先順序」。
@@ -16,32 +35,32 @@
 
 | ID | 優先 | 問題（一句話） | 位置 | 狀態 |
 |---|---|---|---|---|
-| F01 | P0 | prelaunch 的建議買價、停損、停利每次依當日收盤重算，沒有首日固定建議欄位 | `scanner/scan_mode.py` | [ ] 待辦 |
-| F02 | P0 | 桌面主表仍顯示當日重算的 `Strict_Stop_Loss`，沒有切換為 `Fill_*`，與已修的手機卡片不一致 | `gui/app.py`、`mobile/app.js` | [ ] 待辦 |
-| F03 | P0 | `Entry_Open` 是推估日期的市場開盤價而非真實成交，自動顯示「持有」易讓未買者以為已進場 | `scanner/holding_tracker.py` | [ ] 待辦 |
-| F04 | P0 | 手機持倉價格只向今日 `ALL_ROWS` 查找，掉榜後價格及損益變成空白 | `mobile/app.js` | [ ] 待辦 |
-| F05 | P0 | 沒有股數、成交明細、真實賣出與每日損益表；移除持倉會直接刪資料 | `mobile/app.js` | [ ] 待辦 |
-| F06 | P0 | Buy_Ready 未檢查個股日期及 Integrity_OK，缺少 holding 狀態會被視為新訊號 | `scanner/scan_mode.py` | [ ] 待辦 |
-| F07 | P0 | 前端再算買進規則，未以策略版本／Buy_Block 為權威，孤立輸入可將後端 `no_rule` 誤判可買 | `mobile/app.js` | [ ] 待辦 |
-| F08 | P0 | 還原價與官方未還原價可能混入同一價量表且無來源欄位，不能用調整後開盤價表示當年真實成交價 | `ingestion/price_volume_multi.py` | [ ] 待辦 |
-| F09 | P0 | 鎖利說明寫「同日觸發後跌破視為出場」，程式卻下一根才生效；先檢查低價也可能忽略開盤已達成的停利 | `scanner/signal_ledger.py` | [ ] 待辦 |
-| F10 | P1 | 過期股票加 `.stale`，而共用 `.stale` 規則設定 `display:none`，過期卡片可能整張被隱藏 | `mobile/styles.css` | [ ] 待辦 |
-| F11 | P1 | 手機成交價輸入 `abc` 或 0 會因 `num(...) \|\| ref` 默默採用參考價 | `mobile/app.js` | [ ] 待辦 |
-| F12 | P1 | 買入日期自動取訊號推估日且不可編輯；一股只能存一筆，不能記多次交易 | `mobile/app.js` | [ ] 待辦 |
-| F13 | P1 | holding tracker 用第一列 Data_Date 當全表今天，且最多容忍 10 交易日缺席仍視為同一上榜段 | `scanner/holding_tracker.py` | [ ] 待辦 |
-| F14 | P1 | 手機用週一至五推算未來交易日，可能把「沒有資料」推斷成休市，時區又取裝置當地時間 | `mobile/app.js` | [ ] 待辦 |
-| F15 | P1 | 大盤只檢查有無 60 筆，未回傳資料日期／新鮮度，舊大盤也可能顯示順風 | `scanner/market_regime.py` | [ ] 待辦 |
-| F16 | P1 | 法人用整表最大日期決定是否更新，一個市場成功可阻止另一市場補齊；「5 日」可能只是最近 5 筆且不連續 | `ingestion/inst_trades.py` | [ ] 待辦 |
-| F17 | P1 | 當日重掃先刪 picks，並非嚴格 append-only；未保存 Core_Plus、Buy_Ready、完整閘門與規則版本 | `scanner/signal_ledger.py` | [ ] 待辦 |
-| F18 | P1 | 空結果不輸出新 CSV／JSON，headless 空名單 exit 1，健康的 0 檔日可能留下昨天畫面 | `scanner/result_export.py`、`scan_headless.py` | [ ] 待辦 |
-| F19 | P1 | outcomes 只在完整 5／10／20 日後寫入，無法回答 D1 到 D10 的逐日累計損益 | `scanner/signal_ledger.py` | [ ] 待辦 |
-| F20 | P1 | 手機 cache key 帶每次不同的 `?t=`，Service Worker 卻按完整 URL 尋找離線快取 | `mobile/sw.js` | [ ] 待辦 |
-| F21 | P1 | 桌面大盤文案「新倉減半／正常」與真正不准開新倉的規則不一致，降級資料未完整傳入桌面 UI | `gui/app.py`、`gui/scan_worker.py` | [ ] 待辦 |
-| F22 | P2 | 主表顯示 Launch，桌面上色看 Surge，手機上色看 Explosion，不同分數被當成同一強度 | `gui/app.py`、`mobile/app.js` | [ ] 待辦 |
-| F23 | P2 | AI 說明把量縮定義成今日／20 日，實作卻是近 3 日均量／20 日，也未帶入完整買進閘門與持倉成本 | `gemini_hook/prompt_builder.py` | [ ] 待辦 |
-| F24 | P2 | requests timeout／連線例外不一定轉成 AIReportError，可能跳過預期備援；AI 又在行情發布前執行 | `gemini_hook/gemini_client.py`、`scan_headless.py` | [ ] 待辦 |
-| F25 | P2 | SQLite `DELETE` 加 pandas `to_sql` 不應只憑外層 `with` 就宣稱整批原子寫入；缺 schema 版本及多數唯一約束 | `storage/data_store.py` | [ ] 待辦 |
-| F26 | P2 | 套件只設最低版本，本機與 CI Python 版本不同，spec 一份有模式 JSON、一份沒有 | `requirements.txt`、`TaiwanScanner.spec` | [ ] 待辦 |
+| F01 | P0 | prelaunch 的建議買價、停損、停利每次依當日收盤重算，沒有首日固定建議欄位 <br>_首日建議固定於 `portfolio/`，桌面新增「首日建議」欄_ | `scanner/scan_mode.py` | [x] 已修 |
+| F02 | P0 | 桌面主表仍顯示當日重算的 `Strict_Stop_Loss`，沒有切換為 `Fill_*`，與已修的手機卡片不一致 <br>_`_levels()` 擇一組水位並標示「價格基準」_ | `gui/app.py`、`mobile/app.js` | [x] 已修 |
+| F03 | P0 | `Entry_Open` 是推估日期的市場開盤價而非真實成交，自動顯示「持有」易讓未買者以為已進場 <br>_已在 UI 標為「模擬進場」；後端改名 `simulated_*` 未做_ | `scanner/holding_tracker.py` | [~] 部分 |
+| F04 | P0 | 手機持倉價格只向今日 `ALL_ROWS` 查找，掉榜後價格及損益變成空白 <br>_改由 `quotes.json` 估值，涵蓋帳本追蹤的全部股票_ | `mobile/app.js` | [x] 已修 |
+| F05 | P0 | 沒有股數、成交明細、真實賣出與每日損益表；移除持倉會直接刪資料 <br>_IndexedDB 成交帳本：股數、部分賣出、封存不刪資料_ | `mobile/app.js` | [x] 已修 |
+| F06 | P0 | Buy_Ready 未檢查個股日期及 Integrity_OK，缺少 holding 狀態會被視為新訊號 <br>_新增 stale／integrity／unknown 三個封鎖原因_ | `scanner/scan_mode.py` | [x] 已修 |
+| F07 | P0 | 前端再算買進規則，未以策略版本／Buy_Block 為權威，孤立輸入可將後端 `no_rule` 誤判可買 <br>_後端 `Buy_Ready`／`Buy_Block` 為權威，前端只能降級_ | `mobile/app.js` | [x] 已修 |
+| F08 | P0 | 還原價與官方未還原價可能混入同一價量表且無來源欄位，不能用調整後開盤價表示當年真實成交價 <br>_價格基準仍未分離；`quotes.json` 標為 `unverified`_ | `ingestion/price_volume_multi.py` | [ ] 待辦 |
+| F09 | P0 | 鎖利說明寫「同日觸發後跌破視為出場」，程式卻下一根才生效；先檢查低價也可能忽略開盤已達成的停利 <br>_事件順序改為開盤→當根鎖利→最低觸及價，見下方新發現_ | `scanner/signal_ledger.py` | [x] 已修 |
+| F10 | P1 | 過期股票加 `.stale`，而共用 `.stale` 規則設定 `display:none`，過期卡片可能整張被隱藏 <br>_資料提示與股票狀態改用不同 class_ | `mobile/styles.css` | [x] 已修 |
+| F11 | P1 | 手機成交價輸入 `abc` 或 0 會因 `num(...) 或 ref` 的寫法默默採用參考價 <br>_改為表單並拒絕無效輸入；已實測 abc／0／空白／超賣四種都被擋下_ | `mobile/app.js` | [x] 已修 |
+| F12 | P1 | 買入日期自動取訊號推估日且不可編輯；一股只能存一筆，不能記多次交易 <br>_可編輯成交日期／股數，支援多筆成交_ | `mobile/app.js` | [x] 已修 |
+| F13 | P1 | holding tracker 用第一列 Data_Date 當全表今天，且最多容忍 10 交易日缺席仍視為同一上榜段 <br>_掃描日改取全表最新 bar；`holding_tracker` 內部 gap_tol 未改_ | `scanner/holding_tracker.py` | [~] 部分 |
+| F14 | P1 | 手機用週一至五推算未來交易日，可能把「沒有資料」推斷成休市，時區又取裝置當地時間 <br>_改用 `calendar_tail` 為權威、不再外推；官方日曆仍缺_ | `mobile/app.js` | [~] 部分 |
+| F15 | P1 | 大盤只檢查有無 60 筆，未回傳資料日期／新鮮度，舊大盤也可能顯示順風 <br>_新增 `as_of_date`／`is_current`，過期即封鎖且預設 fail closed_ | `scanner/market_regime.py` | [x] 已修 |
+| F16 | P1 | 法人用整表最大日期決定是否更新，一個市場成功可阻止另一市場補齊；「5 日」可能只是最近 5 筆且不連續 <br>_法人跨市場缺日補齊未做_ | `ingestion/inst_trades.py` | [ ] 待辦 |
+| F17 | P1 | 當日重掃先刪 picks，並非嚴格 append-only；未保存 Core_Plus、Buy_Ready、完整閘門與規則版本 <br>_picks 補上 core_plus／buy_ready／buy_block／gate_detail／rule_version_ | `scanner/signal_ledger.py` | [x] 已修 |
+| F18 | P1 | 空結果不輸出新 CSV／JSON，headless 空名單 exit 1，健康的 0 檔日可能留下昨天畫面 <br>_空名單照常發布 count=0；離開碼 0／1／2 分開_ | `scanner/result_export.py`、`scan_headless.py` | [x] 已修 |
+| F19 | P1 | outcomes 只在完整 5／10／20 日後寫入，無法回答 D1 到 D10 的逐日累計損益 <br>_真實持倉已有逐日 `position_daily_marks`；`outcomes` 仍只有 5／10／20_ | `scanner/signal_ledger.py` | [~] 部分 |
+| F20 | P1 | 手機 cache key 帶每次不同的 `?t=`，Service Worker 卻按完整 URL 尋找離線快取 <br>_固定快取鍵並版本化，清掉舊 entry_ | `mobile/sw.js` | [x] 已修 |
+| F21 | P1 | 桌面大盤文案「新倉減半／正常」與真正不准開新倉的規則不一致，降級資料未完整傳入桌面 UI <br>_文案與買進閘門同源，未知一律不開新倉_ | `gui/app.py`、`gui/scan_worker.py` | [x] 已修 |
+| F22 | P2 | 主表顯示 Launch，桌面上色看 Surge，手機上色看 Explosion，不同分數被當成同一強度 <br>_兩端都改用該模式實際排序的主分數_ | `gui/app.py`、`mobile/app.js` | [x] 已修 |
+| F23 | P2 | AI 說明把量縮定義成今日／20 日，實作卻是近 3 日均量／20 日，也未帶入完整買進閘門與持倉成本 <br>_量縮定義更正為近 3 日均量／20 日，並帶入買進判定_ | `gemini_hook/prompt_builder.py` | [x] 已修 |
+| F24 | P2 | requests timeout／連線例外不一定轉成 AIReportError，可能跳過預期備援；AI 又在行情發布前執行 <br>_網路例外轉為 AIReportError；發布先於 AI_ | `gemini_hook/gemini_client.py`、`scan_headless.py` | [x] 已修 |
+| F25 | P2 | SQLite `DELETE` 加 pandas `to_sql` 不應只憑外層 `with` 就宣稱整批原子寫入；缺 schema 版本及多數唯一約束 <br>_單一交易內顯式寫入；遷移為 opt-in，未對 data/ 執行_ | `storage/data_store.py` | [x] 已修 |
+| F26 | P2 | 套件只設最低版本，本機與 CI Python 版本不同，spec 一份有模式 JSON、一份沒有 <br>_依賴加上限；單一 spec。CI 3.12 vs 本機 3.13 差異仍待處理_ | `requirements.txt`、`TaiwanScanner.spec` | [x] 已修 |
 
 > F10 是 CSS 與產生的 HTML 類別交叉檢查的結果；報告未以真實裝置截圖宣稱完成視覺驗收。
 > F25 的依據：pandas 官方文件明示使用原生 `sqlite3.Connection` 時，`to_sql` 的插入不能依一般預期回滾。
@@ -55,39 +74,39 @@
 
 ### P0：資料與交易定義，先於介面美化
 
-- [ ] 明確採用「首次完整合格」作首日建議起點，固定價格、有效期限與策略版本。
-- [ ] 建立 executions／positions／daily marks／D10 results，支援實際日期、價格與股數。
-- [ ] 將模擬持倉與真實持倉分開，移除靠名單推定使用者已成交的語意。
-- [ ] 正式持倉行情獨立更新；掉榜與無新推薦不影響估值。
-- [ ] 統一 Asia/Taipei 與官方日曆；明確市場休市、個股停牌及缺資料。
-- [ ] raw 與 adjusted 價格分開，企業行動與費稅建立可對帳模型。
-- [ ] Buy_Ready 增加日期、品質、模式與完整資料要求；前端不能自行放寬。
-- [ ] 明確定義 10 日結算與盤中／收盤賣出計畫；修正回測事件順序。
+- [x] 明確採用「首次完整合格」作首日建議起點，固定價格、有效期限與策略版本。  （`portfolio/sync.py`，固定價＋有效期限＋策略版本）
+- [x] 建立 executions／positions／daily marks／D10 results，支援實際日期、價格與股數。  （`portfolio/` 九張表，34 項測試）
+- [x] 將模擬持倉與真實持倉分開，移除靠名單推定使用者已成交的語意。  （只有成交事件能建立持倉；`Entry_Open` 標為模擬）
+- [x] 正式持倉行情獨立更新；掉榜與無新推薦不影響估值。  （`quotes.json` 涵蓋帳本追蹤的全部股票）
+- [~] 統一 Asia/Taipei 與官方日曆；明確市場休市、個股停牌及缺資料。  **部分**：時區已統一、不再外推；官方休市日曆仍缺，故只回報不封鎖
+- [ ] raw 與 adjusted 價格分開，企業行動與費稅建立可對帳模型。  （F08，未做；`quotes.json` 已標 `unverified`）
+- [x] Buy_Ready 增加日期、品質、模式與完整資料要求；前端不能自行放寬。  （新增 stale／integrity／unknown；前端只能降級）
+- [x] 明確定義 10 日結算與盤中／收盤賣出計畫；修正回測事件順序。  （D10 凍結；F09 事件順序已修）
 
 > **完成標準：** 第 6 節算例及核心狀態驗收通過，同一部位每天查詢都不會改寫原始建議與真實成本。
 
 ### P1：更新可靠性與資料補齊
 
-- [ ] 核對 14 檔保留原資料的例外股票，按官方行情追查來源異常／停止交易／代碼變動。
-- [ ] 追查被隔離的 6,572 筆歷史 K 線；保留缺口標記，不當成完整無缺資料。
-- [ ] 補上櫃法人歷史缺日；兩市場分別計算「最近 5 個交易日」。
-- [ ] 補 TDCC 中間缺週，重新計算真正週增減，提供發布時點。
-- [ ] 在修正／版本化回測假設後，遷移 signal_ledger schema，再補算未完成 outcomes。
-- [ ] 統一資料版本後重建研究特徵快取、掃描 CSV 與手機 JSON。
-- [ ] 修正空名單發布、降級資訊、舊快取、股票 `.stale` 被隱藏及錯誤輸入回退。
-- [ ] 讓行情發布不依賴 AI 摘要完成；增加階段日誌、失敗清單與還原演練。
+- [ ] 核對 14 檔保留原資料的例外股票，按官方行情追查來源異常／停止交易／代碼變動。  **實際是 763 檔**，見下方「新增的發現」
+- [ ] 追查被隔離的 6,572 筆歷史 K 線；保留缺口標記，不當成完整無缺資料。  （已確認：6,572 筆／565 檔，全部 `provider_ohlc_inconsistent`）
+- [ ] 補上櫃法人歷史缺日；兩市場分別計算「最近 5 個交易日」。  （F16）
+- [ ] 補 TDCC 中間缺週，重新計算真正週增減，提供發布時點。  （TDCC 停在 2026-09-04，落後行情 5 天）
+- [~] 在修正／版本化回測假設後，遷移 signal_ledger schema，再補算未完成 outcomes。  **部分**：schema 已遷移，`reset_rule_outcomes()` 尚未執行
+- [ ] 統一資料版本後重建研究特徵快取、掃描 CSV 與手機 JSON。  （`_feat_cache.pkl` 已失效待處理）
+- [x] 修正空名單發布、降級資訊、舊快取、股票 `.stale` 被隱藏及錯誤輸入回退。  （F18／F20／F10／F11 全數完成並實測）
+- [x] 讓行情發布不依賴 AI 摘要完成；增加階段日誌、失敗清單與還原演練。  （F24；發布先於 AI，階段日誌已加）
 
 > **完成標準：** 資料中斷一天或使用者一週沒開 App，恢復後仍有完整、可追溯的逐日帳本。
 
 ### P2：共用介面與研究驗證
 
-- [ ] 做今日總覽、今日建議、持倉、績效、研究／資料狀態五個頁面。
-- [ ] 按第 8 節統一欄位字典、分數、價格與數字單位。
-- [ ] 提供持倉買賣表單、歷史修訂、手機匯出／匯入及跨裝置同步。
-- [ ] 建立唯一策略／回測核心，整理舊 `eval_*`、`sandbox_*` 為版本化實驗。
-- [ ] 優先驗證 W01／02／23，再依序研究市場強度、進場可成交性、持有期限與出場方式。
+- [x] 做今日總覽、今日建議、持倉、績效、研究／資料狀態五個頁面。  （已在 375px 實機驗收）
+- [x] 按第 8 節統一欄位字典、分數、價格與數字單位。  （兩端同步改名，研究頁附欄位含義表）
+- [~] 提供持倉買賣表單、歷史修訂、手機匯出／匯入及跨裝置同步。  **部分**：表單、修訂、匯出匯入完成；**跨裝置同步未做**（無私人後端）
+- [~] 建立唯一策略／回測核心，整理舊 `eval_*`、`sandbox_*` 為版本化實驗。  **部分**：研究腳本已封存分類，尚未抽出唯一回測核心
+- [ ] 優先驗證 W01／02／23，再依序研究市場強度、進場可成交性、持有期限與出場方式。  （須先修 `sim_trail`，見新增的發現）
 - [ ] 對正式候選補資金曲線、費用壓力測試與樣本外／前向觀察。
-- [ ] 固定環境與依賴、統一打包入口及正式操作文件。
+- [x] 固定環境與依賴、統一打包入口及正式操作文件。  （依賴加上限、單一 spec、README。CI 3.12 vs 本機 3.13 仍待處理）
 
 > **完成標準：** 使用者從手機到桌面都能回答「何時推薦、真正買多少、今天賺賠多少、第 10 天成果如何、目前應注意什麼」，研究數字能追溯到精確策略與資料版本。
 
@@ -238,3 +257,96 @@
   - 事實：`.gitignore` 雖然有 `data/`，這幾個檔仍在版控中（`.gitignore` 只影響未追蹤檔案）。`.git` 目前 73MB。
   - 選項：`git rm --cached` 讓它們不再進版控。
   - 代價：CI 冷啟動（cache miss）時要重新抓取整份行情；workflow 註解說明這條路徑可行但較慢。
+
+---
+
+## 2026-09-09 實作後新增的發現
+
+以下不在原報告內，是這次動手改的過程中查出來的。前兩項會影響「現在採用的參數是否可信」，
+優先度高於介面工作。
+
+### 最高：採用中的出場參數是在有錯的模擬器上選出來的
+
+- [ ] **修 `archive/research/eval_winrate_round2.sim_trail` 的同日事件順序，再重跑 overlay 重新挑參數。**
+  - 事實：F09 修好了 `scanner/signal_ledger._simulate_rule` 的順序（開盤優先、鎖利當根生效、
+    其餘取該根實際觸及的最低出場價）。但 `sim_trail` **有一模一樣的兩個錯誤**——
+    它的註解描述的正是修正後的順序，程式碼做的卻相反。
+  - 影響：`docs/STRATEGY.md` §D.4 宣稱「與獨立寫的稽核模擬器交叉比對 681 列，最大差 0.005pp」，
+    這只證明兩份程式**錯得一樣**，不是各自獨立算對。
+  - 連帶：**停損 15 / 停利 20 / 啟動 6 / 鎖利 2 這組參數當初就是在這個錯誤順序上選出來的。**
+    不代表參數一定不好，但它們現在屬於「未經正確驗證」，與 W07／W08 一起處理。
+  - D.4 已就地加註失效說明。
+
+- [ ] **重算 ledger 的模擬報酬。** `backfill_outcomes` 把非 NULL 的 `rule_exit` 視為已完成，
+  所以 F09 的修正只會影響新資料列。舊資料要重算：
+  ```
+  python -c "from scanner.signal_ledger import reset_rule_outcomes as r; print(r())"
+  python tools/backfill_ledger.py
+  ```
+  重算完再更新 D.4 與 `signal_ledger` 模組 docstring 引用的數字。
+
+### 最高：2026-09-09 更新其實有 763 檔沒有真正更新
+
+報告 §13 P1 寫「核對 **14 檔** 保留原資料的例外股票」。實際去讀
+`data/audit_20260909/refresh_result.json` 的結果差很多：
+
+| 狀態 | 檔數 | 意思 |
+|---|---:|---|
+| `updated` | 1,201 | 真的更新了 |
+| `invalid_ohlc_preserved_original` | **763** | OHLC 驗證沒過，**保留舊資料，沒有更新** |
+| `incomplete_research_preserved_original` | 3 | 研究區間不完整，保留舊資料 |
+| `fetch_failed` | 1 | 抓取失敗 |
+| 合計 | 1,968 | `errors` 欄位是 0 —— 所以從錯誤數看不出問題 |
+
+- [ ] **釐清 763 檔的 OHLC 為何驗證失敗。** 這佔全宇宙 **39%**，不是 14 檔的量級。
+  更關鍵的是：`refresh_result.json` 的 `errors` 是空陣列、`price_checks` 都是 `ok`，
+  所以只看「有沒有錯誤」會以為更新成功。**「抓取成功」不等於「資料正確」**，
+  這正是報告 §4.3 自己講的那件事，但 §13 低估了規模。
+- [ ] **6,572 筆隔離 K 棒已確認範圍**：影響 **565 檔**，原因全部是
+  `provider_ohlc_inconsistent`，來源 `yfinance_auto_adjust`。
+  這與 F08（還原價與未還原價混用）指向同一個根因，建議兩者一起處理。
+- [ ] **只有 24 檔的最新 bar 落後於 2026-09-09**，所以「新鮮度」其實還好；
+  問題不在日期落後，而在那 763 檔的**內容**沒被更新。
+
+> 影響評估：掃描用的是 `price_volume.db` 的近 400 天視窗。763 檔保留舊資料代表
+> 它們的指標是用舊 K 線算的。在確認原因之前，**不應該宣稱 2026-09-09 的掃描結果
+> 涵蓋全市場**。
+
+### 資料層
+
+- [ ] **`data/price_volume.db` 的 UNIQUE 遷移已寫好但尚未執行。** 目前 `user_version = 0`。
+  已用唯讀方式查過：518,481 列、**重複的 (stock_id, date) 為 0 筆**，所以遷移會成功。
+  執行 `migrate_stock_store(PRICE_VOLUME_FILE)`（會先用 sqlite3 backup API 做一致性備份）。
+  日常存檔**不會**自動遷移，這是刻意的。
+
+- [ ] **缺值 K 棒對出場模擬是隱形的。** `_simulate_rule` 拿 `float('nan')` 和每個價位比較永遠得到
+  False，等於那一根停用了所有出場條件；`mfe_pct`／`mae_pct` 同理。屬於既有問題。
+  要選一個policy：跳過該根，或把整筆結果標成資料異常。
+
+- [ ] **`market_regime` 的參考日是 price_volume.db 全表 `MAX(date)`。** 只要有一筆未來日期的
+  壞資料，TAIEX 就會被判定過期而封鎖所有買進。方向是安全的（fail closed），但這是單列觸發，
+  和報告 §D.5 的「yfinance 幽靈 K 棒」是同一類風險。
+
+- [ ] **`save_sheet` 的非 stock-keyed 分支仍用 `to_sql(if_exists="replace")`**，會先 DROP 再建，
+  寫到一半失敗就整張表不見（taiex.db、signal log）。檔案小且可重抓，所以列為低優先。
+
+### 資料模型範圍說明
+
+本次建了報告 §9.1 十四張表中的九張：`trading_sessions`、`recommendations`、
+`recommendation_events`、`positions`、`executions`、`position_daily_marks`、
+`position_rule_events`、`cycle_results`（加 `schema_meta`）。
+
+未建、且**尚未有替代方案**的兩張：
+
+- [ ] **`corporate_actions`** — 沒有這張表，持有期間遇到除權息、拆併股或減資時，
+  成本與股數不會被正確調整。報告 §12「企業行動」那條驗收因此**還不會過**。
+- [ ] **`instruments`** — 目前仍用股票代號當主鍵，無法處理代號變更、ETF 與不同交易單位。
+  `portfolio/money.py` 的 `DEFAULT_LOT_SIZE` 是暫時的預設值，不是商品主檔。
+
+其餘三張是既有機制已涵蓋，不另建：`price_bars` → `price_volume.db`；
+`scan_runs`／`signal_snapshots` → `signal_ledger.picks`（本次已補上決策欄位）；
+`research_runs` → `archive/research/`。
+
+- [ ] **`trading_sessions` 有表但沒有資料來源。** 因此「資料是否落後」目前只能**回報**
+  （`meta.quality.data_lag`），不能當成封鎖條件——`_latest_trading_day()` 不認識國定假日，
+  拿它當硬性閘門會在連假後誤封鎖整天的買進。要真正解決 F14 需要官方市場日曆。
