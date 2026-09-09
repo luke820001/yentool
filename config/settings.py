@@ -20,6 +20,14 @@ TAIEX_FILE      = DATA_DIR / "taiex.db"
 # self-measuring system (live hit-rate, alpha decay, score calibration).
 SIGNAL_LEDGER_FILE = DATA_DIR / "signal_ledger.db"
 
+# Trade ledger: the user's REAL positions -- fixed first-day recommendations,
+# actual fills, per-session valuations and frozen D10 results. Deliberately a
+# separate file from SIGNAL_LEDGER_FILE above, because the two answer different
+# questions and must not share a retention policy: a 400-day price cache can be
+# rebuilt from the market, a record of what someone actually bought cannot
+# (report sections 5.2 and 11.9).
+PORTFOLIO_LEDGER_FILE = DATA_DIR / "portfolio_ledger.db"
+
 # --- Scan result export (latest version only, for reviewing calculations) ---
 SCAN_RESULTS_DIR = DATA_DIR / "scan_results"
 SCAN_RESULT_FILE = SCAN_RESULTS_DIR / "scan_result_latest.csv"
@@ -29,6 +37,10 @@ SCAN_RESULT_FILE = SCAN_RESULTS_DIR / "scan_result_latest.csv"
 # mobile/ folder statically exposes both the app and its data in one place.
 MOBILE_DIR       = PROJECT_ROOT / "mobile"
 MOBILE_DATA_FILE = MOBILE_DIR / "scan_result.json"
+# Close-price window for every tracked name, published separately from the
+# scan result so a holding that drops off the shortlist keeps being priced
+# (F04). See scanner/quote_feed.py.
+MOBILE_QUOTES_FILE = MOBILE_DIR / "quotes.json"
 
 # --- Rolling Window ---
 # ~400 calendar days => ~270 trading bars. Required so the 52-week-high

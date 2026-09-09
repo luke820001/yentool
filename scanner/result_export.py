@@ -1,9 +1,22 @@
 """
-Export the latest scan result to a single CSV for offline review.
+Export the latest scan result for offline review and for the mobile PWA.
 
-Only the most recent version is kept (the file is overwritten each scan), so
-the folder never accumulates clutter. UTF-8 BOM is used so Excel opens the
-Chinese stock names correctly. All Python strings are ASCII.
+Only the most recent version is kept (the files are overwritten each scan), so
+the folder never accumulates clutter. UTF-8 BOM is used for the CSV so Excel
+opens the Chinese stock names correctly. All Python strings ASCII.
+
+2026-09-09 audit, F18. Both exporters used to begin with
+
+    if df is None or df.empty:
+        return None
+
+which meant a day with zero picks published NOTHING -- and the phone, finding
+no new file, went on showing yesterday's shortlist under yesterday's data date
+as if it were today's answer. A healthy market day with no qualifying setups is
+a real, informative result ("nothing passed the gate today"), and it is not the
+same event as "the scan crashed". They now produce visibly different output:
+a zero-row publish with count=0 and a fresh timestamp, versus no publish at all
+plus a non-zero exit code from scan_headless.
 """
 import json
 from datetime import datetime
@@ -12,22 +25,25 @@ import pandas as pd
 
 from config.settings import (
     SCAN_RESULTS_DIR, SCAN_RESULT_FILE, MOBILE_DIR, MOBILE_DATA_FILE,
+    MOBILE_QUOTES_FILE, PRICE_VOLUME_FILE, PORTFOLIO_LEDGER_FILE,
 )
 
 
-def export_scan_result(df, scan_mode="", reports=None, degraded=None):
+def export_scan_result(df, scan_mode="", reports=None, degraded=None,
+                       session_date=None, strategy_version="",
+                       quality=None):
     """
     Write the full result DataFrame (all computed columns) to SCAN_RESULT_FILE,
     overwriting any previous version. Two context columns (mode + timestamp) are
-    prepended so a saved file is self-describing. A JSON twin is also written for
-    the mobile PWA (see export_scan_result_json).
+    prepended so a saved file is self-describing. A JSON twin is also written
+    for the mobile PWA, plus the quote feed (see export_scan_result_json).
 
-    `reports` (optional) is a {market: text} dict of pre-generated AI reports the
-    phone shows per market filter; only the cloud path passes it.
+    `df` may legitimately be EMPTY -- that publishes a zero-pick day rather
+    than leaving stale files in place. Only `None` means "no result to publish".
 
-    Returns the written CSV path, or None when there is nothing to export.
+    Returns the written CSV path.
     """
-    if df is None or df.empty:
+    if df is None:
         return None
 
     SCAN_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -38,11 +54,15 @@ def export_scan_result(df, scan_mode="", reports=None, degraded=None):
     out.insert(1, "Scan_Time", scan_time)
 
     # utf-8-sig => Excel detects UTF-8 and renders Chinese names correctly.
+    # An empty frame still writes its header row, so the file's mtime and the
+    # Scan_Time column both say the scan really ran today.
     out.to_csv(SCAN_RESULT_FILE, index=False, encoding="utf-8-sig")
 
     try:
         export_scan_result_json(df, scan_mode, scan_time, reports=reports,
-                                degraded=degraded)
+                                degraded=degraded, session_date=session_date,
+                                strategy_version=strategy_version,
+                                quality=quality)
     except Exception as e:
         # A mobile-feed hiccup must never break the primary CSV export.
         print("  [export] mobile json failed: {}".format(e))
@@ -50,11 +70,63 @@ def export_scan_result(df, scan_mode="", reports=None, degraded=None):
     return str(SCAN_RESULT_FILE)
 
 
+def _regime():
+    """Market regime for the phone's entry gate, with its own freshness.
+
+    Failing closed matters here: the phone draws the "new positions allowed"
+    banner from this, and an unreadable regime is not a tailwind (F15).
+    """
+    try:
+        from scanner.market_regime import get_market_regime
+        return get_market_regime() or {}
+    except Exception:
+        return {}
+
+
+def _calendar_tail(n=40):
+    """Real trading dates so the phone can place a holding on the calendar.
+
+    Extrapolating weekdays is what made the phone run a day ahead through every
+    typhoon closure (F14); the authoritative tail is the antidote.
+    """
+    try:
+        from scanner.holding_tracker import _trading_calendar
+        return _trading_calendar()[-n:]
+    except Exception:
+        return []
+
+
+def _publish_quotes(df, names=None):
+    """Write quotes.json covering the scan AND everything the ledger tracks.
+
+    The union is the point (F04): a position is priced because the USER holds
+    it, not because today's scan happened to like it.
+    """
+    ids = set()
+    if df is not None and not df.empty and "Stock_ID" in df.columns:
+        ids.update(str(s).strip() for s in df["Stock_ID"])
+    try:
+        from portfolio.sync import open_position_ids
+        tracked = open_position_ids(PORTFOLIO_LEDGER_FILE)
+        ids.update(tracked)
+    except Exception as e:
+        print("  [quotes] ledger ids unavailable: {}".format(str(e)[:80]))
+        tracked = set()
+
+    from scanner.quote_feed import build_quote_feed, write_quote_feed
+    payload = build_quote_feed(PRICE_VOLUME_FILE, ids, names=names)
+    payload["tracked_count"] = len(tracked)
+    write_quote_feed(MOBILE_QUOTES_FILE, payload)
+    return payload
+
+
 def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
-                            degraded=None):
+                            degraded=None, session_date=None,
+                            strategy_version="", quality=None):
     """
     Write the scan result as JSON for the mobile PWA. Structure:
-        {"meta": {mode, scan_time, count, regime, reports, degraded}, "rows": [...]}
+        {"meta": {...}, "rows": [...]}
+
     `reports` is an optional {market: text} map (ALL/OTC/TSE) of AI reports.
     `degraded` is a short ASCII reason string when an exchange feed failed its
     sanity floor this run (the phone shows a data-fault banner and the missing
@@ -63,32 +135,44 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
     """
     MOBILE_DIR.mkdir(parents=True, exist_ok=True)
 
-    clean = df.replace([float("inf"), float("-inf")], pd.NA)
-    rows = json.loads(clean.to_json(orient="records", force_ascii=False))
+    if df is None or df.empty:
+        rows = []
+        names = {}
+    else:
+        clean = df.replace([float("inf"), float("-inf")], pd.NA)
+        rows = json.loads(clean.to_json(orient="records", force_ascii=False))
+        names = {}
+        if "Stock_ID" in df.columns and "Stock_Name" in df.columns:
+            names = {str(a).strip(): str(b) for a, b
+                     in zip(df["Stock_ID"], df["Stock_Name"])}
 
-    # Market regime so the phone view can show the prelaunch entry gate
-    # (only open NEW positions when TAIEX is above both 20 and 60MA).
+    reg = _regime()
+    quotes = {}
     try:
-        from scanner.market_regime import get_market_regime
-        reg = get_market_regime()
-    except Exception:
-        reg = {}
+        quotes = _publish_quotes(df, names=names)
+    except Exception as e:
+        print("  [quotes] failed: {}".format(str(e)[:100]))
 
-    # Trading-calendar tail so the phone can recompute holding day / entry-exit
-    # status live at view time (the scan runs after close; without this, "day N"
-    # and "enter tomorrow" freeze at scan time and read one day stale the next
-    # morning). 40 dates comfortably covers hold 10 / delay cap 20.
-    try:
-        from scanner.holding_tracker import _trading_calendar
-        calendar_tail = _trading_calendar()[-40:]
-    except Exception:
-        calendar_tail = []
+    # Data date actually represented by the rows, distinct from the wall-clock
+    # time the scan ran (report section 8: Data_Date and Scan_Time are not the
+    # same fact and both belong on screen).
+    data_date = ""
+    if rows:
+        dates = [str(r.get("Data_Date") or "")[:10] for r in rows]
+        dates = [d for d in dates if d]
+        data_date = max(dates) if dates else ""
 
     payload = {
         "meta": {
             "mode": scan_mode,
+            "strategy_version": strategy_version,
             "scan_time": scan_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "session_date": str(session_date or "")[:10] or data_date,
+            "data_date": data_date,
             "count": len(rows),
+            # A zero-pick day is a RESULT. The phone renders "0 setups today"
+            # instead of silently keeping yesterday's list on screen.
+            "empty_ok": len(rows) == 0 and not degraded,
             "regime": {
                 "ok": bool(reg.get("ok", False)),
                 "risk_on": bool(reg.get("risk_on", False)),
@@ -97,9 +181,21 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
                 "str20": reg.get("str20"),
                 "strong": bool(reg.get("strong", False)),
                 "text": reg.get("text", ""),
+                # Added by F15 so the phone can tell a real tailwind from a
+                # stale cache that merely looks like one.
+                "as_of_date": reg.get("as_of_date"),
+                "is_current": reg.get("is_current"),
             },
-            "calendar_tail": calendar_tail,
+            "calendar_tail": _calendar_tail(),
             "degraded": degraded,
+            "quality": quality or {},
+            "quotes": {
+                "file": "quotes.json",
+                "as_of": quotes.get("as_of", ""),
+                "count": quotes.get("count", 0),
+                "sessions": len(quotes.get("sessions", [])),
+                "missing": quotes.get("missing", []),
+            },
             "reports": reports or {},
         },
         "rows": rows,

@@ -11,10 +11,25 @@ def _safe_num(df, col, fill):
 
 
 def _safe_bool(df, col):
-    """Return boolean Series for col; default False if missing."""
-    if col in df.columns:
-        return df[col].astype(bool)
-    return pd.Series([False] * len(df), index=df.index)
+    """Return boolean Series for col; MISSING AND NaN both become False.
+
+    The old body was `df[col].astype(bool)`, and float("nan") is truthy, so a
+    condition nobody could compute came out as a condition that PASSED. The
+    2026-09-09 audit reproduced it directly: Core_Plus = NaN -> _safe_bool ->
+    True, which is how a row with no computable entry-quality score reached
+    Buy_Ready. Treating unknown as satisfied is the wrong direction for every
+    gate in this file, so it is fixed at the source rather than per caller.
+
+    This is a deliberate behaviour change: any mode whose Cond_* inputs were
+    NaN was being selected on a coin flip and will now be excluded.
+    """
+    if col not in df.columns:
+        return pd.Series([False] * len(df), index=df.index)
+    s = df[col]
+    if s.dtype == bool:
+        return s
+    # fillna BEFORE the bool cast -- after it, the NaN is already True.
+    return s.where(s.notna(), False).astype(bool)
 
 
 def apply_scan_mode(df, selected_mode):
@@ -430,13 +445,41 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
 # can explain the refusal in its own language.
 BUY_RULE_MODES = ("mode_prelaunch",)
 
+# Stamped onto every recommendation the ledger freezes, so a position opened
+# today can always be replayed against the rules that were actually in force
+# when it was opened -- report section 5.4 keeps the strategy snapshot WITH the
+# position for exactly this reason. Bump it whenever selection, the CORE+ gate
+# or the exit stack changes; do not bump it for wording or display changes.
+#   2026-08-06  buy rule enforced in the app (regime + fresh-signal gates)
+#   2026-09-09  F06 -- data date, Integrity_OK and unknown-hold-status now block
+STRATEGY_VERSION = "prelaunch-2026-09-09"
 
-def mark_buy_ready(df, scan_mode):
+
+def mark_buy_ready(df, scan_mode, session_date=None):
     """Add Buy_Ready (bool) + Buy_Block (ASCII reason) to a scanned frame.
 
     Must run AFTER holding_tracker.annotate_holding (it reads Hold_Status).
     Modes without a validated buy rule get Buy_Ready = False everywhere with
     reason 'no_rule'. Never raises: a flagging failure must not break a scan.
+
+    2026-09-09 audit (F06). The rule used to check four things -- regime, rank,
+    market, entry quality -- and trusted the frame for everything else. Three
+    ways that let a buy through that should not have been one:
+
+      1. A MISSING Hold_Status counted as a fresh signal (`status.isin(("",
+         "pending"))`). "We could not work out whether you already hold this"
+         is not "this is a new signal".
+      2. The row's own Data_Date was never compared to the session being
+         scanned, so a stock whose feed died three days ago kept advertising a
+         buy at a price that no longer existed.
+      3. Integrity_OK is computed by chip_verifier and was then dropped on the
+         floor -- a row flagged as having a broken bar was still buyable.
+
+    All three now block, each with its own reason code, because "why not" is
+    the part the user actually needs. `session_date` defaults to the newest
+    Data_Date in the frame; callers that know the session should pass it, since
+    deriving "today" from the data cannot detect the case where EVERY row is
+    stale.
     """
     if df is None or df.empty:
         return df
@@ -451,29 +494,60 @@ def mark_buy_ready(df, scan_mode):
         from scanner.market_regime import get_market_regime
         reg = get_market_regime()
         # An unreadable regime must block, not wave through: "we do not know
-        # whether the market is a tailwind" is not "it is".
+        # whether the market is a tailwind" is not "it is". A regime computed
+        # from a stale TAIEX cache is equally unusable (F15) -- is_current is
+        # absent on older callers, so treat only an explicit False as a veto.
         enter_ok = bool(reg.get("ok")) and bool(reg.get("enter_ok"))
+        if reg.get("is_current") is False:
+            enter_ok = False
     except Exception:
         enter_ok = False
 
-    market = df["Market"].astype(str) if "Market" in df.columns else ""
+    n = len(df)
+    # A missing Market column must not collapse to a scalar: `"" != "OTC"` is a
+    # plain bool, and Series.mask(bool) raises. Keep everything a Series.
+    market = (df["Market"].astype(str) if "Market" in df.columns
+              else pd.Series([""] * n, index=df.index))
     core = _safe_bool(df, "Core_Plus")
-    status = (df["Hold_Status"].astype(str) if "Hold_Status" in df.columns
-              else pd.Series([""] * len(df), index=df.index))
+    status = (df["Hold_Status"].astype(str).fillna("") if "Hold_Status" in df.columns
+              else pd.Series([""] * n, index=df.index))
     # Shipped order is the rank; the UI must not re-rank before reading this.
-    rank = pd.Series(range(len(df)), index=df.index)
+    rank = pd.Series(range(n), index=df.index)
 
-    fresh = status.isin(("", "pending"))
-    ok = (rank < N_ENTER) & (market == "OTC") & core & fresh
-    ok = ok & enter_ok
+    # Data freshness, per row. Each row carries its own bar date -- one stock's
+    # feed can fail while the rest of the market updates normally.
+    if "Data_Date" in df.columns:
+        bar = df["Data_Date"].astype(str).str.slice(0, 10)
+        target = str(session_date or "")[:10] or (
+            bar[bar != ""].max() if (bar != "").any() else "")
+        current = bar.eq(target) & bar.ne("")
+    else:
+        target = str(session_date or "")[:10]
+        current = pd.Series([False] * n, index=df.index)
 
-    # First failing condition wins, ordered so the message is the most useful
-    # one: the market gate is the reason to do nothing at all today.
+    # chip_verifier sets Integrity_OK; a row it could not vouch for is not
+    # tradable no matter how good the score is.
+    integrity = (_safe_bool(df, "Integrity_OK") if "Integrity_OK" in df.columns
+                 else pd.Series([False] * n, index=df.index))
+
+    # Only an explicit "pending" is a fresh, not-yet-entered signal.
+    fresh = status.eq("pending")
+    known = status.ne("")
+
+    ok = ((rank < N_ENTER) & (market == "OTC") & core & fresh & current
+          & integrity & enter_ok)
+
+    # First failing condition wins, ordered from most to least actionable: the
+    # market gate is the reason to do nothing at all today; a data fault is the
+    # reason to trust nothing about this row; only then the per-name filters.
     block = pd.Series("", index=df.index)
-    block = block.mask(~fresh, "held")
+    block = block.mask(~fresh & known, "held")
+    block = block.mask(~known, "unknown")
     block = block.mask(~core, "quality")
     block = block.mask(market != "OTC", "market")
     block = block.mask(rank >= N_ENTER, "rank")
+    block = block.mask(~integrity, "integrity")
+    block = block.mask(~current, "stale")
     if not enter_ok:
         block = pd.Series("regime", index=df.index)
 
