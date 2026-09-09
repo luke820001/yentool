@@ -41,6 +41,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 PRIVATE_TABLES = ("positions", "executions", "position_daily_marks",
                   "position_rule_events", "cycle_results")
 
+# recommendation_events is NOT simply public. portfolio.ledger.open_position
+# writes a 'position_opened' row into it carrying the new position_id, and flips
+# the recommendation's status to 'converted'. Both say "this suggestion became a
+# real holding" -- which stock, and when. So the guard checks the CONTENT of the
+# event log, not just the tables it lives beside.
+PRIVATE_EVENTS = ("position_opened", "execution_recorded", "position_closed")
+PRIVATE_REC_STATUS = ("converted",)
+
 
 def check(path):
     path = Path(path)
@@ -60,12 +68,43 @@ def check(path):
             if n:
                 offenders.append((table, n))
 
+        # Traces of ownership that live in otherwise-public tables.
+        if "recommendation_events" in present:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM recommendation_events WHERE event_type IN ({})"
+                .format(", ".join("?" * len(PRIVATE_EVENTS))),
+                PRIVATE_EVENTS).fetchone()[0]
+            if n:
+                offenders.append(("recommendation_events", n))
+        if "recommendations" in present:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM recommendations WHERE status IN ({})"
+                .format(", ".join("?" * len(PRIVATE_REC_STATUS))),
+                PRIVATE_REC_STATUS).fetchone()[0]
+            if n:
+                offenders.append(("recommendations(status=converted)", n))
+
+        # A row count cannot see deleted data. SQLite leaves the content of
+        # deleted rows in freelist pages unless secure_delete is on AND the file
+        # is VACUUMed, so "delete the positions, then commit" passes a counting
+        # check while the bytes remain recoverable with `strings`. If this file
+        # ever HELD private rows, counting zero is not evidence they are gone.
+        freelist = conn.execute("PRAGMA freelist_count").fetchone()[0]
+
         public = 0
         if "recommendations" in present:
             public = conn.execute(
                 "SELECT COUNT(*) FROM recommendations").fetchone()[0]
     finally:
         conn.close()
+
+    if not offenders and freelist:
+        print("[ledger-guard] REFUSING TO PUBLISH {}".format(path))
+        print("  no private rows, but {} freelist page(s) exist.".format(freelist))
+        print("  Deleted SQLite rows stay readable in freelist pages, so a zero")
+        print("  count is not proof the data is gone. VACUUM the file (or")
+        print("  rebuild it) before publishing.")
+        return 1
 
     if offenders:
         print("[ledger-guard] REFUSING TO PUBLISH {}".format(path))

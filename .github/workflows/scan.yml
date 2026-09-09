@@ -93,26 +93,32 @@ jobs:
             *) echo "::error::scan failed with exit $code"; exit "$code" ;;
           esac
 
-      # The ledger has to survive between runs -- otherwise every scan believes
-      # today is the first day each name qualified and the fixed first-day price
-      # resets daily, which defeats the point of recording it. But this repo is
-      # public, so before committing it we verify it holds ONLY recommendations
-      # and no real positions or fills (report section 9.2). CI never records a
-      # trade, so a non-empty positions table means a local database with real
-      # holdings got committed by accident -- and git history would keep it
-      # forever. Fail loudly rather than publish it.
+      # The fixed first-day recommendations must survive between runs -- without
+      # them every scan believes today is the first day each name qualified and
+      # the price resets daily, defeating the point of recording it.
+      #
+      # What gets committed is data/recommendations.json, NOT the ledger
+      # database. The database can hold real positions and fills; the JSON is
+      # built by portfolio/publish.py from the recommendations table alone, with
+      # every column named, so a position cannot reach a public file by
+      # construction. An earlier version committed the .db itself, which was a
+      # loaded gun: `git add -f` disarms .gitignore permanently for that path,
+      # and a row-counting guard cannot see rows still sitting in SQLite
+      # freelist pages after a delete. Report section 9.2.
+      #
+      # The guard below is defence in depth, not the mechanism.
       - name: Verify the ledger carries no private positions
         run: python tools/check_ledger_public.py
 
-      # Persist only the small, accumulating state (forward-performance ledger,
-      # recommendation ledger, name cache, hysteresis held-set). Market DBs stay
-      # in the cache above.
+      # Persist only the small, accumulating state: forward-performance ledger,
+      # the public recommendations export, name cache, hysteresis held-set.
+      # Market DBs stay in the cache above.
       - name: Commit durable state
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f data/signal_ledger.db data/portfolio_ledger.db \
-                     data/stock_names.json data/scan_state 2>/dev/null || true
+          git add -f data/signal_ledger.db data/stock_names.json data/scan_state 2>/dev/null || true
+          git add data/recommendations.json 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "no state changes to commit"
           else

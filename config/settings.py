@@ -28,6 +28,13 @@ SIGNAL_LEDGER_FILE = DATA_DIR / "signal_ledger.db"
 # (report sections 5.2 and 11.9).
 PORTFOLIO_LEDGER_FILE = DATA_DIR / "portfolio_ledger.db"
 
+# The PUBLISHED half of that ledger. The database itself stays local and stays
+# ignored; this JSON is what CI commits so first-day recommendations survive
+# between runs. It is built by portfolio/publish.py, which reads the
+# recommendations table and nothing else -- so a position cannot appear in it
+# by construction, rather than because a guard remembered to look.
+RECOMMENDATIONS_EXPORT_FILE = DATA_DIR / "recommendations.json"
+
 # --- Scan result export (latest version only, for reviewing calculations) ---
 SCAN_RESULTS_DIR = DATA_DIR / "scan_results"
 SCAN_RESULT_FILE = SCAN_RESULTS_DIR / "scan_result_latest.csv"

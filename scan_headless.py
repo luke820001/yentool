@@ -19,7 +19,7 @@ not abort the run, matching the GUI's resilience.
 import sys
 import traceback
 
-from config.settings import PORTFOLIO_LEDGER_FILE
+from config.settings import PORTFOLIO_LEDGER_FILE, RECOMMENDATIONS_EXPORT_FILE
 from scanner.market_filter import get_candidate_list, get_feed_health
 from scanner.chip_verifier import verify_candidates
 from scanner.scan_mode import (
@@ -31,6 +31,7 @@ from scanner.signal_ledger import record_picks, backfill_outcomes
 from scanner.holding_tracker import annotate_holding
 from scanner.result_export import export_scan_result
 from portfolio.sync import attach_recommendations, summarize
+from portfolio.publish import seed_from_export, export_recommendations
 
 
 def _progress(rank, total, stock_id):
@@ -182,6 +183,16 @@ def run_scan(scan_mode="mode_prelaunch"):
     # and hang the frozen price off every row we already have one for. After
     # this, Suggested_Buy_Price (recomputed daily) and Initial_Buy_Price (fixed)
     # are both on the row and can never again be mistaken for each other (F01).
+    # CI starts with no ledger (the database is local and gitignored), so the
+    # fixed first-day recommendations are restored from the published JSON
+    # before anything reads them. Additive: an existing row is never rewritten.
+    try:
+        seeded = seed_from_export(PORTFOLIO_LEDGER_FILE, RECOMMENDATIONS_EXPORT_FILE)
+        if seeded:
+            print("  [rec] seeded {} recommendation(s) from the published export".format(seeded))
+    except Exception as e:
+        print("  [rec] seed skipped: {}".format(e))
+
     try:
         result_df, rec_stats = attach_recommendations(
             result_df, scan_mode, STRATEGY_VERSION, PORTFOLIO_LEDGER_FILE,
@@ -189,6 +200,15 @@ def run_scan(scan_mode="mode_prelaunch"):
         print("  [rec] {}".format(summarize(rec_stats)))
     except Exception as e:
         print("  [rec] skipped: {}".format(e))
+
+    # Re-publish the recommendations-only view. This -- not the database -- is
+    # what gets committed to the public repo.
+    try:
+        n = export_recommendations(PORTFOLIO_LEDGER_FILE, RECOMMENDATIONS_EXPORT_FILE)
+        print("  [rec] exported {} recommendation(s) -> {}".format(
+            n, RECOMMENDATIONS_EXPORT_FILE.name))
+    except Exception as e:
+        print("  [rec] export skipped: {}".format(e))
 
     try:
         if degraded is None:

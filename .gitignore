@@ -1,5 +1,17 @@
 .env
-data/
+
+# data/* rather than data/ so the one file below can be re-included. Git cannot
+# un-ignore a file whose PARENT DIRECTORY is excluded, and `git add -f` is not a
+# substitute: it defeats the ignore rule once, and git never re-applies
+# .gitignore to an already-tracked file -- so forcing a database in once
+# disarms the protection permanently, and a later `git commit -a` sweeps it up.
+data/*
+# The recommendations export is meant to be public: portfolio/publish.py builds
+# it by reading the recommendations table and naming every column, so a position
+# or a fill cannot appear in it by construction. The ledger DATABASE that could
+# hold those stays ignored above.
+!data/recommendations.json
+
 __pycache__/
 *.pyc
 

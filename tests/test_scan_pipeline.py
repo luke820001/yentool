@@ -389,6 +389,129 @@ class TestLedgerPublishGuard(unittest.TestCase):
         from tools.check_ledger_public import check
         self.assertEqual(check(self.db), 0)
 
+    def test_deleting_the_positions_does_not_make_it_publishable(self):
+        """The obvious workaround -- clear the tables, then commit -- must not
+        pass. open_position leaves a 'position_opened' event and flips the
+        recommendation to 'converted', both of which say which stock became a
+        real holding; and SQLite keeps deleted row content in freelist pages,
+        so a zero count is not evidence the bytes are gone."""
+        import sqlite3
+        from portfolio.ledger import (open_ledger, record_recommendation,
+                                      open_position, add_execution)
+        from tools.check_ledger_public import check
+        conn = open_ledger(self.db)
+        rid, _ = record_recommendation(conn, "1815", MODE, STRATEGY_VERSION,
+                                       TODAY, "126")
+        pid = open_position(conn, "1815", recommendation_id=rid, strategy=MODE)
+        add_execution(conn, pid, "BUY", TODAY, 1000, "128")
+        conn.close()
+
+        raw = sqlite3.connect(self.db)
+        raw.execute("DELETE FROM executions")
+        raw.execute("DELETE FROM positions")
+        raw.commit()
+        raw.close()
+
+        self.assertEqual(check(self.db), 1,
+                         "clearing the tables must not defeat the guard")
+
+    def test_a_converted_recommendation_alone_blocks_publication(self):
+        """Even with no execution rows at all, 'this suggestion became a
+        holding' is ownership information."""
+        import sqlite3
+        from portfolio.ledger import open_ledger, record_recommendation
+        from tools.check_ledger_public import check
+        conn = open_ledger(self.db)
+        rid, _ = record_recommendation(conn, "1815", MODE, STRATEGY_VERSION,
+                                       TODAY, "126")
+        with conn:
+            conn.execute("UPDATE recommendations SET status='converted' "
+                         "WHERE recommendation_id=?", (rid,))
+        conn.close()
+        self.assertEqual(check(self.db), 1)
+
+
+class TestRecommendationExport(unittest.TestCase):
+    """The published artifact is a recommendations-only JSON, not the database.
+
+    The database can hold real fills; this file cannot, because publish.py reads
+    one table and names every column. That is the property, not the guard.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "portfolio_ledger.db"
+        self.out = Path(self.tmp.name) / "recommendations.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_export_omits_positions_even_when_they_exist(self):
+        from portfolio.ledger import (open_ledger, record_recommendation,
+                                      open_position, add_execution)
+        from portfolio.publish import export_recommendations
+        conn = open_ledger(self.db)
+        rid, _ = record_recommendation(conn, "1815", MODE, STRATEGY_VERSION,
+                                       TODAY, "126", stock_name="Test")
+        pid = open_position(conn, "1815", recommendation_id=rid, strategy=MODE)
+        add_execution(conn, pid, "BUY", TODAY, 1000, "128.5")
+        conn.close()
+
+        self.assertEqual(export_recommendations(self.db, self.out), 1)
+        text = self.out.read_text(encoding="utf-8")
+        payload = json.loads(text)
+        self.assertEqual(payload["table"], "recommendations")
+        self.assertEqual(payload["recommendations"][0]["initial_buy_price"],
+                         "126.00")
+        # The fill price, the share count and the position id must be nowhere
+        # in the bytes -- not merely absent from a field we happened to check.
+        for secret in ("128.5", "128.50", "1000", pid):
+            self.assertNotIn(secret, text,
+                             "{!r} leaked into the published export".format(secret))
+
+    def test_seed_restores_the_fixed_price_on_a_fresh_machine(self):
+        """CI has no ledger; without this the first-day price resets daily."""
+        from portfolio.ledger import open_ledger, record_recommendation
+        from portfolio.publish import export_recommendations, seed_from_export
+        conn = open_ledger(self.db)
+        record_recommendation(conn, "1815", MODE, STRATEGY_VERSION, TODAY,
+                              "126", stock_name="Test")
+        conn.close()
+        export_recommendations(self.db, self.out)
+
+        fresh = Path(self.tmp.name) / "fresh.db"
+        self.assertEqual(seed_from_export(fresh, self.out), 1)
+        conn = open_ledger(fresh)
+        row = conn.execute("SELECT initial_buy_price, first_qualified_session "
+                           "FROM recommendations").fetchone()
+        conn.close()
+        self.assertEqual(row["initial_buy_price"], "126.00")
+        self.assertEqual(row["first_qualified_session"], TODAY)
+
+    def test_seed_never_overwrites_an_existing_recommendation(self):
+        from portfolio.ledger import open_ledger, record_recommendation
+        from portfolio.publish import seed_from_export
+        conn = open_ledger(self.db)
+        record_recommendation(conn, "1815", MODE, STRATEGY_VERSION, TODAY,
+                              "126")
+        conn.close()
+        self.out.write_text(json.dumps({
+            "format_version": 1, "table": "recommendations", "count": 1,
+            "recommendations": [{
+                "recommendation_id": "rec-1815-{}-1".format(MODE),
+                "stock_id": "1815", "strategy": MODE,
+                "strategy_version": STRATEGY_VERSION, "cycle_seq": 1,
+                "first_qualified_session": TODAY, "recommended_at": TODAY,
+                "initial_buy_price": "999.00", "status": "active"}]},
+            ensure_ascii=False), encoding="utf-8")
+
+        self.assertEqual(seed_from_export(self.db, self.out), 0)
+        conn = open_ledger(self.db)
+        price = conn.execute(
+            "SELECT initial_buy_price FROM recommendations").fetchone()[0]
+        conn.close()
+        self.assertEqual(price, "126.00", "a sync must never rewrite a fixed price")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

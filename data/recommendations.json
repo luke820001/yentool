@@ -1,0 +1,27 @@
+{
+ "count": 1,
+ "format_version": 1,
+ "recommendations": [
+  {
+   "cycle_seq": 1,
+   "first_qualified_session": "2026-09-09",
+   "gate_snapshot": "{\"ATR_Pct\": 7.93, \"Buy_Block\": \"\", \"Buy_Ready\": true, \"Close_Price\": 126.0, \"Core_Plus\": true, \"Data_Date\": \"2026-09-09\", \"Dist_52W_High_Pct\": 1.6, \"Explosion_Score\": 9.0, \"Hold_Status\": \"pending\", \"Integrity_OK\": true, \"Launch_Score\": 73.2, \"Market\": \"OTC\", \"Ret_5D_Pct\": 1.4, \"Surge_Score\": 62.8}",
+   "horizon_days": 10,
+   "initial_buy_price": "126.00",
+   "initial_stop_price": "107.10",
+   "initial_target_price": "151.20",
+   "market": "OTC",
+   "recommendation_id": "rec-1815-mode_prelaunch-1",
+   "recommended_at": "2026-09-09 20:43:05",
+   "status": "active",
+   "stock_id": "1815",
+   "stock_name": "富喬",
+   "strategy": "mode_prelaunch",
+   "strategy_version": "prelaunch-2026-09-09",
+   "trail_arm_price": "133.56",
+   "trail_lock_price": "128.52",
+   "valid_until_session": null
+  }
+ ],
+ "table": "recommendations"
+}
