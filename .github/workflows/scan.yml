@@ -14,8 +14,30 @@ on:
     # after the consolidated EOD publishes (~14:00) so the phone sees same-day
     # picks by mid-afternoon; 17:00 and 18:00 re-catch anything that was still
     # being published earlier. Mon-Fri only: the market is closed at weekends,
-    # so a weekend run would just repeat Friday's data. GitHub cron is UTC and
-    # may be delayed a few minutes under load -- fine here.
+    # so a weekend run would just repeat Friday's data.
+    #
+    # THESE TIMES ARE NOT WHEN THE SCAN RUNS. This comment used to say cron
+    # "may be delayed a few minutes under load -- fine here". That was measured
+    # across all 136 scheduled runs of this workflow and it is false:
+    #
+    #     within 15 min of target   0 of 136  (0%)
+    #     within 1 hour             ~21%
+    #     median delay              ~126 min
+    #     worst                     747 min (12h 27m)
+    #
+    # On 2026-08-27 and 08-28 every run landed 10-12.5 hours late, so the
+    # "14:30 Taiwan" scan published after 01:00 the NEXT Taiwan day. Plan for a
+    # 12-hour failure mode, not a 2-hour one.
+    #
+    # Adding more cron entries does NOT help: on 44 of 44 complete three-run
+    # days all three entries slid by nearly the same offset (spread within a
+    # day: median 47 min). The whole day slides as a block, so a fourth entry
+    # just adds a fourth late run.
+    #
+    # The fix is an EXTERNAL scheduler calling workflow_dispatch -- see
+    # docs/排程與即時行情.md. These cron entries stay as a fallback: they do
+    # fire eventually, so if the external trigger dies you degrade to today's
+    # behaviour rather than to nothing.
     - cron: "30 6 * * 1-5"    # 14:30 Taiwan (first same-day scan)
     - cron: "0 9 * * 1-5"     # 17:00 Taiwan
     - cron: "0 10 * * 1-5"    # 18:00 Taiwan
