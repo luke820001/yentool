@@ -1986,8 +1986,20 @@ async function openExecutionForm(cfg) {
   const held = pos ? pos.open_shares : 0;
 
   const today = taipeiDate(new Date());
-  const defDate = editing ? editing.session_date
-    : (sessionOnOrBefore(today) || today);
+  // A NEW execution defaults to today, full stop. This used to default to
+  // sessionOnOrBefore(today), which answers a different question: "what is the
+  // newest bar we hold data for". That is yesterday until the post-close scan
+  // runs, so a trade entered this morning was silently pre-dated to yesterday
+  // -- the calendar's data lag is not the user's trade date. Amending an
+  // existing execution keeps its own recorded date.
+  const defDate = editing ? editing.session_date : today;
+  // Today having no published bar yet is normal (mid-session, or the scan has
+  // not run). It is also what a weekend or holiday looks like. We cannot tell
+  // those apart without an official calendar (F14), so say what we know and
+  // let the user correct the date rather than choosing one for them.
+  const dateNote = (!editing && calIndex(today) < 0)
+    ? "今日尚無收盤資料（盤中、或非交易日）。日期仍預設今天；若不是今天成交請直接改。"
+    : "";
   const defPrice = editing ? (editing.price_cents / 100).toFixed(2) : "";
   const defShares = editing ? String(editing.shares) : "";
 
@@ -2011,7 +2023,8 @@ async function openExecutionForm(cfg) {
     ${manual ? field("stock_id", "股票代號", "", { inputmode: "numeric", hint: "例如 3088" }) +
                field("stock_name", "股票名稱（可留空）", "") : ""}
     ${refNote.length ? `<div class="hint">參考價：${esc(refNote.join("｜"))}。這些只是參考，系統不會替你填成交價。</div>` : ""}
-    ${field("session_date", "成交日期", defDate, { type: "date", hint: "沒有成交日就無法放上損益時間軸" })}
+    ${field("session_date", "成交日期", defDate, { type: "date",
+      hint: dateNote || "沒有成交日就無法放上損益時間軸" })}
     ${field("price", isBuy ? "實際成交價" : "實際賣出價", defPrice, { inputmode: "decimal", hint: "必填。輸入非數字或 0 會被拒絕，不會用參考價代替" })}
     ${field("shares", "股數", defShares, { inputmode: "numeric",
       hint: isBuy ? "1 張 = 1,000 股；零股請直接填股數" : `目前持有 ${held.toLocaleString("en-US")} 股，可部分賣出` })}
@@ -2522,6 +2535,33 @@ function onResume() {
 document.addEventListener("visibilitychange", onResume);
 window.addEventListener("pageshow", onResume);
 window.addEventListener("focus", onResume);
+
+// Taipei-date rollover.
+//
+// Every "today" on screen is computed at RENDER time -- the hold-day counter,
+// the overview header, the execution form's default date. On a phone the app
+// normally just sits there, so nothing redraws at midnight and all of them keep
+// yesterday's date. A trade entered at 00:30 was pre-dated by a full day, which
+// is the one thing an execution record must never get wrong.
+//
+// A plain interval rather than a timer aimed at midnight: a suspended phone does
+// not fire a timer that came due while it slept, and the clock can also move
+// because of a timezone change or a manual correction. Comparing the actual
+// Taipei date every half minute costs nothing and handles all three.
+let TW_DAY = taipeiDate(new Date());
+function checkDayRollover() {
+  const now = taipeiDate(new Date());
+  if (now === TW_DAY) return false;
+  TW_DAY = now;
+  render();
+  return true;
+}
+setInterval(checkDayRollover, 30000);
+// Also on resume: a phone that slept through midnight fires no interval, and
+// waking up is exactly when the user looks at the screen.
+document.addEventListener("visibilitychange", checkDayRollover);
+window.addEventListener("pageshow", checkDayRollover);
+window.addEventListener("focus", checkDayRollover);
 
 async function boot() {
   $("#tabs").innerHTML = tabBar();

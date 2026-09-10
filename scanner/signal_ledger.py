@@ -53,6 +53,7 @@ from scanner.scan_mode import (
     PRELAUNCH_TRAIL_ARM, PRELAUNCH_TRAIL_LOCK,
 )
 from storage.data_store import load_sheet
+from scanner.exit_rules import simulate_exit
 
 # Forward windows measured for every pick (trading bars).
 HORIZONS = (5, 10, 20)
@@ -465,42 +466,14 @@ def _simulate_rule(opens, highs, lows, closes, hold):
     these thresholds no longer agree bar for bar. The ledger is the corrected
     one; the disagreement is the old backtest's, not this function's.
     """
-    if len(opens) < hold:
-        return None, None, "na"
-    entry = opens[0]
-    if not entry or not pd.notna(entry) or entry <= 0:
-        return None, None, "na"
-    entry = float(entry)
-    stop_px = entry * (1 - PRELAUNCH_STOP_PCT)
-    target = entry * (1 + PRELAUNCH_TP_PCT)
-    arm_px = entry * (1 + PRELAUNCH_TRAIL_ARM)
-    lock_px = entry * (1 + PRELAUNCH_TRAIL_LOCK)
-    armed = False
-    for i in range(hold):
-        op, hi, lo = float(opens[i]), float(highs[i]), float(lows[i])
-
-        # 1. the open, against the stop carried IN to this bar (on bar 0 that is
-        #    the disaster stop -- the lock cannot exist before the entry fill).
-        if op >= target:
-            return entry, (op / entry - 1.0) * 100, "tp"
-        if op <= stop_px:
-            return entry, (op / entry - 1.0) * 100, "lock" if armed else "stop"
-
-        # 2. ambiguous remainder of the bar, lowest exit level touched first:
-        #    the stop carried IN, then the lock this bar arms, then the target.
-        if lo <= stop_px:
-            return (entry, (stop_px / entry - 1.0) * 100,
-                    "lock" if armed else "stop")
-        arm_here = (not armed) and hi >= arm_px      # arming bites on its bar
-        if arm_here and lo <= lock_px:
-            return entry, (lock_px / entry - 1.0) * 100, "lock"
-        if hi >= target:
-            return entry, (target / entry - 1.0) * 100, "tp"
-
-        if arm_here:
-            armed = True
-            stop_px = max(stop_px, lock_px)
-    return entry, (float(closes[hold - 1]) / entry - 1.0) * 100, "time"
+    # ONE implementation, shared with any parameter search, so the rule
+    # that chooses the numbers and the rule that measures them can never
+    # drift apart again -- which is exactly how F09 got baked into both
+    # this function and eval_winrate_round2.sim_trail independently.
+    return simulate_exit(
+        opens, highs, lows, closes, hold_bars=hold,
+        stop_pct=PRELAUNCH_STOP_PCT, tp_pct=PRELAUNCH_TP_PCT,
+        arm_pct=PRELAUNCH_TRAIL_ARM, lock_pct=PRELAUNCH_TRAIL_LOCK)
 
 
 def _refetch(stock_ids, market_of):
