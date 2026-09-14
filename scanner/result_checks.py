@@ -745,10 +745,15 @@ def _check_quotes(payload, quotes, rep, tracked_ids=None):
     # through the latest session.
     if tracked_ids:
         listed = {str(r.get("Stock_ID") or "").strip() for r in rows}
-        t_missing, t_gap = [], []
+        # Names the pre-export top-up asked the sources about and still found
+        # nothing newer for: halted or delisted, reported as information.
+        ended = (meta.get("quotes") or {}).get("source_ended") or {}
+        t_missing, t_gap, t_ended = [], [], []
         for sid in sorted(set(str(s) for s in tracked_ids) - listed):
             series = closes.get(sid)
-            if not series:
+            if sid in ended:
+                t_ended.append("{}@{}".format(sid, ended.get(sid) or "?"))
+            elif not series:
                 t_missing.append(sid)
             elif series[-1] is None:
                 t_gap.append(sid)
@@ -759,6 +764,10 @@ def _check_quotes(payload, quotes, rep, tracked_ids=None):
             rep.warn("quotes_gap_tracked", "quotes.closes", len(t_gap),
                      "recently picked stock not priced through the session "
                      "(dropped-out name stopped refreshing)", sample=t_gap)
+        if t_ended:
+            rep.info("quotes_source_ended", "quotes.closes", len(t_ended),
+                     "recently picked stock with no newer bar at any source "
+                     "(halted or delisted; last bar shown)", sample=t_ended)
 
 
 def _check_recommendations(payload, recs, rep):

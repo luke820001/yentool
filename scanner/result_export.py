@@ -31,7 +31,7 @@ from config.settings import (
 
 def export_scan_result(df, scan_mode="", reports=None, degraded=None,
                        session_date=None, strategy_version="",
-                       quality=None):
+                       quality=None, quotes_meta=None):
     """
     Write the full result DataFrame (all computed columns) to SCAN_RESULT_FILE,
     overwriting any previous version. Two context columns (mode + timestamp) are
@@ -62,7 +62,7 @@ def export_scan_result(df, scan_mode="", reports=None, degraded=None,
         export_scan_result_json(df, scan_mode, scan_time, reports=reports,
                                 degraded=degraded, session_date=session_date,
                                 strategy_version=strategy_version,
-                                quality=quality)
+                                quality=quality, quotes_meta=quotes_meta)
     except Exception as e:
         # A mobile-feed hiccup must never break the primary CSV export.
         print("  [export] mobile json failed: {}".format(e))
@@ -127,7 +127,8 @@ def _publish_quotes(df, names=None):
 
 def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
                             degraded=None, session_date=None,
-                            strategy_version="", quality=None):
+                            strategy_version="", quality=None,
+                            quotes_meta=None):
     """
     Write the scan result as JSON for the mobile PWA. Structure:
         {"meta": {...}, "rows": [...]}
@@ -136,6 +137,9 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
     `degraded` is a short ASCII reason string when an exchange feed failed its
     sanity floor this run (the phone shows a data-fault banner and the missing
     market must NOT be read as "no candidates today"). None = healthy.
+    `quotes_meta` is an optional dict merged into meta.quotes -- e.g.
+    {"source_ended": {stock_id: last_bar_date}} from the pre-export top-up, so
+    the column check can tell a halted name from an un-refreshed one.
     NaN/inf are coerced to null so the JSON is valid. Returns the written path.
     """
     MOBILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -205,6 +209,8 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
         },
         "rows": rows,
     }
+    if quotes_meta:
+        payload["meta"]["quotes"].update(quotes_meta)
     with open(MOBILE_DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
     return str(MOBILE_DATA_FILE)

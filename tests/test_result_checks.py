@@ -349,6 +349,16 @@ class QuoteRules(unittest.TestCase):
         rep = check_payload(p, quotes=q, tracked_ids=["9999"])
         self.assertIn("quotes_missing_tracked", codes(rep, "warn"))
 
+    def test_halted_name_is_information_not_a_gap(self):
+        p = clean_payload()
+        p["meta"]["quotes"]["source_ended"] = {"2867": "2026-08-19"}
+        q = clean_quotes(p["rows"])
+        q["closes"]["2867"] = [100.0, None, None]
+        rep = check_payload(p, quotes=q, tracked_ids=["2867"])
+        self.assertIn("quotes_source_ended", codes(rep, "info"))
+        self.assertNotIn("quotes_gap_tracked", codes(rep))
+        self.assertEqual(rep["status"], "ok", format_report(rep))
+
 
 class RecommendationRules(unittest.TestCase):
     def test_active_rec_for_listed_stock_must_attach(self):

@@ -184,21 +184,46 @@ def stale_tracked_ids(price_db, ledger_db, scan_mode, as_of,
     return {sid: mkt for sid, mkt in ids.items() if latest.get(sid, "") < as_of}
 
 
+def latest_bar_dates(price_db, stock_ids):
+    """{stock_id: newest bar date} for the given ids (missing ids absent)."""
+    ids = sorted({str(s).strip() for s in stock_ids if str(s).strip()})
+    if not ids or not os.path.exists(str(price_db)):
+        return {}
+    try:
+        with sqlite3.connect(str(price_db), timeout=30) as conn:
+            return {str(s).strip(): str(d)[:10] for s, d in conn.execute(
+                "SELECT stock_id, MAX(date) FROM data WHERE stock_id IN (%s) "
+                "GROUP BY stock_id" % ",".join("?" * len(ids)), ids)}
+    except Exception:
+        return {}
+
+
 def refresh_tracked_prices(scan_mode, as_of, price_db=None, ledger_db=None):
-    """Fetch the stale names from stale_tracked_ids(). Returns how many were
-    fetched. Never raises; a failed top-up just leaves the gap visible (the
-    column check reports it as quotes_gap_tracked)."""
+    """Fetch the stale names from stale_tracked_ids().
+
+    Returns {"fetched": n, "source_ended": {stock_id: last_bar_date}}. The
+    second part is what is STILL behind after asking the sources again: a name
+    with no newer bar anywhere is halted or delisted, not un-refreshed, and
+    the column check reports it as information rather than as a feed gap.
+    Never raises; a failed top-up just leaves the gap visible."""
     from config.settings import PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE
     price_db = price_db or PRICE_VOLUME_FILE
     ledger_db = ledger_db or SIGNAL_LEDGER_FILE
+    out = {"fetched": 0, "source_ended": {}}
     stale = stale_tracked_ids(price_db, ledger_db, scan_mode, as_of)
     if not stale:
-        return 0
+        return out
     try:
         from ingestion.price_volume_multi import multi_fetch_and_save_batch
         fetched = multi_fetch_and_save_batch(sorted(stale), stale)
-        return len(fetched or ())
+        out["fetched"] = len(fetched or ())
     except Exception as e:
         print("  [quotes] top-up of {} dropped-out name(s) failed: {}".format(
             len(stale), str(e)[:100]))
-        return 0
+        return out
+    still = stale_tracked_ids(price_db, ledger_db, scan_mode, as_of)
+    if still:
+        out["source_ended"] = latest_bar_dates(price_db, still)
+        for sid in still:
+            out["source_ended"].setdefault(sid, "")
+    return out

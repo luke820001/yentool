@@ -226,12 +226,23 @@ def run_scan(scan_mode="mode_prelaunch"):
     # stocks picked in the previous 30 sessions were unpriced, one for 18
     # sessions. A holder of a dropped-out name lost its valuation exactly when
     # the exit decision mattered. Top up every recent pick that is behind.
+    quotes_meta = {}
     try:
         from scanner.quote_feed import refresh_tracked_prices
-        n = refresh_tracked_prices(scan_mode, session_date)
-        if n:
+        topup = refresh_tracked_prices(scan_mode, session_date)
+        if topup.get("fetched"):
             print("  [quotes] refreshed {} dropped-out name(s) so holdings "
-                  "stay priced".format(n))
+                  "stay priced".format(topup["fetched"]))
+        ended = topup.get("source_ended") or {}
+        if ended:
+            # Still behind after asking the sources again: halted or delisted,
+            # not a refresh failure. Published so the checker and the phone can
+            # say so instead of calling it a feed gap.
+            quotes_meta["source_ended"] = ended
+            print("  [quotes] {} name(s) have no newer bar at any source "
+                  "(halted/delisted?): {}".format(
+                      len(ended), ", ".join("{}@{}".format(k, v or "?")
+                                            for k, v in sorted(ended.items()))))
     except Exception as e:
         print("  [quotes] straggler refresh skipped: {}".format(e))
 
@@ -249,7 +260,7 @@ def run_scan(scan_mode="mode_prelaunch"):
         path = export_scan_result(result_df, scan_mode, degraded=degraded,
                                   session_date=session_date,
                                   strategy_version=STRATEGY_VERSION,
-                                  quality=data_health)
+                                  quality=data_health, quotes_meta=quotes_meta)
         print("  [export] scan result -> {}".format(path))
     except Exception as e:
         print("  [export] failed: {}".format(e))
@@ -264,7 +275,7 @@ def run_scan(scan_mode="mode_prelaunch"):
             export_scan_result(result_df, scan_mode, reports=reports,
                                degraded=degraded, session_date=session_date,
                                strategy_version=STRATEGY_VERSION,
-                               quality=data_health)
+                               quality=data_health, quotes_meta=quotes_meta)
             print("  [ai] {} report(s) attached".format(len(reports)))
         except Exception as e:
             print("  [ai] attach failed, prices already published: {}".format(e))
