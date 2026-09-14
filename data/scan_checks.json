@@ -40,6 +40,26 @@
    "errors": 0,
    "warnings": 0,
    "codes": []
+  },
+  {
+   "checked_at": "2026-09-15 00:17:53",
+   "session_date": "2026-09-14",
+   "scan_time": "2026-09-15 00:17:53",
+   "status": "ok",
+   "rows": 42,
+   "errors": 0,
+   "warnings": 0,
+   "codes": []
+  },
+  {
+   "checked_at": "2026-09-15 00:17:54",
+   "session_date": "2026-09-14",
+   "scan_time": "2026-09-15 00:17:53",
+   "status": "ok",
+   "rows": 42,
+   "errors": 0,
+   "warnings": 0,
+   "codes": []
   }
  ]
 }
