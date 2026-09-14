@@ -1,0 +1,43 @@
+# On-time trigger for daily-scan. See .github/scripts/scan_timer.sh for why.
+#
+# These crons are deliberately EARLY. They will arrive hours late like every
+# GitHub cron, and that is fine: they only need to land before 15:00 Taiwan.
+# The job then sleeps to 15:00 and dispatches the scan, which starts at once.
+# Two entries so one dropped cron does not lose the day; the second arrival
+# finds the first already waiting (or the data already published) and exits.
+#
+# Cost: one idle runner for a few hours on weekdays. Public repo, so standard
+# runner minutes are free.
+name: scan-timer
+
+on:
+  schedule:
+    - cron: "0 22 * * 0-4"     # 06:00 Taiwan, Mon-Fri
+    - cron: "0 2 * * 1-5"      # 10:00 Taiwan, Mon-Fri
+  workflow_dispatch: {}         # also used by the script to hop past the 6h job limit
+
+permissions:
+  actions: write               # dispatch scan.yml / itself; nothing else
+  contents: read
+
+# One timer at a time. A newer arrival waits as pending and then finds the work
+# done; a hop dispatched by a finishing run replaces any older pending one.
+concurrency:
+  group: scan-timer
+  cancel-in-progress: false
+
+jobs:
+  timer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      TZ: Asia/Taipei
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - name: Wait for the target time and trigger the scan
+        run: bash .github/scripts/scan_timer.sh

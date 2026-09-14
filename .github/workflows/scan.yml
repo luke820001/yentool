@@ -34,10 +34,11 @@ on:
     # day: median 47 min). The whole day slides as a block, so a fourth entry
     # just adds a fourth late run.
     #
-    # The fix is an EXTERNAL scheduler calling workflow_dispatch -- see
-    # docs/排程與即時行情.md. These cron entries stay as a fallback: they do
-    # fire eventually, so if the external trigger dies you degrade to today's
-    # behaviour rather than to nothing.
+    # The on-time trigger is scan-timer.yml: an early cron that only has to
+    # arrive before 15:00, sleeps to 15:00 and dispatches this workflow (a
+    # dispatch starts immediately) -- see docs/排程與即時行情.md. These cron
+    # entries stay as a fallback: they do fire eventually, so if the timer dies
+    # you degrade to the old late behaviour rather than to nothing.
     - cron: "30 6 * * 1-5"    # 14:30 Taiwan (first same-day scan)
     - cron: "0 9 * * 1-5"     # 17:00 Taiwan
     - cron: "0 10 * * 1-5"    # 18:00 Taiwan

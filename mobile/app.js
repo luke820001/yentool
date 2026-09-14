@@ -547,6 +547,13 @@ async function dbPutMany(store, values) {
   return txDone(tx);
 }
 
+async function dbDelete(store, key) {
+  const db = await openDB();
+  const tx = db.transaction(store, "readwrite");
+  tx.objectStore(store).delete(key);
+  return txDone(tx);
+}
+
 async function metaGet(key, dflt) {
   const row = await dbGet("meta", key);
   return row === undefined ? dflt : row.value;
@@ -1105,6 +1112,8 @@ async function load() {
   STATE.loadedAt = nowStamp();
   render();
   setStatus(STATE.scanError ? "更新失敗，顯示上次資料" : "更新於 " + STATE.loadedAt);
+  // Never awaited: a slow or failing GitHub call must not hold up the screen.
+  maybeAutoRefresh().catch(() => {});
 }
 
 function setStatus(text) {
@@ -1861,6 +1870,217 @@ function renderPerf() {
       兩個數字都可能是對的，但不能共用同一個標題（報告 6.2）。</div></div>`;
 }
 
+// --- 11.4 雲端更新（workflow_dispatch）-----------------------------------------
+//
+// GitHub's own cron lands a median ~2h and up to 12h late (docs/排程與即時行情.md),
+// so the phone can start the scan itself. It calls workflow_dispatch with a
+// fine-grained token that holds Actions: read/write on this one repo and nothing
+// else -- it cannot rewrite app.js, which is the reason dispatch was chosen over
+// repository_dispatch. The token lives ONLY in this device's IndexedDB: it is
+// never rendered back, never exported in a backup, never accepted from an import.
+const GH_API = "https://api.github.com/repos/luke820001/yentool/actions";
+const GH_WORKFLOW = "scan.yml";
+const GH_TOKEN_KEY = "gh_dispatch_token";
+const AUTO_KEY = "auto_dispatch";
+const PRIVATE_META = new Set([GH_TOKEN_KEY, AUTO_KEY]);
+const EOD_READY_MIN = 15 * 60;         // same as scan-timer's first attempt (TPEX margin)
+const AUTO_MAX_PER_SESSION = 2;        // a holiday or a feed outage must not loop
+const AUTO_GAP_MS = 90 * 60 * 1000;
+const POLL_MS = 15000;
+const POLL_LIMIT_MS = 25 * 60 * 1000;
+
+const REFRESH = { busy: false, text: "", tone: "info", runUrl: "", hasToken: false };
+
+function setRefresh(text, tone, runUrl) {
+  REFRESH.text = text;
+  REFRESH.tone = tone || "info";
+  if (runUrl !== undefined) REFRESH.runUrl = runUrl;
+  if (STATE.page === "research") renderResearch();
+}
+
+// The newest session whose close should already be published. Weekends are
+// skipped; exchange holidays are not knowable here, which is why auto-dispatch
+// is capped per session rather than trusted to stop by itself.
+function expectedSession(now) {
+  let date = taipeiDate(now);
+  let ready = taipeiMinutes(now) >= EOD_READY_MIN;
+  for (let i = 0; i < 7; i++) {
+    const dow = new Date(date + "T00:00:00Z").getUTCDay();
+    if (ready && dow !== 0 && dow !== 6) return date;
+    const d = new Date(date + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() - 1);
+    date = d.toISOString().slice(0, 10);
+    ready = true;
+  }
+  return date;
+}
+
+function dataIsStale() {
+  const have = effectiveDataDate();
+  return !have || have < expectedSession(new Date());
+}
+
+async function ghFetch(path, init) {
+  const token = await metaGet(GH_TOKEN_KEY, "");
+  if (!token) throw new Error("尚未設定更新金鑰");
+  const res = await fetch(GH_API + path, Object.assign({ cache: "no-store" }, init, {
+    headers: {
+      Authorization: "Bearer " + token,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+  }));
+  if (res.status === 401) throw new Error("金鑰無效或已過期，請重新設定");
+  if (res.status === 403 || res.status === 404) {
+    throw new Error(`金鑰權限不足（HTTP ${res.status}），需要 yentool 的 Actions: Read and write`);
+  }
+  if (!res.ok) throw new Error("GitHub 回應 HTTP " + res.status);
+  return res.status === 204 ? null : res.json();
+}
+
+async function latestRuns() {
+  const data = await ghFetch(`/workflows/${GH_WORKFLOW}/runs?per_page=5`);
+  return (data && data.workflow_runs) || [];
+}
+
+// manual=true: the button. manual=false: the stale-data check after a load.
+async function cloudRefresh(manual) {
+  if (REFRESH.busy) { if (manual) toast("更新已在進行中"); return; }
+  if (!DB_OK) { if (manual) toast("此瀏覽器無法儲存金鑰，無法從手機觸發更新"); return; }
+  const token = await metaGet(GH_TOKEN_KEY, "");
+  REFRESH.hasToken = !!token;
+  if (!token) { if (manual) openTokenForm(); return; }
+
+  REFRESH.busy = true;
+  const before = effectiveDataDate();
+  try {
+    setRefresh("檢查雲端掃描狀態…", "info");
+    let runs = await latestRuns();
+    let run = runs.find((r) => r.status !== "completed");
+    if (run) {
+      setRefresh("雲端已有掃描在執行，等待完成…", "info", run.html_url);
+    } else {
+      const since = Date.now() - 60000;
+      await ghFetch(`/workflows/${GH_WORKFLOW}/dispatches`, {
+        method: "POST", body: JSON.stringify({ ref: "main" }),
+      });
+      setRefresh("已觸發雲端掃描，約 3～4 分鐘完成…", "info", "");
+      // A dispatch returns no run id; find the run it created by time.
+      const findUntil = Date.now() + 2 * 60000;
+      while (!run && Date.now() < findUntil) {
+        await new Promise((r) => setTimeout(r, 5000));
+        runs = await latestRuns();
+        run = runs.find((r) => r.event === "workflow_dispatch" && Date.parse(r.created_at) >= since);
+      }
+      if (!run) throw new Error("已送出，但 2 分鐘內沒看到執行出現，請到 GitHub Actions 確認");
+      setRefresh("雲端掃描執行中…", "info", run.html_url);
+    }
+
+    const started = Date.now();
+    while (run.status !== "completed") {
+      if (Date.now() - started > POLL_LIMIT_MS) throw new Error("等待超過 25 分鐘，請到 GitHub Actions 確認");
+      await new Promise((r) => setTimeout(r, POLL_MS));
+      run = await ghFetch(`/runs/${run.id}`);
+      const mins = Math.max(1, Math.round((Date.now() - Date.parse(run.created_at)) / 60000));
+      setRefresh(`雲端掃描執行中（${run.status === "queued" ? "排隊中" : "第 " + mins + " 分鐘"}）…`, "info", run.html_url);
+    }
+    if (run.conclusion !== "success") {
+      throw new Error(`雲端掃描失敗（${run.conclusion}），請查看執行紀錄`);
+    }
+    // The deploy job is part of the run, but the CDN can trail it by seconds.
+    await new Promise((r) => setTimeout(r, 8000));
+    await load();
+    const after = effectiveDataDate();
+    if (after && after > (before || "")) {
+      setRefresh(`更新完成：行情資料日 ${after}`, "ok", run.html_url);
+      toast("資料已更新到 " + after);
+    } else if (dataIsStale()) {
+      // Exit code 1 in the workflow: feed not published yet, old data kept.
+      setRefresh(`掃描跑完，但資料源還沒有 ${expectedSession(new Date())} 的收盤（可能是休市，或交易所尚未發布）。資料維持 ${after || "未知"}。`, "warn", run.html_url);
+    } else {
+      setRefresh(`已是最新：行情資料日 ${after}`, "ok", run.html_url);
+    }
+  } catch (e) {
+    setRefresh("更新失敗：" + (e.message || String(e)), "err");
+    if (manual) toast("更新失敗：" + (e.message || String(e)));
+  } finally {
+    REFRESH.busy = false;
+    if (STATE.page === "research") renderResearch();
+  }
+}
+
+// Runs after every load. Cheap when the data is fresh (no network at all).
+async function maybeAutoRefresh() {
+  if (REFRESH.busy || !DB_OK || !dataIsStale()) return;
+  if (!(await metaGet(GH_TOKEN_KEY, ""))) return;
+  const session = expectedSession(new Date());
+  const rec = await metaGet(AUTO_KEY, {});
+  const count = rec.session === session ? rec.count || 0 : 0;
+  if (count >= AUTO_MAX_PER_SESSION) return;
+  if (rec.session === session && Date.now() - (rec.at || 0) < AUTO_GAP_MS) return;
+  await metaSet(AUTO_KEY, { session, count: count + 1, at: Date.now() });
+  cloudRefresh(false);
+}
+
+function openTokenForm() {
+  openModal("設定更新金鑰", `
+    <div class="hint">手機要能直接啟動雲端掃描，需要一把只給這個 repo「觸發 Actions」權限的 GitHub 金鑰。</div>
+    <div class="hint">建立位置：github.com/settings/personal-access-tokens/new<br>
+      Repository access → Only select repositories → <b>yentool</b><br>
+      Repository permissions → <b>Actions: Read and write</b>，其他一律不要給。</div>
+    <div class="notice warn">金鑰只存在這支手機，不會上傳、不會出現在備份檔。到期後按鈕會顯示「金鑰無效」，記得換新。</div>
+    ${field("token", "金鑰（github_pat_…）", "", { type: "password", attrs: 'autocomplete="off" autocapitalize="off" spellcheck="false"' })}`, {
+    submit: "token-save", submitLabel: "儲存並更新",
+  });
+}
+
+async function saveToken() {
+  const modal = $("#modal");
+  const input = modal.querySelector("[name=token]");
+  const err = modal.querySelector("[data-err=token]");
+  const token = String((input && input.value) || "").trim();
+  if (!/^(github_pat_|ghp_)[A-Za-z0-9_]{20,}$/.test(token)) {
+    err.textContent = "格式不符，應以 github_pat_ 開頭";
+    return;
+  }
+  await metaSet(GH_TOKEN_KEY, token);
+  REFRESH.hasToken = true;
+  closeModal();
+  toast("金鑰已儲存");
+  await cloudRefresh(true);
+}
+
+async function clearToken() {
+  if (!confirm("刪除這支手機上的更新金鑰？之後需要重新設定才能從手機更新。")) return;
+  await dbDelete("meta", GH_TOKEN_KEY);
+  REFRESH.hasToken = false;
+  setRefresh("", "info", "");
+  toast("已刪除金鑰");
+}
+
+function refreshBlockHtml() {
+  const have = effectiveDataDate() || "未知";
+  const want = expectedSession(new Date());
+  const stale = dataIsStale();
+  const status = REFRESH.text
+    ? `<div class="notice ${esc(REFRESH.tone)}">${esc(REFRESH.text)}${REFRESH.runUrl
+        ? `<br><a href="${esc(REFRESH.runUrl)}" target="_blank" rel="noopener">查看執行紀錄</a>` : ""}</div>`
+    : "";
+  return `<div class="sec"><h2>資料更新</h2>` +
+    drow("目前行情資料日", esc(have)) +
+    drow("應有資料日", esc(want) + (stale ? "（落後）" : "（最新）")) +
+    status +
+    `<div class="btns">${REFRESH.busy
+      ? `<button type="button" class="btn primary" disabled>更新中…</button>`
+      : btn("cloud-refresh", "立即更新", "primary")}${
+      REFRESH.hasToken ? btn("token-clear", "刪除金鑰", "") : btn("token-set", "設定金鑰", "")}</div>
+    <div class="hint">${REFRESH.hasToken
+      ? `自動更新：開啟 App 時若資料落後，會自動觸發雲端掃描（每個交易日最多 ${AUTO_MAX_PER_SESSION} 次，間隔至少 90 分鐘）。`
+      : "雲端每個交易日 15:00 起自動更新（scan-timer），不需要電腦開機。設定金鑰後，這裡的按鈕才能手動立即更新。"}</div>
+  </div>`;
+}
+
 // --- 11.5 研究與資料狀態 ------------------------------------------------------
 function renderResearch() {
   const m = STATE.meta;
@@ -1909,6 +2129,7 @@ function renderResearch() {
   ].map(([k, v]) => drow(k, esc(v))).join("");
 
   document.getElementById("page-research").innerHTML =
+    refreshBlockHtml() +
     `<div class="sec"><h2>資料狀態</h2>` +
       drow("模式", esc(m.mode || "未知")) +
       drow("策略版本", esc(m.strategy_version || "未提供")) +
@@ -2311,7 +2532,9 @@ async function exportBackup() {
     version: 1,
     exported_at: nowStamp(),
     positions, executions,
-    meta: meta.filter((m) => !String(m.key).startsWith("legacy_backup")),
+    // The dispatch token must never leave the device, least of all in a file
+    // that gets mailed to yourself or dropped in a cloud drive.
+    meta: meta.filter((m) => !String(m.key).startsWith("legacy_backup") && !PRIVATE_META.has(m.key)),
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -2361,7 +2584,7 @@ async function runImport() {
   await dbPutMany("positions", data.positions);
   await dbPutMany("executions", data.executions || []);
   for (const m of (data.meta || [])) {
-    if (m && m.key) await dbPut("meta", m);
+    if (m && m.key && !PRIVATE_META.has(m.key)) await dbPut("meta", m);
   }
   closeModal();
   toast(`已匯入 ${data.positions.length} 筆持倉`);
@@ -2449,6 +2672,10 @@ document.addEventListener("click", async (ev) => {
     if (act === "cycle") { await openCycleDetail(d.pos); return; }
     if (act === "execs") { await openExecutionList(d.pos); return; }
     if (act === "fees") { await toggleFees(); return; }
+    if (act === "cloud-refresh") { await cloudRefresh(true); return; }
+    if (act === "token-set") { openTokenForm(); return; }
+    if (act === "token-save") { await saveToken(); return; }
+    if (act === "token-clear") { await clearToken(); return; }
 
     if (act === "buy") {
       const pos = d.pos ? await dbGet("positions", d.pos) : null;
@@ -2568,6 +2795,7 @@ async function boot() {
   try {
     await openDB();
     STATE.settings = Object.assign(STATE.settings, await metaGet("settings", {}));
+    REFRESH.hasToken = !!(await metaGet(GH_TOKEN_KEY, ""));
     await loadLedger();
     const migrated = await migrateLegacy();
     if (migrated) toast(`已從舊版匯入 ${migrated} 筆持倉，請補登股數`);
