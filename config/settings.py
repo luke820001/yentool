@@ -34,6 +34,9 @@ PORTFOLIO_LEDGER_FILE = DATA_DIR / "portfolio_ledger.db"
 # recommendations table and nothing else -- so a position cannot appear in it
 # by construction, rather than because a guard remembered to look.
 RECOMMENDATIONS_EXPORT_FILE = DATA_DIR / "recommendations.json"
+# Rolling history of the per-column self-check (scanner/result_checks.py);
+# small, committed by the cloud run alongside the ledger.
+SCAN_CHECKS_FILE = DATA_DIR / "scan_checks.json"
 
 # --- Scan result export (latest version only, for reviewing calculations) ---
 SCAN_RESULTS_DIR = DATA_DIR / "scan_results"

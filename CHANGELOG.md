@@ -2,6 +2,56 @@
 
 ---
 
+## 2026-09-14
+
+### feat: 雲端每次掃描後逐欄自我檢測，發現缺口就自動補齊
+
+**Files:** `scanner/result_checks.py`（新）、`tools/check_scan_result.py`（新）、
+`tests/test_result_checks.py`（新）、`scanner/quote_feed.py`、`scan_headless.py`、
+`config/settings.py`、`.github/workflows/scan.yml`、`.github/scripts/scan_timer.sh`、
+`mobile/app.js`、`mobile/index.html`、`mobile/sw.js`（shell v14）
+
+**Trigger:** 重新檢視 2026-09-14 雲端實際發布的 `scan_result.json`（42 列 × 96 欄）、
+`quotes.json`、`recommendations.json` 與 Actions 執行紀錄。之前的防線都在上游
+（feed 門檻、單根 K 棒完整性、買進閘門），沒有任何一道檢查「手機真正拿到的檔案」。
+
+**實際發現並修正：**
+
+1. **同日兩個 run 互相搶 push，排程 run 整個變紅、Pages 沒部署。** 13:14Z 的排程 run
+   與 13:13Z 的 dispatch run 從同一個 base commit 出發，後者先 push，前者 `git push`
+   被拒（non-fast-forward）→ job 失敗，且因為上傳 Pages 的步驟排在 commit 之後，
+   這次掃描根本沒有發布。修正：上傳 Pages 移到 commit 之前；push 失敗時 fetch +
+   `rebase -X theirs` 重試 5 次，衝突時本次狀態檔優先（同一天的資料，較晚產生者為準）。
+2. **掉榜個股停止更新，持倉估值斷線（F04 回歸）。** 只有當天候選名單會被抓價，
+   落榜後 `price_volume.db` 就不再更新，`quotes.json` 尾端變 null。近 30 個交易日
+   帳本挑過的 95 檔中有 20 檔尾端缺價，最長 18 個交易日（2867，8/19 之後）。
+   修正：`quote_feed.refresh_tracked_prices()` 在匯出前補抓「近 30 日曾入選、最新
+   K 棒落後」的名單（走既有 `multi_fetch_and_save_batch`）。
+3. **沒有任何欄位層級檢查。** 新增 `scanner/result_checks.py`：96 欄註冊表
+   （型別 / 可否為空 / 合理範圍 / 手機是否讀取）、跨欄恆等式（停損 < 進場 < 目標、
+   `Hold_Day + Hold_Remaining == Hold_Total`、`Fill_* = Entry_Open × 倍數`、
+   `Core_Plus` 對三個門檻、`Buy_Ready` ⇒ 每道閘門、`Sup/Res_Gap_Pct` 公式、收盤在當日
+   高低之間…）、meta 一致性（data_date vs session / 日曆 / 大盤判定 / 報價檔 as_of、
+   count vs rows、degraded / data_lag）、報價檔覆蓋（每檔入選股都有當日收盤且與
+   `Close_Price` 相符；近期入選股不得尾端缺價）、建議檔（active 建議必須掛回列上、
+   名稱不得亂碼）。
+
+**流程：** `scan_headless` 匯出後立即檢測並把結果寫進 `meta.checks`；`scan.yml` 再跑一次
+`tools/check_scan_result.py --annotate` 產生 Actions 註記；歷史留在 `data/scan_checks.json`
+（滾動 60 筆，隨 ledger 一起 commit）。**「錯誤」= 型別 / 空值 / 恆等式破壞 → `status=fail`**，
+檔案照樣發布（有解釋的壞檔勝過沒解釋的舊檔）但手機顯示紅色橫幅、`scan-timer` 視為未完成
+並在 19:30 前持續重掃；「警告」= 範圍或報價缺口，資料可用。手機「研究」頁新增
+「欄位自我檢測（雲端）」明細表。
+
+**手機「立即更新」不再需要金鑰。** 沒設金鑰時按鈕改開 GitHub 的 Run workflow 頁，用手機
+瀏覽器的 GitHub 登入按一下即可；金鑰只在想 App 內一鍵觸發＋自動輪詢時才需要（改為「進階」）。
+每日更新本來就由 `scan-timer` 在雲端自動完成，與金鑰無關。
+
+**對 2026-09-14 實際 payload 的檢測結果：** 0 錯誤、1 警告（`quotes_gap_tracked` × 18，
+即上面第 2 點，補抓上線後應歸零）。50 個新單元測試，全部 125 個測試通過。
+
+---
+
 ## 2026-09-09
 
 ### refactor+fix: 把「系統說了什麼」和「你真的買了什麼」分開

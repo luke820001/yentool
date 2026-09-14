@@ -116,6 +116,18 @@ jobs:
             *) echo "::error::scan failed with exit $code"; exit "$code" ;;
           esac
 
+      # Every column of what the phone is about to receive, checked against
+      # its registry and the cross-column identities (scanner/result_checks.py).
+      # The outcome is written into meta.checks (phone banner), appended to
+      # data/scan_checks.json (history), and shown here as annotations. A
+      # "fail" does not withhold the publish -- an explained bad file beats an
+      # unexplained stale one -- but scan-timer treats it as "not done" and
+      # retries through the afternoon.
+      - name: Self-check every published column
+        id: checks
+        if: steps.scan.outputs.published == 'true'
+        run: python tools/check_scan_result.py --annotate
+
       # The fixed first-day recommendations must survive between runs -- without
       # them every scan believes today is the first day each name qualified and
       # the price resets daily, defeating the point of recording it.
@@ -133,26 +145,48 @@ jobs:
       - name: Verify the ledger carries no private positions
         run: python tools/check_ledger_public.py
 
+      # Upload BEFORE committing state. The phone's data must never wait on
+      # git: on 2026-09-14 a scheduled run finished the scan, then failed its
+      # push (see below) and, because the upload came after, never deployed.
+      - name: Upload Pages artifact (mobile/ with fresh scan_result.json)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: mobile
+
       # Persist only the small, accumulating state: forward-performance ledger,
-      # the public recommendations export, name cache, hysteresis held-set.
-      # Market DBs stay in the cache above.
+      # the public recommendations export, name cache, hysteresis held-set, and
+      # the column-check history. Market DBs stay in the cache above.
+      #
+      # Two runs can overlap in wall time (scan-timer dispatch + a late cron:
+      # the concurrency group serialises the JOBS, but both checked out the
+      # same base commit before the other pushed). 2026-09-14 13:14Z: the
+      # second push was rejected as non-fast-forward and the run went red.
+      # Rebase onto whatever landed meanwhile and retry; on a conflict in the
+      # state files this run's copy wins (-X theirs during a rebase is the
+      # commit being replayed, i.e. ours), because it was produced later from
+      # the same day's data.
       - name: Commit durable state
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -f data/signal_ledger.db data/stock_names.json data/scan_state 2>/dev/null || true
-          git add data/recommendations.json 2>/dev/null || true
+          git add data/recommendations.json data/scan_checks.json 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "no state changes to commit"
-          else
-            git commit -m "chore: daily scan $(date -u +%F)"
-            git push
+            exit 0
           fi
-
-      - name: Upload Pages artifact (mobile/ with fresh scan_result.json)
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: mobile
+          git commit -m "chore: daily scan $(date -u +%F)"
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              echo "pushed on attempt $attempt"
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); rebasing onto origin/main"
+            git fetch origin main
+            git rebase -X theirs origin/main || { git rebase --abort; git reset --hard origin/main; echo "::warning::state commit dropped after rebase conflict"; exit 0; }
+            sleep $(( attempt * 7 ))
+          done
+          echo "::warning::could not push state after 5 attempts; Pages already deployed"
 
   deploy:
     needs: scan

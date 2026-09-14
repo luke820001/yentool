@@ -14,7 +14,8 @@
 #
 # Done means the PUBLISHED phone data is today's session and not degraded -- not
 # "a run finished". A run can finish green with nothing new: exit 1 when the feed
-# is unreachable, or a degraded OTC snapshot before TPEX has published.
+# is unreachable, a degraded OTC snapshot before TPEX has published, or a
+# payload whose per-column self-check failed (meta.checks.status == fail).
 #
 # Env: GH_TOKEN, GH_REPO (gh), PAGES_URL, TZ=Asia/Taipei.
 # Test hooks: NOW_EPOCH fakes the clock, DRY_RUN=1 prints the plan and exits.
@@ -52,8 +53,12 @@ published_today() {
   body=$(curl -fsS --max-time 30 "${PAGES_URL}/scan_result.json?t=$(date +%s%N)") || return 1
   date=$(jq -r '.meta.data_date // "" | .[0:10]' <<<"$body")
   degraded=$(jq -r '.meta.degraded // ""' <<<"$body")
-  log "published data_date=${date:-?} degraded=${degraded:-none}"
-  [[ "$date" == "$(today)" && -z "$degraded" ]]
+  checks=$(jq -r '.meta.checks.status // "ok"' <<<"$body")
+  log "published data_date=${date:-?} degraded=${degraded:-none} checks=${checks}"
+  # Done = today's session, no degraded market, and the per-column self-check
+  # (tools/check_scan_result.py) did not fail. A failed check is published
+  # with a red banner so the phone knows, and retried here.
+  [[ "$date" == "$(today)" && -z "$degraded" && "$checks" != "fail" ]]
 }
 
 dispatch_and_wait() {

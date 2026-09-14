@@ -1433,7 +1433,26 @@ function renderNotices() {
   if (m.empty_ok) {
     out.push(noticeHtml("info", "今日 0 檔入選 · 這是正常的空結果（資料源正常，非故障）"));
   }
+  // Column self-check (scanner/result_checks.py). The cloud audits every
+  // column of this file before publishing; a fail means at least one column
+  // is wrong and scan-timer is already retrying -- do not act on the numbers.
+  const chk = m.checks;
+  if (chk && chk.status === "fail") {
+    out.push(noticeHtml("err", `⚠ 欄位自我檢測未通過（${chk.errors} 項錯誤、${chk.warnings} 項警告：${checkCodes(chk)}）· 雲端會自動重掃 · 明細見「研究」頁`));
+  } else if (chk && chk.status === "warn") {
+    out.push(noticeHtml("warn", `⚠ 欄位自我檢測 ${chk.warnings} 項警告（${checkCodes(chk)}）· 明細見「研究」頁`));
+  }
   $("#notices").innerHTML = out.join("");
+}
+
+function checkCodes(chk) {
+  const codes = [];
+  for (const it of (chk && chk.items) || []) {
+    if (it.level === "info" || codes.includes(it.code)) continue;
+    codes.push(it.code);
+    if (codes.length >= 3) break;
+  }
+  return codes.join("、") || "無";
 }
 
 function tabBar() {
@@ -1880,6 +1899,9 @@ function renderPerf() {
 // never rendered back, never exported in a backup, never accepted from an import.
 const GH_API = "https://api.github.com/repos/luke820001/yentool/actions";
 const GH_WORKFLOW = "scan.yml";
+// Key-less fallback: GitHub's own run page for this workflow (needs only a
+// GitHub login in the phone browser, no token anywhere).
+const GH_RUN_PAGE = "https://github.com/luke820001/yentool/actions/workflows/" + GH_WORKFLOW;
 const GH_TOKEN_KEY = "gh_dispatch_token";
 const AUTO_KEY = "auto_dispatch";
 const PRIVATE_META = new Set([GH_TOKEN_KEY, AUTO_KEY]);
@@ -1950,7 +1972,18 @@ async function cloudRefresh(manual) {
   if (!DB_OK) { if (manual) toast("此瀏覽器無法儲存金鑰，無法從手機觸發更新"); return; }
   const token = await metaGet(GH_TOKEN_KEY, "");
   REFRESH.hasToken = !!token;
-  if (!token) { if (manual) openTokenForm(); return; }
+  if (!token) {
+    // No key on this phone. Nothing here can mint one (a token is a GitHub
+    // credential; only the account owner can create it), so fall back to the
+    // path that needs no key at all: GitHub's own "Run workflow" page, which
+    // works with the GitHub login already in the phone's browser. The daily
+    // update itself never needed a key -- scan-timer runs it in the cloud.
+    if (manual) {
+      window.open(GH_RUN_PAGE, "_blank", "noopener");
+      setRefresh("已開啟 GitHub 的「Run workflow」頁：登入後按右側綠色 Run workflow → Run workflow，約 3～4 分鐘後回來下拉重新整理即可。不需要金鑰。", "info", GH_RUN_PAGE);
+    }
+    return;
+  }
 
   REFRESH.busy = true;
   const before = effectiveDataDate();
@@ -2074,10 +2107,10 @@ function refreshBlockHtml() {
     `<div class="btns">${REFRESH.busy
       ? `<button type="button" class="btn primary" disabled>更新中…</button>`
       : btn("cloud-refresh", "立即更新", "primary")}${
-      REFRESH.hasToken ? btn("token-clear", "刪除金鑰", "") : btn("token-set", "設定金鑰", "")}</div>
+      REFRESH.hasToken ? btn("token-clear", "刪除金鑰", "") : btn("token-set", "進階：設定金鑰", "")}</div>
     <div class="hint">${REFRESH.hasToken
       ? `自動更新：開啟 App 時若資料落後，會自動觸發雲端掃描（每個交易日最多 ${AUTO_MAX_PER_SESSION} 次，間隔至少 90 分鐘）。`
-      : "雲端每個交易日 15:00 起自動更新（scan-timer），不需要電腦開機。設定金鑰後，這裡的按鈕才能手動立即更新。"}</div>
+      : "每個交易日 15:00 起雲端自動掃描並自我檢測（scan-timer），不需要電腦、不需要金鑰。想提前手動重掃：按「立即更新」會開啟 GitHub 的 Run workflow 頁，用手機上的 GitHub 登入按一下即可；只有想在 App 內一鍵觸發、自動輪詢時才需要設定金鑰。"}</div>
   </div>`;
 }
 
@@ -2092,6 +2125,25 @@ function renderResearch() {
     ? Object.entries(m.quality).map(([k, v]) =>
         drow(k, esc(typeof v === "object" ? JSON.stringify(v) : String(v)))).join("")
     : `<div class="hint">本次掃描沒有附品質欄位。</div>`;
+
+  // Per-column self-check written by the cloud (meta.checks). Every column of
+  // scan_result.json, quotes.json and recommendations.json is audited against
+  // a registry and the cross-column identities before the file is published.
+  const chk = m.checks;
+  const chkTone = { ok: "ok", warn: "warn", fail: "err" };
+  const chkLabel = { ok: "通過", warn: "有警告", fail: "未通過" };
+  const chkLevel = { error: "錯誤", warn: "警告", info: "資訊" };
+  const checksBlock = chk
+    ? `<div class="notice ${chkTone[chk.status] || "info"}">狀態：${esc(chkLabel[chk.status] || chk.status)}｜${
+        chk.rows} 列 × ${chk.columns} 欄｜${chk.errors} 錯誤、${chk.warnings} 警告｜檢查於 ${esc(chk.checked_at || "?")}</div>` +
+      ((chk.items || []).length
+        ? `<table class="tbl"><thead><tr><th>等級</th><th>項目</th><th>欄位</th><th>筆數</th><th>說明</th></tr></thead><tbody>${
+            chk.items.map((it) => `<tr class="${it.level === "error" ? "neg" : ""}"><td>${esc(chkLevel[it.level] || it.level)}</td><td>${esc(it.code)}</td><td>${esc(it.column || "-")}</td><td>${it.count}</td><td>${esc(it.detail || "")}${
+              it.sample && it.sample.length ? `<br><span class="hint">例：${esc(it.sample.slice(0, 5).join("、"))}</span>` : ""}</td></tr>`).join("")
+          }</tbody></table>`
+        : `<div class="hint">全部欄位通過，沒有任何發現。</div>`) +
+      `<div class="hint">「錯誤」= 型別、空值或欄位間恆等式被破壞，雲端 scan-timer 會視為未完成並自動重掃；「警告」= 數值超出常見範圍或報價檔有缺口，資料仍可用但請留意。</div>`
+    : `<div class="hint">本次掃描沒有附欄位自我檢測結果（舊版雲端流程）。</div>`;
 
   const quotesBlock = q
     ? drow("報價檔", `${esc(q.as_of || "?")}｜${q.count || 0} 檔｜${(q.sessions || []).length} 個交易日`) +
@@ -2148,6 +2200,7 @@ function renderResearch() {
     `</div>` +
     `<div class="sec"><h2>交易日曆</h2>${calBlock}</div>` +
     `<div class="sec"><h2>掃描品質欄位</h2>${quality}</div>` +
+    `<div class="sec"><h2>欄位自我檢測（雲端）</h2>${checksBlock}</div>` +
     `<div class="sec"><h2>自我檢查</h2>${testBlock}</div>` +
     `<div class="sec"><h2>資料管理</h2>
       <div class="hint">持倉資料只存在本機瀏覽器，換手機或清除資料都會消失。</div>

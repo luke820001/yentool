@@ -27,6 +27,7 @@ stocks x 30 sessions = 334KB raw, 102KB gzipped over the wire -- cheap enough
 that the privacy property can hold by construction instead of by vigilance.
 """
 import json
+import os
 import sqlite3
 from datetime import datetime
 
@@ -138,3 +139,66 @@ def write_quote_feed(path, payload):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
     return str(path)
+
+
+# ---------------------------------------------------------------------------
+# Keeping dropped-out names priced (F04, 2026-09-14 column audit)
+# ---------------------------------------------------------------------------
+def stale_tracked_ids(price_db, ledger_db, scan_mode, as_of,
+                      sessions=FEED_SESSIONS):
+    """{stock_id: market} for stocks the ledger picked inside the feed window
+    whose newest bar in price_db is older than `as_of`.
+
+    Only today's candidates get fetched by the scan, so a name that fell off
+    the list stops updating; its trailing closes then publish as null and a
+    holder of it loses the valuation. This finds exactly those names."""
+    as_of = str(as_of or "")[:10]
+    if not as_of or not os.path.exists(str(price_db))             or not os.path.exists(str(ledger_db)):
+        return {}
+    try:
+        with sqlite3.connect(str(price_db), timeout=30) as conn:
+            window = _recent_sessions(conn, sessions)
+    except Exception:
+        return {}
+    if not window:
+        return {}
+    try:
+        with sqlite3.connect(str(ledger_db), timeout=30) as conn:
+            rows = conn.execute(
+                "SELECT stock_id, MAX(market) FROM picks "
+                "WHERE scan_mode = ? AND bar_date >= ? GROUP BY stock_id",
+                (scan_mode, window[0])).fetchall()
+    except Exception:
+        return {}
+    ids = {str(s).strip(): (str(m) if m in ("TSE", "OTC") else "TSE")
+           for s, m in rows if s and str(s).strip()}
+    if not ids:
+        return {}
+    try:
+        with sqlite3.connect(str(price_db), timeout=30) as conn:
+            latest = {str(s).strip(): str(d)[:10] for s, d in conn.execute(
+                "SELECT stock_id, MAX(date) FROM data WHERE stock_id IN (%s) "
+                "GROUP BY stock_id" % ",".join("?" * len(ids)), list(ids))}
+    except Exception:
+        return {}
+    return {sid: mkt for sid, mkt in ids.items() if latest.get(sid, "") < as_of}
+
+
+def refresh_tracked_prices(scan_mode, as_of, price_db=None, ledger_db=None):
+    """Fetch the stale names from stale_tracked_ids(). Returns how many were
+    fetched. Never raises; a failed top-up just leaves the gap visible (the
+    column check reports it as quotes_gap_tracked)."""
+    from config.settings import PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE
+    price_db = price_db or PRICE_VOLUME_FILE
+    ledger_db = ledger_db or SIGNAL_LEDGER_FILE
+    stale = stale_tracked_ids(price_db, ledger_db, scan_mode, as_of)
+    if not stale:
+        return 0
+    try:
+        from ingestion.price_volume_multi import multi_fetch_and_save_batch
+        fetched = multi_fetch_and_save_batch(sorted(stale), stale)
+        return len(fetched or ())
+    except Exception as e:
+        print("  [quotes] top-up of {} dropped-out name(s) failed: {}".format(
+            len(stale), str(e)[:100]))
+        return 0

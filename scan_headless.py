@@ -220,6 +220,21 @@ def run_scan(scan_mode="mode_prelaunch"):
     except Exception as e:
         print("  [ledger] skipped: {}".format(e))
 
+    # F04 regression found by the 2026-09-14 column audit: only today's
+    # candidates get fetched, so a name that dropped off the list stops
+    # updating and its trailing closes go null in quotes.json -- 20 of the 95
+    # stocks picked in the previous 30 sessions were unpriced, one for 18
+    # sessions. A holder of a dropped-out name lost its valuation exactly when
+    # the exit decision mattered. Top up every recent pick that is behind.
+    try:
+        from scanner.quote_feed import refresh_tracked_prices
+        n = refresh_tracked_prices(scan_mode, session_date)
+        if n:
+            print("  [quotes] refreshed {} dropped-out name(s) so holdings "
+                  "stay priced".format(n))
+    except Exception as e:
+        print("  [quotes] straggler refresh skipped: {}".format(e))
+
     # Publish FIRST, summarise second (F24). The AI call used to run before the
     # export, so a hung Gemini request delayed -- and an unconverted
     # requests.Timeout could skip past -- the market data and the user's own
@@ -253,6 +268,23 @@ def run_scan(scan_mode="mode_prelaunch"):
             print("  [ai] {} report(s) attached".format(len(reports)))
         except Exception as e:
             print("  [ai] attach failed, prices already published: {}".format(e))
+
+    # Last: audit every column of what was just published and stamp the
+    # verdict into meta.checks (scanner/result_checks.py). Runs after the AI
+    # pass because that pass rewrites the file. The workflow runs the same
+    # check again as its own step for the annotations; both are idempotent.
+    try:
+        from config.settings import (MOBILE_DATA_FILE, MOBILE_QUOTES_FILE,
+                                     SIGNAL_LEDGER_FILE, SCAN_CHECKS_FILE)
+        from scanner.result_checks import check_files, format_report
+        report = check_files(MOBILE_DATA_FILE, quotes_path=MOBILE_QUOTES_FILE,
+                             recs_path=RECOMMENDATIONS_EXPORT_FILE,
+                             ledger_path=SIGNAL_LEDGER_FILE,
+                             history_path=SCAN_CHECKS_FILE,
+                             expected_session=data_health.get("expected_session"))
+        print(format_report(report))
+    except Exception as e:
+        print("  [checks] skipped: {}".format(e))
 
     print("=== done: {} picks ===".format(len(result_df)))
     return result_df
