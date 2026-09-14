@@ -46,6 +46,7 @@ HOLD_STATUSES = ("", "pending", "holding", "exit_today", "overdue", "delay")
 BUY_BLOCKS = ("", "regime", "held", "unknown", "quality", "market", "rank",
               "integrity", "stale", "no_rule")
 REC_STATUSES = ("active", "expired", "converted", "cancelled", "closed")
+EXIT_SIGNALS = ("", "stop", "lock", "tp", "time")
 
 _ID_RE = re.compile(r"^[0-9]{4,6}[A-Z]?$")
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -149,6 +150,14 @@ COLUMNS = {
     "Fill_Trail_Arm_Price": _c("num", nullable=True, lo=0.01),
     "Fill_Trail_Lock_Price": _c("num", nullable=True, lo=0.01),
     "Fill_Target_Price":   _c("num", nullable=True, lo=0.01),
+    # exit plan (holding_tracker, 2026-09-14): the one price to act on
+    "Plan_Stop":           _c("num", nullable=True, lo=0.01, phone=True),
+    "Plan_Armed":          _c("bool", phone=True),
+    "Exit_Signal":         _c("choice", nullable=True, choices=EXIT_SIGNALS,
+                              phone=True),
+    "Exit_Signal_Date":    _c("date", nullable=True, phone=True),
+    "Exit_Signal_Price":   _c("num", nullable=True, lo=0.01, phone=True),
+    "Exit_Note":           _c("str", nullable=True),
     "Buy_Ready":           _c("bool", phone=True),
     "Buy_Block":           _c("choice", nullable=True, choices=BUY_BLOCKS, phone=True),
     "Recommendation_ID":   _c("str", nullable=True, phone=True),
@@ -511,6 +520,28 @@ def _check_rows(rows, meta, rep, scan_mode):
             if status in ("overdue",):
                 counters["hold_overdue"] = counters.get("hold_overdue", 0) + 1
 
+            # exit plan: the stop the phone shows must be the rule's stop
+            plan_stop = _num(r.get("Plan_Stop"))
+            sig = r.get("Exit_Signal")
+            armed = r.get("Plan_Armed")
+            if "Plan_Stop" in r:
+                if status == "pending":
+                    if not _is_null(sig):
+                        hit("exit_signal_on_pending_row", sid, "Exit_Signal")
+                    if plan_stop is not None and stop is not None \
+                            and abs(plan_stop - stop) > _PRICE_TOL:
+                        hit("plan_stop_pending_mismatch", sid, "Plan_Stop")
+                elif fill is not None and plan_stop is not None and _is_bool(armed):
+                    want = round(fill * ((1 + lock_pct) if armed else (1 - stop_pct)), 2)
+                    if abs(plan_stop - want) > _PRICE_TOL:
+                        hit("plan_stop_level_mismatch", sid, "Plan_Stop")
+                if not _is_null(sig):
+                    if _is_null(r.get("Exit_Signal_Date")) or _num(r.get("Exit_Signal_Price")) is None:
+                        hit("exit_signal_partial", sid, "Exit_Signal")
+                    counters["exit_signal"] = counters.get("exit_signal", 0) + 1
+                    samples.setdefault("exit_signal", []).append("{}:{}".format(sid, sig))
+                    cols["exit_signal"] = "Exit_Signal"
+
         # buy gate: Buy_Ready implies every gate it is defined by
         br, bb = r.get("Buy_Ready"), r.get("Buy_Block")
         if _is_bool(br):
@@ -557,10 +588,12 @@ def _check_rows(rows, meta, rep, scan_mode):
         "blocked_without_reason", "buy_ready_violates_gate", "buy_ready_on_stale_row",
         "recommendation_partial", "recommendation_orphan_value", "non_positive",
         "sup_gap_mismatch", "res_gap_mismatch", "squeeze_mismatch",
+        "exit_signal_on_pending_row", "plan_stop_pending_mismatch",
+        "plan_stop_level_mismatch", "exit_signal_partial",
     }
     warns = {"daily_move_over_limit", "row_stale", "held_row_without_fill",
              "integrity_flags_on_ok_row", "integrity_fail_without_flags"}
-    infos = {"integrity_not_ok", "hold_overdue"}
+    infos = {"integrity_not_ok", "hold_overdue", "exit_signal"}
     descriptions = {
         "close_outside_range": "close not within [Low_Today, High_Today]",
         "daily_move_over_limit": "close moved more than 10.5% vs Close_Prev without Recent_Jump",
@@ -596,6 +629,11 @@ def _check_rows(rows, meta, rep, scan_mode):
         "recommendation_partial": "Recommendation_ID without its frozen prices/dates",
         "recommendation_orphan_value": "frozen recommendation value without an id",
         "non_positive": "MA / volume average not positive",
+        "exit_signal_on_pending_row": "exit booked before entry",
+        "plan_stop_pending_mismatch": "pending Plan_Stop is not the reference stop",
+        "plan_stop_level_mismatch": "Plan_Stop is not fill x 0.85 (or x 1.02 when armed)",
+        "exit_signal_partial": "Exit_Signal without its date or price",
+        "exit_signal": "rows where the exit stack says the trade is already out",
     }
     for code, n in counters.items():
         level = "error" if code in errors else "warn" if code in warns else "info"

@@ -185,7 +185,10 @@ jobs:
             fi
             echo "push rejected (attempt $attempt); rebasing onto origin/main"
             git fetch origin main
-            git rebase -X theirs origin/main || { git rebase --abort; git reset --hard origin/main; echo "::warning::state commit dropped after rebase conflict"; exit 0; }
+            # The cached market DBs are tracked files restored over the checkout,
+            # so the worktree is always dirty here; without autostash the rebase
+            # refuses to start (seen 2026-09-14: "You have unstaged changes").
+            git -c rebase.autoStash=true rebase -X theirs origin/main || { git rebase --abort; git reset --hard origin/main; echo "::warning::state commit dropped after rebase conflict"; exit 0; }
             sleep $(( attempt * 7 ))
           done
           echo "::warning::could not push state after 5 attempts; Pages already deployed"

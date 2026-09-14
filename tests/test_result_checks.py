@@ -65,6 +65,9 @@ def clean_row(sid="6426", close=312.0, market="OTC", status="pending",
         "Hold_Note": "next-open entry", "Entry_Open": entry_open,
         "Fill_Stop_Loss": None, "Fill_Trail_Arm_Price": None,
         "Fill_Trail_Lock_Price": None, "Fill_Target_Price": None,
+        "Plan_Stop": round(close * (1 - PRELAUNCH_STOP_PCT), 2),
+        "Plan_Armed": False, "Exit_Signal": "", "Exit_Signal_Date": "",
+        "Exit_Signal_Price": None, "Exit_Note": "reference stop",
         "Buy_Ready": False, "Buy_Block": "regime",
         "Recommendation_ID": None, "Initial_Buy_Price": None,
         "Initial_Stop_Price": None, "Initial_Target_Price": None,
@@ -80,6 +83,8 @@ def clean_row(sid="6426", close=312.0, market="OTC", status="pending",
             "Fill_Trail_Lock_Price": round(fill * (1 + PRELAUNCH_TRAIL_LOCK), 2),
             "Fill_Target_Price": round(fill * (1 + PRELAUNCH_TP_PCT), 2),
             "Hold_Note": "held 2/10",
+            "Plan_Stop": round(fill * (1 - PRELAUNCH_STOP_PCT), 2),
+            "Exit_Note": "sell if it trades below the stop",
         })
     return r
 
@@ -267,6 +272,28 @@ class RowIdentities(unittest.TestCase):
         self.assertIn("res_gap_mismatch", codes(self._broken(Res_Gap_Pct=99.0), "error"))
         self.assertIn("sup_gap_mismatch", codes(self._broken(Sup_Gap_Pct=99.0), "error"))
         self.assertIn("squeeze_mismatch", codes(self._broken(Squeeze=True), "error"))
+
+    def test_exit_plan_identities(self):
+        # pending rows carry the reference stop and no booked exit
+        self.assertIn("plan_stop_pending_mismatch", codes(self._broken(Plan_Stop=200.0), "error"))
+        self.assertIn("exit_signal_on_pending_row",
+                      codes(self._broken(Exit_Signal="stop", Exit_Signal_Date=DATE,
+                                         Exit_Signal_Price=250.0), "error"))
+        # entered rows: the stop is fill x 0.85, or x 1.02 once armed
+        base = clean_row(status="holding", entry_open=300.0)
+        self.assertIn("plan_stop_level_mismatch", codes(self._broken(base, Plan_Stop=280.0), "error"))
+        base = clean_row(status="holding", entry_open=300.0)
+        rep = self._broken(base, Plan_Armed=True,
+                           Plan_Stop=round(300.0 * (1 + PRELAUNCH_TRAIL_LOCK), 2))
+        self.assertEqual(rep["status"], "ok", format_report(rep))
+        # a booked exit needs its date and price, and is information
+        base = clean_row(status="holding", entry_open=300.0)
+        self.assertIn("exit_signal_partial", codes(self._broken(base, Exit_Signal="stop"), "error"))
+        base = clean_row(status="holding", entry_open=300.0)
+        rep = self._broken(base, Exit_Signal="stop", Exit_Signal_Date="2026-09-12",
+                           Exit_Signal_Price=255.0)
+        self.assertIn("exit_signal", codes(rep, "info"))
+        self.assertEqual(rep["status"], "ok", format_report(rep))
 
     def test_gaps_may_be_null_when_no_level(self):
         rep = self._broken(Sup_Gap_Pct=None, Res_Gap_Pct=None, Support_Used=None)

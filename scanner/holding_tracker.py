@@ -83,8 +83,11 @@ EXIT_DELAY_CAP_BY_MODE = {
 def _trading_calendar():
     """Sorted distinct trading dates ('YYYY-MM-DD') from price_volume.db."""
     try:
-        with sqlite3.connect(PRICE_VOLUME_FILE) as conn:
+        conn = sqlite3.connect(PRICE_VOLUME_FILE)
+        try:
             rows = conn.execute("SELECT DISTINCT date FROM data").fetchall()
+        finally:
+            conn.close()
     except Exception:
         return []
     dates = sorted({str(r[0])[:10] for r in rows if r and r[0]})
@@ -103,13 +106,16 @@ def _entry_opens(pairs):
     ids = sorted({s for s, _ in pairs})
     dates = sorted({d for _, d in pairs})
     try:
-        with sqlite3.connect(PRICE_VOLUME_FILE) as conn:
+        conn = sqlite3.connect(PRICE_VOLUME_FILE)
+        try:
             rows = conn.execute(
                 "SELECT stock_id, date, open FROM data WHERE stock_id IN (%s)"
                 " AND date IN (%s)"
                 % (",".join("?" * len(ids)), ",".join("?" * len(dates))),
                 ids + dates,
             ).fetchall()
+        finally:
+            conn.close()
     except Exception:
         return {}
     out = {}
@@ -128,11 +134,14 @@ def _ledger_bar_dates(scan_mode):
     if not SIGNAL_LEDGER_FILE.exists():
         return {}
     try:
-        with sqlite3.connect(SIGNAL_LEDGER_FILE) as conn:
+        conn = sqlite3.connect(SIGNAL_LEDGER_FILE)
+        try:
             rows = conn.execute(
                 "SELECT stock_id, bar_date FROM picks WHERE scan_mode = ?",
                 (scan_mode,),
             ).fetchall()
+        finally:
+            conn.close()
     except Exception:
         return {}
     out = {}
@@ -194,6 +203,7 @@ def annotate_holding(df, scan_mode):
 
     entry_dates, exit_dates, hold_days = [], [], []
     remainings, statuses, notes = [], [], []
+    time_exit_dates = []                    # the bar a calendar exit lands on
     for _, r in df.iterrows():
         sid = str(r.get("Stock_ID", "")).strip()
         # Union the ledger history with this pick's own signal day so a just-
@@ -205,7 +215,7 @@ def annotate_holding(df, scan_mode):
         if anchor is None or anchor not in idx_of:
             entry_dates.append(""); exit_dates.append("")
             hold_days.append(None); remainings.append(None)
-            statuses.append(""); notes.append("")
+            statuses.append(""); notes.append(""); time_exit_dates.append("")
             continue
 
         entry_idx = idx_of[anchor] + 1          # buy the open AFTER the signal
@@ -221,6 +231,7 @@ def annotate_holding(df, scan_mode):
         hold_days.append(max(day_no, 0))
         remainings.append(remaining)
 
+        tdate = ""
         if day_no <= 0:
             statuses.append("pending")
             notes.append("next-open entry (signal {})".format(anchor))
@@ -232,6 +243,7 @@ def annotate_holding(df, scan_mode):
             # reached the delay cap -> must exit regardless of the market
             statuses.append("exit_today" if today_idx == cap_idx else "overdue")
             notes.append("day {} (delay cap {}), exit now".format(day_no, cap))
+            tdate = cal[cap_idx] if cap_idx <= last_idx else cal[today_idx]
         elif disturbed and cap > hold:
             # at/past base exit but the market is disturbed -> hold and watch
             statuses.append("delay")
@@ -240,6 +252,8 @@ def annotate_holding(df, scan_mode):
         else:
             statuses.append("exit_today" if remaining == 0 else "overdue")
             notes.append("day {}, exit at close".format(day_no))
+            tdate = cal[exit_idx] if exit_idx <= last_idx else cal[today_idx]
+        time_exit_dates.append(tdate)
 
     df["Entry_Date"] = entry_dates
     df["Exit_Date"] = exit_dates
@@ -265,4 +279,130 @@ def annotate_holding(df, scan_mode):
         round(f * (1 + TRAIL_LOCK), 2) if f else None for f in fills]
     df["Fill_Target_Price"] = [
         round(f * (1 + TP_PCT), 2) if f else None for f in fills]
+
+    # Exit plan (2026-09-14): one column that says below what price to sell
+    # first, and whether the rule has already taken the trade out. The shared
+    # exit stack (scanner/exit_rules.replay_exit -- the same code the ledger
+    # scores forward returns with) is replayed from the fill to today, so the
+    # phone, the CSV and the ledger cannot disagree about where the stop is.
+    try:
+        _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today)
+    except Exception as e:      # an annotation problem must never break a scan
+        print("  [holding] exit plan skipped: {}".format(e))
+    return df
+
+
+def _bars_since(pairs, upto):
+    """{stock_id: [(date, open, high, low, close), ...]} from the earliest
+    requested date per stock through `upto`, one query for the whole list."""
+    pairs = [(str(s), str(d)[:10]) for s, d in pairs if s and d]
+    if not pairs:
+        return {}
+    ids = sorted({s for s, _ in pairs})
+    start = min(d for _, d in pairs)
+    try:
+        conn = sqlite3.connect(PRICE_VOLUME_FILE)
+        try:
+            rows = conn.execute(
+                "SELECT stock_id, date, open, high, low, close FROM data "
+                "WHERE stock_id IN (%s) AND date >= ? AND date <= ? "
+                "ORDER BY stock_id, date" % ",".join("?" * len(ids)),
+                ids + [start, str(upto)[:10]],
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+    out = {}
+    for sid, d, o, h, l, c in rows:
+        out.setdefault(str(sid), []).append((str(d)[:10], o, h, l, c))
+    return out
+
+
+def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today):
+    from scanner.exit_rules import replay_exit
+
+    ids = list(df["Stock_ID"].astype(str))
+    bars_by = _bars_since(
+        [(sid, ed) for sid, ed, f in zip(ids, entry_dates, fills) if f and ed],
+        today)
+
+    plan_stop, plan_armed, sig, sig_date, sig_price, note = ([] for _ in range(6))
+    ref_stops = (df["Strict_Stop_Loss"] if "Strict_Stop_Loss" in df.columns
+                 else [None] * len(df))
+    for sid, ed, fill, status, tdate, ref in zip(
+            ids, entry_dates, fills, statuses, time_exit_dates, ref_stops):
+        try:
+            ref = float(ref) if ref is not None and ref == ref else None
+        except (TypeError, ValueError):
+            ref = None
+
+        # Not entered (or no fill known): the stop is the close-based reference
+        # and there is nothing to book yet.
+        if not status or status == "pending" or not fill:
+            plan_stop.append(round(ref, 2) if ref else None)
+            plan_armed.append(False)
+            sig.append(""); sig_date.append(""); sig_price.append(None)
+            note.append("reference stop {}; becomes fill x {:.2f} after entry"
+                        .format(round(ref, 2) if ref else "n/a", 1 - STOP_PCT)
+                        if not fill else "no bars since entry yet")
+            continue
+
+        bars = [b for b in bars_by.get(sid, []) if b[0] >= ed]
+        if not bars:
+            plan_stop.append(round(fill * (1 - STOP_PCT), 2))
+            plan_armed.append(False)
+            sig.append(""); sig_date.append(""); sig_price.append(None)
+            note.append("sell if it trades below {:.2f} (fill {:.2f} x {:.2f}); "
+                        "no bars since entry in the store".format(
+                            fill * (1 - STOP_PCT), fill, 1 - STOP_PCT))
+            continue
+
+        dates = [b[0] for b in bars]
+        plan = replay_exit([b[1] for b in bars], [b[2] for b in bars],
+                           [b[3] for b in bars], [b[4] for b in bars],
+                           dates=dates, hold_bars=None, stop_pct=STOP_PCT,
+                           tp_pct=TP_PCT, arm_pct=TRAIL_ARM, lock_pct=TRAIL_LOCK)
+        armed = bool(plan.get("armed"))
+        stop = plan.get("stop")
+        stop = round(float(stop), 2) if stop else round(fill * (1 - STOP_PCT), 2)
+        plan_armed.append(armed)
+        plan_stop.append(stop)
+
+        if plan.get("exited"):
+            price = round(float(plan["exit_price"]), 2)
+            sig.append(plan["reason"]); sig_date.append(plan.get("date") or "")
+            sig_price.append(price)
+            note.append("{} exit booked {} at {:.2f} ({:+.1f}%)".format(
+                plan["reason"], plan.get("date") or "?", price,
+                plan.get("ret_pct") or 0.0))
+            continue
+
+        # Not out on price; the calendar may still say the hold is over.
+        if status in ("exit_today", "overdue") and tdate:
+            close_on = next((b[4] for b in reversed(bars) if b[0] <= tdate), None)
+            try:
+                close_on = round(float(close_on), 2) if close_on is not None else None
+            except (TypeError, ValueError):
+                close_on = None
+            sig.append("time"); sig_date.append(tdate); sig_price.append(close_on)
+            note.append("time exit {} at close {}".format(
+                tdate, "{:.2f}".format(close_on) if close_on else "n/a"))
+            continue
+
+        sig.append(""); sig_date.append(""); sig_price.append(None)
+        if armed:
+            note.append("lock armed: sell if it trades below {:.2f} "
+                        "(fill {:.2f} x {:.2f})".format(stop, fill, 1 + TRAIL_LOCK))
+        else:
+            note.append("sell if it trades below {:.2f} (fill {:.2f} x {:.2f}); "
+                        "lock arms at {:.2f}".format(
+                            stop, fill, 1 - STOP_PCT, fill * (1 + TRAIL_ARM)))
+
+    df["Plan_Stop"] = plan_stop
+    df["Plan_Armed"] = plan_armed
+    df["Exit_Signal"] = sig
+    df["Exit_Signal_Date"] = sig_date
+    df["Exit_Signal_Price"] = sig_price
+    df["Exit_Note"] = note
     return df

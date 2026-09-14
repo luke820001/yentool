@@ -1587,7 +1587,8 @@ function renderPicks() {
 
   const banner = `<div class="notice ${reg.enterOk ? "ok" : "warn"}">${esc(reg.text)}${
     reg.asOf ? esc(` · 判定資料日 ${reg.asOf}`) : ""}</div>` +
-    `<div class="hint">買進資格由後端 Buy_Ready / Buy_Block 決定，本畫面只會把過期資料降級，不會把「不可買」改成「可買」。</div>`;
+    exitSignalSummary(rows) +
+    `<div class="hint">買進資格由後端 Buy_Ready / Buy_Block 決定，本畫面只會把過期資料降級，不會把「不可買」改成「可買」。每張卡片的「停損（跌破先出）」是唯一要盯的價位。</div>`;
 
   const readyHtml = ready.length
     ? ready.map(pickCard).join("")
@@ -1630,6 +1631,53 @@ function filteredRows() {
   });
 }
 
+// --- exit plan columns (scanner/holding_tracker.py, 2026-09-14) -------------
+// Plan_Stop is the ONE price to act on: "sell first if it trades below this".
+// Before entry it is the close-based reference; once the row is entered it is
+// fill x 0.85, raised to fill x 1.02 when the +6% lock has armed. Exit_Signal
+// is what the shared exit stack (scanner/exit_rules.py) says already happened.
+const EXIT_LABEL = {
+  stop: "已跌破停損 · 先出場",
+  lock: "鎖利停損觸發 · 出場",
+  tp: "達到目標 · 出場",
+  time: "持有期滿 · 出場",
+};
+
+function exitSignalBadge(r) {
+  const sig = String(r.Exit_Signal || "");
+  if (!sig || !EXIT_LABEL[sig]) return "";
+  const when = String(r.Exit_Signal_Date || "").slice(5, 10);
+  const px = cents(r.Exit_Signal_Price);
+  return `<span class="verdict ${sig === "stop" || sig === "lock" ? "no" : "held"}">⚠ ${esc(EXIT_LABEL[sig])}${
+    when ? `（${esc(when)}${px !== null ? " @" + esc(fmtPrice(px)) : ""}）` : ""}</span>`;
+}
+
+function planStopKv(r) {
+  const stop = cents(r.Plan_Stop);
+  const fallback = cents(r.Strict_Stop_Loss);
+  const status = String(r.Hold_Status || "");
+  if (stop === null) {
+    return kv("參考停損", esc(fmtPrice(fallback)), "", "依參考價推算，未成交前非實際風控");
+  }
+  if (!status || status === "pending") {
+    return kv("停損（跌破先出）", esc(fmtPrice(stop)), "", "成交後改以成交價 × 0.85 為準，只升不降");
+  }
+  const sub = r.Exit_Signal
+    ? "此價位為出場當時的有效停損"
+    : r.Plan_Armed
+      ? "鎖利已啟動：停損已上調到成交價 × 1.02，只升不降"
+      : `推估成交價 ${esc(fmtPrice(cents(r.Entry_Open)))} × 0.85；漲到 +6% 後上調到 +2%`;
+  return kv("停損（跌破先出）", esc(fmtPrice(stop)), r.Exit_Signal ? "" : "gold", sub);
+}
+
+function exitSignalSummary(rows) {
+  const hit = rows.filter((r) => r.Exit_Signal && EXIT_LABEL[r.Exit_Signal]);
+  if (!hit.length) return "";
+  const stops = hit.filter((r) => r.Exit_Signal === "stop" || r.Exit_Signal === "lock").length;
+  return noticeHtml(stops ? "err" : "warn",
+    `⚠ ${hit.length} 檔已觸發出場訊號（停損/鎖利 ${stops}、目標/期滿 ${hit.length - stops}）· 若持有請先出場，卡片上有日期與價位`);
+}
+
 function pickCard(r) {
   const v = buyVerdict(r);
   const sc = rankScore();
@@ -1654,7 +1702,7 @@ function pickCard(r) {
       : kv("首日建議價", "-", "", "後端尚未提供固定首日價")) +
     kv("最新觀察參考", esc(fmtPrice(latestRef)), "", "每次掃描重算，非新的買進指令") +
     kv("停損距離%", esc(fmt(r.Risk_Pct, 1, "%")), "", "價格到停損的距離，不是虧損機率") +
-    kv("參考停損", esc(fmtPrice(cents(r.Strict_Stop_Loss))), "", "依參考價推算，未成交前非實際風控") +
+    planStopKv(r) +
     kv("參考停利目標", esc(fmtPrice(cents(r.Target_Price))), "gold", "條件價，不代表已達成") +
     kv(sc.label, esc(fmt(r[sc.key], 1)), "", "規則分數，不是上漲機率") +
     kv("外資5日", esc(fmtSigned(r.Foreign_Net_5D, 0)), signClass(r.Foreign_Net_5D), "最近5筆法人資料（張）");
@@ -1672,7 +1720,7 @@ function pickCard(r) {
       <span class="market">${esc(r.Market || "")}</span>
     </div>
     <div class="badges">${badge}${held ? '<span class="verdict held">已有持倉</span>' : ""}${
-      r.Integrity_OK === false ? '<span class="verdict no">資料完整性未通過</span>' : ""}</div>
+      r.Integrity_OK === false ? '<span class="verdict no">資料完整性未通過</span>' : ""}${exitSignalBadge(r)}</div>
     ${recLine}
     <div class="kv2">${grid}</div>
     <div class="btns">

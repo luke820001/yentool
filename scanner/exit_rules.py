@@ -61,6 +61,41 @@ def simulate_exit(opens, highs, lows, closes, hold_bars=..., stop_pct=...,
     # of approximating that with a very large number.
     rule = DEFAULT_RULE
     hold_bars = rule["hold_bars"] if hold_bars is ... else hold_bars
+    if len(opens) < hold_bars:
+        return None, None, "na"
+    plan = replay_exit(opens, highs, lows, closes, hold_bars=hold_bars,
+                       stop_pct=stop_pct, tp_pct=tp_pct, arm_pct=arm_pct,
+                       lock_pct=lock_pct)
+    if plan["reason"] == "na":
+        return None, None, "na"
+    return plan["entry"], plan["ret_pct"], plan["reason"]
+
+
+def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
+                stop_pct=..., tp_pct=..., arm_pct=..., lock_pct=...):
+    """Replay the exit stack bar by bar and report WHERE the trade stands.
+
+    This is simulate_exit with the outcome kept, so the live scan can tell a
+    holder what the rule says today (2026-09-14 request: "there is no column
+    saying below what price to sell first"). Same event order, same numbers.
+
+    `hold_bars=None` replays every bar given and never books a time exit --
+    the live annotation has its own calendar-based time exit. With an
+    integer, behaves exactly like simulate_exit (time exit on bar N-1's close).
+
+    Returns a dict:
+      entry       fill (first open) or None
+      reason      '' still open | 'stop' | 'lock' | 'tp' | 'time' | 'na'
+      exited      reason is a booked exit
+      bar         index of the exit bar (None while open)
+      date        dates[bar] when `dates` is given
+      exit_price  the price the rule books for the exit
+      ret_pct     exit_price / entry - 1, in percent
+      armed       trailing lock armed at some bar
+      stop        the stop carried out of the last bar (lock when armed)
+      arm_px, lock_px, target   the rule's levels off the fill
+    """
+    rule = DEFAULT_RULE
     stop_pct = rule["stop_pct"] if stop_pct is ... else stop_pct
     tp_pct = rule["tp_pct"] if tp_pct is ... else tp_pct
     arm_pct = rule["arm_pct"] if arm_pct is ... else arm_pct
@@ -68,23 +103,35 @@ def simulate_exit(opens, highs, lows, closes, hold_bars=..., stop_pct=...,
     if lock_pct is None:
         lock_pct = rule["lock_pct"]
 
-    if len(opens) < hold_bars:
-        return None, None, "na"
-    entry = opens[0]
+    out = {"entry": None, "reason": "na", "exited": False, "bar": None,
+           "date": None, "exit_price": None, "ret_pct": None, "armed": False,
+           "stop": None, "arm_px": None, "lock_px": None, "target": None}
+    n = len(opens) if hold_bars is None else min(hold_bars, len(opens))
+    if n <= 0:
+        return out
     try:
-        entry = float(entry)
+        entry = float(opens[0])
     except (TypeError, ValueError):
-        return None, None, "na"
+        return out
     if not entry > 0 or entry != entry:      # NaN is never > 0, but be explicit
-        return None, None, "na"
+        return out
 
     stop_px = entry * (1 - stop_pct) if stop_pct is not None else None
     target = entry * (1 + tp_pct) if tp_pct is not None else None
     arm_px = entry * (1 + arm_pct) if arm_pct is not None else None
     lock_px = entry * (1 + lock_pct)
     armed = False
+    out.update(entry=entry, reason="", arm_px=arm_px, lock_px=lock_px,
+               target=target, stop=stop_px)
 
-    for i in range(hold_bars):
+    def booked(i, price, reason):
+        out.update(reason=reason, exited=True, bar=i,
+                   date=(dates[i] if dates is not None and i < len(dates) else None),
+                   exit_price=price, ret_pct=(price / entry - 1.0) * 100,
+                   armed=armed, stop=stop_px)
+        return out
+
+    for i in range(n):
         try:
             op, hi, lo = float(opens[i]), float(highs[i]), float(lows[i])
         except (TypeError, ValueError):
@@ -97,29 +144,35 @@ def simulate_exit(opens, highs, lows, closes, hold_bars=..., stop_pct=...,
 
         # 1. the open, against the stop carried IN to this bar
         if target is not None and op >= target:
-            return entry, (op / entry - 1.0) * 100, "tp"
+            return booked(i, op, "tp")
         if stop_px is not None and op <= stop_px:
-            return entry, (op / entry - 1.0) * 100, "lock" if armed else "stop"
+            return booked(i, op, "lock" if armed else "stop")
 
         # 2/3. ambiguous remainder: lowest exit level touched wins
         if stop_px is not None and lo <= stop_px:
-            return (entry, (stop_px / entry - 1.0) * 100,
-                    "lock" if armed else "stop")
+            return booked(i, stop_px, "lock" if armed else "stop")
         arm_here = (arm_px is not None) and (not armed) and hi >= arm_px
         if arm_here and lo <= lock_px:
-            return entry, (lock_px / entry - 1.0) * 100, "lock"
+            return booked(i, lock_px, "lock")
         if target is not None and hi >= target:
-            return entry, (target / entry - 1.0) * 100, "tp"
+            return booked(i, target, "tp")
 
         if arm_here:
             armed = True
             stop_px = lock_px if stop_px is None else max(stop_px, lock_px)
 
-    try:
-        final = float(closes[hold_bars - 1])
-    except (TypeError, ValueError):
-        return None, None, "na"
-    return entry, (final / entry - 1.0) * 100, "time"
+    out.update(armed=armed, stop=stop_px)
+    if hold_bars is not None:
+        try:
+            final = float(closes[hold_bars - 1])
+        except (TypeError, ValueError, IndexError):
+            out["reason"] = "na"
+            return out
+        if final != final:
+            out["reason"] = "na"
+            return out
+        return booked(hold_bars - 1, final, "time")
+    return out
 
 
 def summarise(returns):
