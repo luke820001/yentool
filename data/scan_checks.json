@@ -92,6 +92,26 @@
     "quotes_gap_tracked",
     "quotes_session_vs_data"
    ]
+  },
+  {
+   "checked_at": "2026-09-15 15:02:10",
+   "session_date": "2026-09-15",
+   "scan_time": "2026-09-15 15:02:10",
+   "status": "ok",
+   "rows": 40,
+   "errors": 0,
+   "warnings": 0,
+   "codes": []
+  },
+  {
+   "checked_at": "2026-09-15 15:02:11",
+   "session_date": "2026-09-15",
+   "scan_time": "2026-09-15 15:02:10",
+   "status": "ok",
+   "rows": 40,
+   "errors": 0,
+   "warnings": 0,
+   "codes": []
   }
  ]
 }
