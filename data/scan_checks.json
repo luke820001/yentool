@@ -60,6 +60,38 @@
    "errors": 0,
    "warnings": 0,
    "codes": []
+  },
+  {
+   "checked_at": "2026-09-15 12:26:14",
+   "session_date": "2026-09-14",
+   "scan_time": "2026-09-15 12:26:14",
+   "status": "fail",
+   "rows": 42,
+   "errors": 3,
+   "warnings": 2,
+   "codes": [
+    "calendar_vs_data_date",
+    "quotes_as_of_vs_data",
+    "quotes_gap_row",
+    "quotes_gap_tracked",
+    "quotes_session_vs_data"
+   ]
+  },
+  {
+   "checked_at": "2026-09-15 12:26:14",
+   "session_date": "2026-09-14",
+   "scan_time": "2026-09-15 12:26:14",
+   "status": "fail",
+   "rows": 42,
+   "errors": 3,
+   "warnings": 2,
+   "codes": [
+    "calendar_vs_data_date",
+    "quotes_as_of_vs_data",
+    "quotes_gap_row",
+    "quotes_gap_tracked",
+    "quotes_session_vs_data"
+   ]
   }
  ]
 }
