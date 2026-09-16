@@ -184,6 +184,40 @@
    "codes": [
     "integrity_flags_on_ok_row"
    ]
+  },
+  {
+   "checked_at": "2026-09-16 12:36:16",
+   "session_date": "2026-09-15",
+   "scan_time": "2026-09-16 12:36:15",
+   "status": "fail",
+   "rows": 40,
+   "errors": 3,
+   "warnings": 3,
+   "codes": [
+    "calendar_vs_data_date",
+    "integrity_flags_on_ok_row",
+    "quotes_as_of_vs_data",
+    "quotes_gap_row",
+    "quotes_gap_tracked",
+    "quotes_session_vs_data"
+   ]
+  },
+  {
+   "checked_at": "2026-09-16 12:36:16",
+   "session_date": "2026-09-15",
+   "scan_time": "2026-09-16 12:36:15",
+   "status": "fail",
+   "rows": 40,
+   "errors": 3,
+   "warnings": 3,
+   "codes": [
+    "calendar_vs_data_date",
+    "integrity_flags_on_ok_row",
+    "quotes_as_of_vs_data",
+    "quotes_gap_row",
+    "quotes_gap_tracked",
+    "quotes_session_vs_data"
+   ]
   }
  ]
 }
