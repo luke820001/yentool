@@ -218,6 +218,30 @@
     "quotes_gap_tracked",
     "quotes_session_vs_data"
    ]
+  },
+  {
+   "checked_at": "2026-09-16 15:06:44",
+   "session_date": "2026-09-16",
+   "scan_time": "2026-09-16 15:06:44",
+   "status": "warn",
+   "rows": 42,
+   "errors": 0,
+   "warnings": 1,
+   "codes": [
+    "integrity_flags_on_ok_row"
+   ]
+  },
+  {
+   "checked_at": "2026-09-16 15:06:44",
+   "session_date": "2026-09-16",
+   "scan_time": "2026-09-16 15:06:44",
+   "status": "warn",
+   "rows": 42,
+   "errors": 0,
+   "warnings": 1,
+   "codes": [
+    "integrity_flags_on_ok_row"
+   ]
   }
  ]
 }
