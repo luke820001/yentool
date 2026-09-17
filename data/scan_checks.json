@@ -338,6 +338,32 @@
    "codes": [
     "integrity_flags_on_ok_row"
    ]
+  },
+  {
+   "checked_at": "2026-09-17 20:00:05",
+   "session_date": "2026-09-17",
+   "scan_time": "2026-09-17 20:00:05",
+   "status": "warn",
+   "rows": 20,
+   "errors": 0,
+   "warnings": 2,
+   "codes": [
+    "feed_degraded",
+    "integrity_flags_on_ok_row"
+   ]
+  },
+  {
+   "checked_at": "2026-09-17 20:00:05",
+   "session_date": "2026-09-17",
+   "scan_time": "2026-09-17 20:00:05",
+   "status": "warn",
+   "rows": 20,
+   "errors": 0,
+   "warnings": 2,
+   "codes": [
+    "feed_degraded",
+    "integrity_flags_on_ok_row"
+   ]
   }
  ]
 }

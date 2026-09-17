@@ -1,5 +1,5 @@
 {
- "count": 1,
+ "count": 2,
  "format_version": 1,
  "recommendations": [
   {
@@ -20,6 +20,26 @@
    "strategy_version": "prelaunch-2026-09-09",
    "trail_arm_price": "133.56",
    "trail_lock_price": "128.52",
+   "valid_until_session": null
+  },
+  {
+   "cycle_seq": 1,
+   "first_qualified_session": "2026-09-17",
+   "gate_snapshot": "{\"ATR_Pct\": 5.73, \"Buy_Block\": \"\", \"Buy_Ready\": true, \"Close_Price\": 18275.0, \"Core_Plus\": true, \"Data_Date\": \"2026-09-17\", \"Dist_52W_High_Pct\": 4.9, \"Explosion_Score\": 25.4, \"Hold_Status\": \"pending\", \"Integrity_OK\": true, \"Launch_Score\": 50.3, \"Market\": \"OTC\", \"Ret_5D_Pct\": -2.3, \"Surge_Score\": 31.3}",
+   "horizon_days": 10,
+   "initial_buy_price": "18275.00",
+   "initial_stop_price": "15533.75",
+   "initial_target_price": "21930.00",
+   "market": "OTC",
+   "recommendation_id": "rec-5274-mode_prelaunch-1",
+   "recommended_at": "2026-09-17 20:00:02",
+   "status": "active",
+   "stock_id": "5274",
+   "stock_name": "信驊",
+   "strategy": "mode_prelaunch",
+   "strategy_version": "prelaunch-2026-09-09",
+   "trail_arm_price": "19371.50",
+   "trail_lock_price": "18640.50",
    "valid_until_session": null
   }
  ],
