@@ -388,6 +388,30 @@
    "codes": [
     "integrity_flags_on_ok_row"
    ]
+  },
+  {
+   "checked_at": "2026-09-17 22:50:44",
+   "session_date": "2026-09-17",
+   "scan_time": "2026-09-17 22:50:44",
+   "status": "warn",
+   "rows": 42,
+   "errors": 0,
+   "warnings": 1,
+   "codes": [
+    "integrity_flags_on_ok_row"
+   ]
+  },
+  {
+   "checked_at": "2026-09-17 22:50:45",
+   "session_date": "2026-09-17",
+   "scan_time": "2026-09-17 22:50:44",
+   "status": "warn",
+   "rows": 42,
+   "errors": 0,
+   "warnings": 1,
+   "codes": [
+    "integrity_flags_on_ok_row"
+   ]
   }
  ]
 }
