@@ -41,6 +41,19 @@
 
 ---
 
+### fix: 欄位自檢不再把「資料可信但有軟性標記」當成警告
+
+**Files:** `scanner/result_checks.py`、`tests/test_result_checks.py`
+
+`data_integrity` 明確分成兩類：**硬錯誤**（NaN、非正數、OHLC 順序錯、重複日期）會讓該檔
+`Integrity_OK = False`；**軟性觀察**（單日跳動 >10.5%、資料缺口、歷史太短）只是附註，資料仍可信。
+但欄位檢查寫成「`Integrity_OK` 為真卻帶任何標記就警告」，於是每天都對健康的股票亮黃燈——
+2026-09-20 的發布就是兩檔 OTC 只因為 `jump` 標記被點名。
+
+改成只有硬錯誤標記才算矛盾（警告），軟性標記改列為資訊。
+
+---
+
 ### feat: 停損放寬到 -20%，並提供「先買一半、跌 10% 再補」的選用買法
 
 **Files:** `archive/research/sandbox_scale_ladder.py`（新）、`scanner/scan_mode.py`、

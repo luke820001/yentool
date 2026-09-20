@@ -272,6 +272,17 @@ class RowIdentities(unittest.TestCase):
         rep = self._broken(Integrity_OK=False)
         self.assertIn("integrity_fail_without_flags", codes(rep, "warn"))
 
+    def test_soft_flags_on_a_trustworthy_row_are_information(self):
+        # data_integrity keeps a series trustworthy through a big move or a
+        # gap; warning about those fired daily on healthy OTC names.
+        rep = self._broken(Integrity_OK=True, Integrity_Flags="jump:2;gap:1")
+        self.assertIn("integrity_soft_flags", codes(rep, "info"))
+        self.assertNotIn("integrity_flags_on_ok_row", codes(rep, "warn"))
+
+    def test_hard_flag_on_an_ok_row_still_warns(self):
+        rep = self._broken(Integrity_OK=True, Integrity_Flags="ohlc:3")
+        self.assertIn("integrity_flags_on_ok_row", codes(rep, "warn"))
+
     def test_gap_percent_identities(self):
         self.assertIn("res_gap_mismatch", codes(self._broken(Res_Gap_Pct=99.0), "error"))
         self.assertIn("sup_gap_mismatch", codes(self._broken(Sup_Gap_Pct=99.0), "error"))

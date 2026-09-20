@@ -174,6 +174,11 @@ COLUMNS = {
     "Rec_Valid_Until":     _c("date", nullable=True, phone=True),
 }
 
+# Flag prefixes data_integrity uses for UNAMBIGUOUS data errors; everything
+# else it emits (jump / recent_jump / gap / short_*) is an observation about a
+# series that is still trustworthy.
+_HARD_FLAGS = ("nan:", "nonpos:", "ohlc:", "dup:")
+
 # Tolerances for identity checks on rounded prices.
 _PRICE_TOL = 0.011      # two-decimal rounding on both sides
 _PCT_TOL = 0.02         # percent columns are rounded to 2 dp
@@ -477,11 +482,26 @@ def _check_rows(rows, meta, rep, scan_mode):
                 hit("core_plus_mismatch", sid, "Core_Plus")
 
         # integrity flag text agrees with the flag
+        #
+        # data_integrity separates HARD errors (NaN / non-positive / broken
+        # OHLC ordering / duplicate dates), which make a series untrustworthy,
+        # from SOFT observations (a >10.5% close-to-close move, a gap, a short
+        # history), which are reported and still trustworthy -- see that
+        # module's docstring. Warning on any flag at all therefore fired every
+        # day on perfectly good rows: the 2026-09-20 payload carried it for two
+        # OTC names whose only flag was "jump". Only a HARD flag contradicts
+        # Integrity_OK being true; soft ones are counted as information.
         iok = r.get("Integrity_OK")
         flags = r.get("Integrity_Flags")
         if _is_bool(iok):
             if iok and not _is_null(flags):
-                hit("integrity_flags_on_ok_row", sid, "Integrity_Flags")
+                if any(k in str(flags) for k in _HARD_FLAGS):
+                    hit("integrity_flags_on_ok_row", sid, "Integrity_Flags")
+                else:
+                    counters["integrity_soft_flags"] = counters.get(
+                        "integrity_soft_flags", 0) + 1
+                    samples.setdefault("integrity_soft_flags", []).append(sid)
+                    cols["integrity_soft_flags"] = "Integrity_Flags"
             if not iok and _is_null(flags):
                 hit("integrity_fail_without_flags", sid, "Integrity_Flags")
             if not iok:
@@ -620,7 +640,8 @@ def _check_rows(rows, meta, rep, scan_mode):
     }
     warns = {"daily_move_over_limit", "row_stale", "held_row_without_fill",
              "integrity_flags_on_ok_row", "integrity_fail_without_flags"}
-    infos = {"integrity_not_ok", "hold_overdue", "exit_signal"}
+    infos = {"integrity_not_ok", "hold_overdue", "exit_signal",
+             "integrity_soft_flags"}
     descriptions = {
         "close_outside_range": "close not within [Low_Today, High_Today]",
         "daily_move_over_limit": "close moved more than 10.5% vs Close_Prev without Recent_Jump",
@@ -637,7 +658,8 @@ def _check_rows(rows, meta, rep, scan_mode):
         "target_pct_mismatch": "target is not close * (1 + PRELAUNCH_TP_PCT)",
         "risk_pct_mismatch": "Risk_Pct is not the prelaunch stop percentage",
         "core_plus_mismatch": "Core_Plus disagrees with its three thresholds",
-        "integrity_flags_on_ok_row": "Integrity_OK true but flags present",
+        "integrity_flags_on_ok_row": "Integrity_OK true but a HARD data-error flag is present",
+        "integrity_soft_flags": "trustworthy rows carrying a soft flag (jump / gap / short history)",
         "integrity_fail_without_flags": "Integrity_OK false with empty flags",
         "integrity_not_ok": "rows chip_verifier could not vouch for (blocked from buying)",
         "hold_pending_counts": "pending row must have Hold_Day 0 and full remaining",
