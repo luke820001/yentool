@@ -1,0 +1,58 @@
+# Run the test suite on every push and pull request.
+#
+# Until 2026-09-20 the only workflow was the daily scan, so nothing checked a
+# commit before it reached main: a broken change was found by the next scan, at
+# 15:00 Taiwan time, against live market data -- which is both late and a bad
+# oracle, because a real scan's result changes for legitimate reasons too.
+#
+# Python 3.12 matches the scan workflow. Nothing here touches the network or
+# the market databases: the suite is stdlib unittest with temporary SQLite
+# files, so it cannot disturb a scan running at the same time.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Dependency tree is consistent
+        run: python -m pip check
+
+      # Catches a syntax error in a module no test imports -- the research and
+      # tools scripts, and the Tkinter GUI, which CI cannot start.
+      - name: Compile every module
+        run: python -m compileall -q analyzer config gemini_hook gui ingestion portfolio scanner storage tools tests scan_headless.py main_gui.py
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -t . -v
+
+      # The published payload has a column contract (scanner/result_checks.py).
+      # A contract change that the checker does not know about should fail here,
+      # not on the phone. The repo carries no scan payload (see mobile/README),
+      # so this only runs when a workflow produced one.
+      - name: Publish contract (when a payload is present)
+        run: |
+          if [ -f mobile/scan_result.json ]; then
+            python tools/check_scan_result.py --no-write --strict
+          else
+            echo "no payload in the checkout -- contract checked in the scan workflow"
+          fi

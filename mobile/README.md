@@ -28,6 +28,17 @@
 
 ## 資料怎麼來
 
+> **這兩個檔案不在版本庫裡**（2026-09-20 起）。它們由每次掃描產生，直接上傳到
+> GitHub Pages；版本庫留一份的結果是那份檔案停在 2026-07，欄位契約有 21 項錯誤，
+> 而且行情抓不到那一輪還會被當成「今天的結果」發布到手機。
+> 本機要測畫面時自己抓一份現成的：
+>
+> ```bash
+> curl -o mobile/scan_result.json https://luke820001.github.io/yentool/scan_result.json
+> curl -o mobile/quotes.json      https://luke820001.github.io/yentool/quotes.json
+> python mobile/serve.py
+> ```
+
 掃描器每次跑完會同時寫兩個檔到這個資料夾：
 
 * **`scan_result.json`** = `{meta, rows}`。`meta` 帶模式、策略版本、掃描時間、

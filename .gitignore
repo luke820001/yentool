@@ -24,3 +24,11 @@ dist/
 
 # Legacy pre-SQLite dump kept for reconciliation only, not version control.
 archive/legacy/*.xlsx
+
+# The phone's payload is BUILT by every scan and uploaded straight to Pages
+# (.github/workflows/scan.yml). Keeping a copy in git served nobody: the file
+# committed in July 2026 was two months stale, failed the current column
+# contract on 21 counts, and was the thing a feed-outage run would have
+# published to the phone. Fetch a real one for local work -- see mobile/README.
+mobile/scan_result.json
+mobile/quotes.json

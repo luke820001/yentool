@@ -56,6 +56,8 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.scan.outputs.published }}
     # The scanner decides "is today's close published yet" from local wall time
     # (chip_verifier._latest_trading_day, _EOD_HOUR=14) and stamps scan_time
     # with datetime.now(). GitHub runners default to UTC, where every TW-daytime
@@ -148,7 +150,15 @@ jobs:
       # Upload BEFORE committing state. The phone's data must never wait on
       # git: on 2026-09-14 a scheduled run finished the scan, then failed its
       # push (see below) and, because the upload came after, never deployed.
+      #
+      # Only when this run actually produced a payload. Without the condition a
+      # feed outage (exit 1, "previous data kept") uploaded mobile/ AS CHECKED
+      # OUT -- and the repo no longer carries a payload at all, so that deploy
+      # would have replaced the phone's data with nothing. Skipping the upload
+      # leaves the previous deployment in place, which is what "previous data
+      # kept" is supposed to mean.
       - name: Upload Pages artifact (mobile/ with fresh scan_result.json)
+        if: steps.scan.outputs.published == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: mobile
@@ -195,6 +205,9 @@ jobs:
 
   deploy:
     needs: scan
+    # No payload, no deploy: deploy-pages would fail on the missing artifact,
+    # and a red run on a feed outage trains everyone to ignore red runs.
+    if: needs.scan.outputs.published == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
