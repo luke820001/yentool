@@ -1,0 +1,50 @@
+# Pinned resolution for CI, so the daily scan installs the same packages today
+# and next month. requirements.txt keeps the ranges that describe what the code
+# SUPPORTS; this file records the one resolution that has actually been tested.
+#
+# Why it exists (2026-09-20 audit, AUD-006): both workflows ran
+# `pip install -r requirements.txt` against ranges as wide as
+# `yfinance>=0.2.0,<2.0.0`, so every run resolved whatever was newest that
+# morning. On 2026-09-20 CI installed yfinance 1.7.0 while this project's own
+# machine had 1.4.1 -- and yfinance is the dependency that decides what a price
+# bar even is. A feed library silently changing under a scheduled job that
+# writes stops for real positions is not a risk worth taking for the
+# convenience of automatic upgrades.
+#
+# These versions are the set CI resolved and the full suite passed on
+# (Python 3.12.14, run 35514607808).
+#
+# To upgrade: edit a version here, push, and let the tests workflow prove it.
+# Keep this in sync with requirements.txt's supported ranges -- a pin outside
+# its range will fail to install, which is the intended way to find out.
+#
+# Not hashed yet: hashes need pip-tools or uv, which this project does not
+# install. Version pinning removes the day-to-day drift; hashes would add
+# tamper evidence, and are the next step if this ever builds on a shared
+# runner that is not GitHub's.
+beautifulsoup4==4.15.0
+certifi==2026.7.22
+cffi==2.1.1
+charset_normalizer==3.5.1
+curl_cffi==0.16.3
+et-xmlfile==2.0.0
+idna==3.20
+lxml==6.1.3
+multitasking==0.0.13
+numpy==2.5.3
+openpyxl==3.1.5
+pandas==3.0.6
+peewee==4.5.1
+platformdirs==4.11.11
+protobuf==7.36.2
+pycparser==3.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+pytz==2026.3.post1
+requests==2.34.2
+six==1.17.0
+soupsieve==2.9.2
+typing_extensions==4.16.0
+urllib3==2.8.0
+websockets==17.1
+yfinance==1.7.0

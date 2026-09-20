@@ -54,11 +54,22 @@ def main():
         int(r["short_52w"].sum())))
     print()
 
-    clean = r[(r["trustworthy"]) & (~r["recent_jump"]) & (~r["short_ma60"])]
-    print("=> {} / {} stocks are fully clean for short-term signals "
-          "({:.1f}%)".format(len(clean), n, 100 * len(clean) / n))
-    print("   (the rest are flagged, NOT dropped -- a >10% move can be a real "
-          "no-limit-board stock, so the call is yours).")
+    # Three separate questions, three separate numbers. The old summary called
+    # one of them "fully clean", which read as "no gaps either" -- in the same
+    # report that had just listed 425 stocks missing 4,378 bars. A number that
+    # contradicts the table above it teaches people to skim past both.
+    hard = r[r["trustworthy"]]
+    signal = r[(r["trustworthy"]) & (~r["recent_jump"]) & (~r["short_ma60"])]
+    research = signal[(signal["gaps"] == 0) & (~signal["short_52w"])]
+    print("=> hard-valid (no NaN / OHLC / duplicate errors):        "
+          "{} / {} ({:.1f}%)".format(len(hard), n, 100 * len(hard) / n))
+    print("   signal-ready (hard-valid, no recent >10.5% jump, MA60 long enough): "
+          "{} / {} ({:.1f}%)".format(len(signal), n, 100 * len(signal) / n))
+    print("   research-ready (signal-ready AND no internal gaps, 240+ bars):  "
+          "{} / {} ({:.1f}%)".format(len(research), n, 100 * len(research) / n))
+    print("   Nothing is dropped -- a >10% move can be a real no-limit-board "
+          "stock, and a gap can be a genuine trading halt. The flags are the "
+          "report; the call is yours.")
 
 
 if __name__ == "__main__":

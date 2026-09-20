@@ -31,8 +31,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # constraints.txt pins the tested resolution; requirements.txt keeps
+      # the ranges the code supports. See the header of constraints.txt.
       - name: Install deps
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -c constraints.txt
 
       - name: Dependency tree is consistent
         run: python -m pip check

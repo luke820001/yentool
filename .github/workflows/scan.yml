@@ -87,8 +87,11 @@ jobs:
           restore-keys: |
             marketdata-
 
+      # Pinned resolution (constraints.txt): a scheduled job that writes
+      # stops for real positions should not have its feed library change
+      # under it overnight.
       - name: Install deps
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -c constraints.txt
 
       # Exit codes are meaningful (scan_headless.main): 0 published, including a
       # legitimate day where nothing qualified; 1 the market feed was
