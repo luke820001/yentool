@@ -246,6 +246,20 @@ def run_scan(scan_mode="mode_prelaunch"):
     except Exception as e:
         print("  [quotes] straggler refresh skipped: {}".format(e))
 
+    # The top-up runs AFTER verify_candidates cleaned the store, and it asks
+    # the same feed, so it can bring a placeholder bar back in for the handful
+    # of names it fetched (observed: 3 rows on the 2026-09-20 re-run). The
+    # readers are guarded, but the store is what CI caches for tomorrow, so
+    # take them out again here -- one query, and it keeps the cache honest.
+    try:
+        from scanner.data_integrity import purge_nonsession_bars
+        again = purge_nonsession_bars()
+        if again.get("rows"):
+            print("  [data] purged {} placeholder bar(s) the top-up re-added "
+                  "({})".format(again["rows"], ", ".join(again["dates"])))
+    except Exception as e:
+        print("  [data] post-top-up purge skipped: {}".format(str(e)[:80]))
+
     # Publish FIRST, summarise second (F24). The AI call used to run before the
     # export, so a hung Gemini request delayed -- and an unconverted
     # requests.Timeout could skip past -- the market data and the user's own
