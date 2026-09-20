@@ -537,6 +537,16 @@
    "codes": [
     "integrity_flags_on_ok_row"
    ]
+  },
+  {
+   "checked_at": "2026-09-20 20:46:20",
+   "session_date": "2026-09-18",
+   "scan_time": "2026-09-20 20:46:19",
+   "status": "ok",
+   "rows": 43,
+   "errors": 0,
+   "warnings": 0,
+   "codes": []
   }
  ]
 }
