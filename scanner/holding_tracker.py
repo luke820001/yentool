@@ -86,16 +86,29 @@ EXIT_DELAY_CAP_BY_MODE = {
 
 
 def _trading_calendar():
-    """Sorted distinct trading dates ('YYYY-MM-DD') from price_volume.db."""
+    """Sorted distinct trading dates ('YYYY-MM-DD') from price_volume.db.
+
+    A date only counts when the market traded it. A feed that hands back a
+    placeholder bar for a session that has not happened yet would otherwise
+    add a day to every hold count and hand a pick an Entry_Date on a day the
+    exchange was shut (2026-09-20). scan-time purging is the real fix; this is
+    the guard for a store that was written before it, or by something else.
+    """
     try:
         conn = sqlite3.connect(PRICE_VOLUME_FILE)
         try:
-            rows = conn.execute("SELECT DISTINCT date FROM data").fetchall()
+            rows = conn.execute(
+                "SELECT date, COUNT(*) FROM data GROUP BY date").fetchall()
         finally:
             conn.close()
     except Exception:
         return []
-    dates = sorted({str(r[0])[:10] for r in rows if r and r[0]})
+    try:
+        from scanner.data_integrity import nonsession_dates
+        skip = set(nonsession_dates(rows))
+    except Exception:
+        skip = set()
+    dates = sorted({str(r[0])[:10] for r in rows if r and r[0]} - skip)
     return dates
 
 

@@ -174,3 +174,118 @@ def audit_store(price_db_path=None, stock_ids=None) -> pd.DataFrame:
             "recent_jump", "last_jump_date", "gaps", "nan", "ohlc_bad",
             "dup_dates", "short_ma60", "short_52w"]
     return report[[c for c in cols if c in report.columns]]
+
+
+# ---------------------------------------------------------------------------
+# Placeholder bars for a session that has not happened yet
+#
+# 2026-09-20: a manual scan on a Sunday published a red payload. The cause was
+# not the scan -- yfinance had returned a bar dated 2026-09-20 for 22 of the
+# ~1930 stocks in the store. Each one copied Friday's close, carried a SMALL
+# but non-zero volume (2912: 48,692 against Friday's 2.7M) and, on some names,
+# a high/low that was simply the next session's limit band (1301: 71.5 / 58.5
+# around a 65.0 close). The existing zero-volume filter in
+# ingestion.price_volume_multi._drop_synthetic_bars cannot see these: they are
+# not zero-volume, they are a pre-open placeholder for the NEXT session.
+#
+# What they broke, all of it silently:
+#   * the trading calendar is the union of every stock's dates, so the fake
+#     date became a session -- Hold_Day advanced a day and one row was given
+#     an Entry_Date on a Sunday;
+#   * quotes.json ended on a session 98% of the market had no price for, so
+#     every listed row read as a quote gap and the column check failed;
+#   * worst and quietest, a fabricated low feeds the exit replay. A limit-band
+#     low is ~10% below the close: deep enough to book a stop that never
+#     happened.
+#
+# No per-stock rule can separate these from a real thin session, but the market
+# can: either it traded or it did not. A date that only a small fraction of the
+# store has bars for, inside the recent window where a placeholder can appear,
+# is not a session. Old sparse dates (a handful of names backfilled years ago)
+# are left alone by only judging the recent window.
+SESSION_WINDOW = 40    # recent dates to judge; a placeholder only lands here
+SESSION_SHARE = 0.20   # a real session is nowhere near this thin
+
+
+def nonsession_dates(date_counts, window=SESSION_WINDOW, share=SESSION_SHARE):
+    """Dates in the recent `window` whose coverage is a fraction of normal.
+
+    `date_counts` is an iterable of (date, stock_count). Returns a sorted list
+    of the dates that cannot be real sessions. Judged against the MEDIAN of the
+    window, so one or two thin days cannot drag the bar down with them.
+    """
+    counts = [(str(d)[:10], int(n)) for d, n in date_counts if d]
+    if len(counts) < 5:
+        return []
+    counts.sort()
+    recent = counts[-window:]
+    values = sorted(n for _, n in recent)
+    mid = len(values) // 2
+    median = (values[mid] if len(values) % 2
+              else (values[mid - 1] + values[mid]) / 2.0)
+    if median <= 0:
+        return []
+    return [d for d, n in recent if n < median * share]
+
+
+def drop_nonsession_rows(frames, window=SESSION_WINDOW, share=SESSION_SHARE):
+    """Filter {stock_id: frame} so no frame keeps a bar on a non-session date.
+
+    Returns (frames, dropped_dates). Frames are only rebuilt for stocks that
+    actually carry such a bar, so the common case costs one pass and no copies.
+    """
+    if not frames:
+        return frames, []
+    counts = {}
+    for f in frames.values():
+        if f is None or "date" not in getattr(f, "columns", ()):
+            continue
+        for d in f["date"].astype(str).str.slice(0, 10):
+            counts[d] = counts.get(d, 0) + 1
+    bad = set(nonsession_dates(counts.items(), window=window, share=share))
+    if not bad:
+        return frames, []
+    out = {}
+    for sid, f in frames.items():
+        if f is None or "date" not in getattr(f, "columns", ()):
+            out[sid] = f
+            continue
+        mask = ~f["date"].astype(str).str.slice(0, 10).isin(bad)
+        out[sid] = f if mask.all() else f[mask].reset_index(drop=True)
+    return out, sorted(bad)
+
+
+def purge_nonsession_bars(price_db_path=None, window=SESSION_WINDOW,
+                          share=SESSION_SHARE):
+    """Delete placeholder bars from the price store. Returns what it removed.
+
+    This is the one place in the project that DELETES price rows, which is why
+    it is deliberately narrow: only dates inside the recent window, only when
+    the rest of the market disagrees with them by a factor of five. Never
+    raises -- a purge failure must not stop a scan, it just leaves the guards
+    in quote_feed / holding_tracker to work around the bad date.
+    """
+    import sqlite3
+
+    out = {"dates": [], "rows": 0}
+    try:
+        from config.settings import PRICE_VOLUME_FILE
+        path = str(price_db_path or PRICE_VOLUME_FILE)
+        conn = sqlite3.connect(path)
+        try:
+            counts = conn.execute(
+                "SELECT date, COUNT(*) FROM data GROUP BY date").fetchall()
+            bad = nonsession_dates(counts, window=window, share=share)
+            if not bad:
+                return out
+            marks = ",".join("?" * len(bad))
+            cur = conn.execute(
+                "DELETE FROM data WHERE date IN ({})".format(marks), bad)
+            conn.commit()
+            out["dates"] = bad
+            out["rows"] = cur.rowcount or 0
+        finally:
+            conn.close()
+    except Exception as e:
+        out["error"] = str(e)[:120]
+    return out

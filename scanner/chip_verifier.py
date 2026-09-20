@@ -324,6 +324,26 @@ def verify_candidates(
     pv_store   = bulk_load_stocks(PRICE_VOLUME_FILE, candidate_ids)
     chip_store = bulk_load_stocks(LARGE_HOLDER_FILE, candidate_ids)
 
+    # A feed can hand back a placeholder bar for a session that has not traded
+    # yet (see data_integrity.nonsession_dates for the 2026-09-20 case). This
+    # is the one place that holds the whole market in memory right after the
+    # fetch, so it is where the store can be asked whether a date was a session
+    # at all: drop those bars from this run before any indicator sees a
+    # fabricated high/low, and delete them from the store so the trading
+    # calendar, the quote feed and the exit replay never read them either.
+    try:
+        from scanner.data_integrity import drop_nonsession_rows, purge_nonsession_bars
+        pv_store, _dropped_dates = drop_nonsession_rows(pv_store)
+        if _dropped_dates:
+            _purged = purge_nonsession_bars()
+            print("  [data] non-session bar(s) dated {} ignored; {} row(s) "
+                  "removed from the store".format(
+                      ", ".join(_dropped_dates), _purged.get("rows", 0)))
+            if _purged.get("error"):
+                print("  [data] store purge failed: {}".format(_purged["error"]))
+    except Exception as e:
+        print("  [data] non-session check skipped: {}".format(str(e)[:80]))
+
     # Real trading calendar = union of every loaded stock's dates (whole-market),
     # so the per-stock data-integrity gap check is exact, not holiday-fooled.
     try:

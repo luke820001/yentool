@@ -4,6 +4,43 @@
 
 ## 2026-09-20
 
+### fix: 擋掉「還沒開盤的交易日」假 K 棒（自檢時實際抓到）
+
+**Files:** `scanner/data_integrity.py`、`scanner/chip_verifier.py`、`scanner/holding_tracker.py`、
+`scanner/quote_feed.py`、`tests/test_data_integrity.py`（新）
+
+**Trigger:** 改完停損後手動觸發一次雲端掃描驗收，結果欄位自檢 **fail**：
+`quotes.as_of` 是 2026-09-20（週日），行情資料日卻是 09-18，43 檔全被判「該交易日沒有收盤價」。
+
+**真正的原因（不是這次改動造成的）：** yfinance 對**還沒開盤的下一個交易日**會回傳一根佔位 K 棒。
+實測 1930 檔裡有 22 檔拿到日期 2026-09-20 的 K 棒：OHLC 複製 09-18 收盤、**帶著少量成交量**
+（2912：48,692 股 vs 當天 273 萬股），所以 `ingestion.price_volume_multi._drop_synthetic_bars`
+的「零成交量」過濾抓不到它。更糟的是有些名字的高低價直接是下一個交易日的**漲跌停價**
+（1301 收 65.0，那根的 high 71.5 / low 58.5）。
+
+**它悄悄弄壞三件事：**
+
+1. **交易日曆多一天。** 日曆是「所有股票日期的聯集」，假日期就變成一個 session：
+   持有天數多算一天，3017 甚至拿到 `Entry_Date = 2026-09-20`（週日進場）。
+2. **報價檔整份失效。** `quotes.sessions` 以假日期結尾，98% 的市場沒有那天的價格，
+   於是每一列都被判報價缺口，欄位自檢 fail、手機出現紅色橫幅。
+3. **最安靜也最嚴重：假的最低價會餵進出場回放。** 漲跌停帶的 low 大約是收盤 -10%，
+   足以判出一次「根本沒發生過的停損」。
+
+**修法——問市場，不要問日曆：** 個股層級無法分辨假 K 棒與真的冷門交易日，但全市場可以：
+**近期某個日期只有一小部分股票有 K 棒，它就不是交易日。**
+`data_integrity.nonsession_dates()`（近 40 個日期、低於中位數 20% 即判定非交易日；
+只看近期，所以早年只有 2-3 檔的稀疏回補日期不受影響）。
+
+- `chip_verifier.verify_candidates` 在全市場載入後就地剔除那些列（指標不會看到假高低價），
+  並從價量庫刪除（`purge_nonsession_bars`）——放在這裡，桌面版與雲端都會生效。
+- `holding_tracker._trading_calendar` 與 `quote_feed._recent_sessions` 各加一道同樣的防線，
+  即使資料庫在修正前就被污染也不會算錯。
+- 11 項新測試涵蓋：假日期判定、稀疏舊日期不可誤刪、冷清但真實的交易日不可誤刪、
+  實際刪除、兩個讀取點的防線。
+
+---
+
 ### feat: 停損放寬到 -20%，並提供「先買一半、跌 10% 再補」的選用買法
 
 **Files:** `archive/research/sandbox_scale_ladder.py`（新）、`scanner/scan_mode.py`、

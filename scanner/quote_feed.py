@@ -38,10 +38,23 @@ FEED_SESSIONS = 30
 
 
 def _recent_sessions(conn, limit):
+    """The last `limit` REAL sessions, newest last.
+
+    "Distinct date" is not the same question as "did the market trade": a
+    placeholder bar for a session that has not happened yet (2026-09-20) put a
+    date at the end of this list that 98% of the market had no price for, so
+    every listed stock read as a quote gap and the whole payload failed its
+    check. Ask the market instead of the calendar.
+    """
     rows = conn.execute(
-        "SELECT DISTINCT date FROM data ORDER BY date DESC LIMIT ?",
-        (int(limit),)).fetchall()
-    return sorted(str(r[0])[:10] for r in rows)
+        "SELECT date, COUNT(*) FROM data GROUP BY date").fetchall()
+    try:
+        from scanner.data_integrity import nonsession_dates
+        skip = set(nonsession_dates(rows))
+    except Exception:
+        skip = set()
+    dates = sorted({str(r[0])[:10] for r in rows if r and r[0]} - skip)
+    return dates[-int(limit):]
 
 
 def build_quote_feed(price_db, stock_ids, sessions=FEED_SESSIONS,
