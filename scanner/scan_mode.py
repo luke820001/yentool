@@ -294,7 +294,32 @@ MAX_STOP_PCT = 0.13   # never risk more than 13% per trade
 # adopted combo's 56.5% win into 48.4% (mean +5.20 -> +3.42). -15% keeps the
 # disaster insurance at a fraction of that cost (win 54.5%, both halves), so
 # the stop widened 0.10 -> 0.15.
-PRELAUNCH_STOP_PCT = 0.15
+# 2026-09-17 (archive/research/sandbox_scale_ladder.py, 564 CORE+ first-day
+# entries 2017-2026, new multi-order path engine cross-checked against
+# exit_rules.replay_exit, costs included): 0.15 -> 0.20. Passes the adoption
+# gate in the recent 3y, the older window and pooled (win / bootLo / h1 / h2
+# all >= base, win >= base in 20/20 quarters). Recent 3y: win 66.8 -> 68.5,
+# mean +1.71 -> +2.23 (paired 95% CI +0.03..+1.10); older window flat. The
+# stop-width surface is a plateau past 0.20 (0.30 and no stop add ~0.3pp)
+# while the worst single trade keeps growing (-21.6 -> -33.1), so 0.20 keeps
+# the disaster insurance.
+PRELAUNCH_STOP_PCT = 0.20
+
+# Staged entry (same study, user request 2026-09-17: "if it falls to some
+# level, suggest adding"). Optional alternative to buying the whole position
+# at the open: buy PRELAUNCH_ADD_FIRST of the planned size at the open and
+# rest a limit order for the remainder at fill * (1 - PRELAUNCH_ADD_PCT).
+# Every exit level (stop, lock, target) stays anchored to the FIRST fill,
+# which is how it was tested. Versus the same stop without the add, the win
+# rate rises 3-5pp (significant in both windows, 20/20 quarters) and the
+# worst-decile trade shrinks (-14.4 -> -9.0), but the mean per trade FALLS
+# 0.7-0.9pp because a stock that goes straight up is held at half size. A
+# trade-off for the owner to choose per trade, not a free improvement.
+# Rejected in the same run (STRATEGY.md 3.7): selling half on a break,
+# selling then buying back lower, scaling out at +10/+20, and skipping or
+# exiting on a US overnight shock.
+PRELAUNCH_ADD_PCT = 0.10
+PRELAUNCH_ADD_FIRST = 0.5
 
 # Take-profit target, same eval: an intraday +20% TP on the CORE+ subset lifts
 # win 62.2 -> 64.5% for only -0.5pp mean (win-rate/mean trade-off chosen
@@ -377,6 +402,7 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
         df["Target_Price"]        = (close * (1 + PRELAUNCH_TP_PCT)).round(2)
         df["Trail_Arm_Price"]     = (close * (1 + PRELAUNCH_TRAIL_ARM)).round(2)
         df["Trail_Lock_Price"]    = (close * (1 + PRELAUNCH_TRAIL_LOCK)).round(2)
+        df["Add_Price"]           = (close * (1 - PRELAUNCH_ADD_PCT)).round(2)
         # CORE+ entry-quality flag (see CORE_PLUS_* block comment). Missing
         # feature values fail the gate rather than pass it.
         dist52 = _safe_num(df, "Dist_52W_High_Pct", 999.0)
@@ -452,7 +478,8 @@ BUY_RULE_MODES = ("mode_prelaunch",)
 # or the exit stack changes; do not bump it for wording or display changes.
 #   2026-08-06  buy rule enforced in the app (regime + fresh-signal gates)
 #   2026-09-09  F06 -- data date, Integrity_OK and unknown-hold-status now block
-STRATEGY_VERSION = "prelaunch-2026-09-09"
+#   2026-09-20  disaster stop 0.15 -> 0.20; optional staged entry (Add_Price)
+STRATEGY_VERSION = "prelaunch-2026-09-20"
 
 # signal_ledger stamps every stored pick with this so a past row can be judged
 # against the rule that actually produced it. It is the SAME string on purpose:

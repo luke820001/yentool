@@ -23,12 +23,16 @@ It adds these columns to the result DataFrame:
   Fill_Stop_Loss / Fill_Trail_Arm_Price / Fill_Trail_Lock_Price /
   Fill_Target_Price
                  the exit levels recomputed off Entry_Open
+  Plan_Add_Price / Add_Hit_Date
+                 the optional staged-entry level (reference before entry,
+                 fill * (1 - ADD_PCT) after) and the first date it traded
+                 there while the position was still open (2026-09-17)
 
 Why Entry_Open exists (2026-08-06 audit): add_trade_columns derives
 Suggested_Buy_Price / Strict_Stop_Loss / Target_Price / Trail_Lock_Price from
 TODAY's close every scan. That is right for a row that has not been entered
 yet, but a row already mid-hold (hysteresis keeps names listed for weeks) then
-shows a stop that drifts with the market instead of sitting at fill * 0.85. On
+shows a stop that drifts with the market instead of sitting at the fill. On
 the live 2026-08-06 payload 36 of the 39 already-entered rows (92%) showed a
 stop that did not belong to their position, mean error 6.5% and max 26.7%, and
 9 rows showed a "profit lock" price BELOW their own fill. The levels that
@@ -44,6 +48,7 @@ import pandas as pd
 
 from config.settings import PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE
 from scanner.scan_mode import (
+    PRELAUNCH_ADD_PCT as ADD_PCT,
     PRELAUNCH_STOP_PCT as STOP_PCT,
     PRELAUNCH_TP_PCT as TP_PCT,
     PRELAUNCH_TRAIL_ARM as TRAIL_ARM,
@@ -328,18 +333,27 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
         today)
 
     plan_stop, plan_armed, sig, sig_date, sig_price, note = ([] for _ in range(6))
+    plan_add, add_hit = [], []
     ref_stops = (df["Strict_Stop_Loss"] if "Strict_Stop_Loss" in df.columns
                  else [None] * len(df))
-    for sid, ed, fill, status, tdate, ref in zip(
-            ids, entry_dates, fills, statuses, time_exit_dates, ref_stops):
+    ref_adds = (df["Add_Price"] if "Add_Price" in df.columns
+                else [None] * len(df))
+    for sid, ed, fill, status, tdate, ref, ref_add in zip(
+            ids, entry_dates, fills, statuses, time_exit_dates, ref_stops, ref_adds):
         try:
             ref = float(ref) if ref is not None and ref == ref else None
         except (TypeError, ValueError):
             ref = None
+        try:
+            ref_add = float(ref_add) if ref_add is not None and ref_add == ref_add else None
+        except (TypeError, ValueError):
+            ref_add = None
 
         # Not entered (or no fill known): the stop is the close-based reference
         # and there is nothing to book yet.
         if not status or status == "pending" or not fill:
+            plan_add.append(round(ref_add, 2) if ref_add else None)
+            add_hit.append("")
             plan_stop.append(round(ref, 2) if ref else None)
             plan_armed.append(False)
             sig.append(""); sig_date.append(""); sig_price.append(None)
@@ -348,8 +362,11 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
                         if not fill else "no bars since entry yet")
             continue
 
+        add_px = round(fill * (1 - ADD_PCT), 2)
+        plan_add.append(add_px)
         bars = [b for b in bars_by.get(sid, []) if b[0] >= ed]
         if not bars:
+            add_hit.append("")
             plan_stop.append(round(fill * (1 - STOP_PCT), 2))
             plan_armed.append(False)
             sig.append(""); sig_date.append(""); sig_price.append(None)
@@ -363,6 +380,8 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
                            [b[3] for b in bars], [b[4] for b in bars],
                            dates=dates, hold_bars=None, stop_pct=STOP_PCT,
                            tp_pct=TP_PCT, arm_pct=TRAIL_ARM, lock_pct=TRAIL_LOCK)
+        add_hit.append(_add_hit_date(bars, add_px, plan, tdate
+                                     if status in ("exit_today", "overdue") else None))
         armed = bool(plan.get("armed"))
         stop = plan.get("stop")
         stop = round(float(stop), 2) if stop else round(fill * (1 - STOP_PCT), 2)
@@ -400,9 +419,38 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
                             stop, fill, 1 - STOP_PCT, fill * (1 + TRAIL_ARM)))
 
     df["Plan_Stop"] = plan_stop
+    df["Plan_Add_Price"] = plan_add
+    df["Add_Hit_Date"] = add_hit
     df["Plan_Armed"] = plan_armed
     df["Exit_Signal"] = sig
     df["Exit_Signal_Date"] = sig_date
     df["Exit_Signal_Price"] = sig_price
     df["Exit_Note"] = note
     return df
+
+
+def _add_hit_date(bars, add_px, plan, time_exit_date=None):
+    """First bar date the staged-entry limit at `add_px` would have filled
+    while the position was still open, else ''.
+
+    A bar fills the limit when it opens or trades at or below the level. The
+    add only counts up to the exit: on the exit bar itself it counts when the
+    exit was the stop (the price has to pass the add level on its way down to
+    a stop that sits below it), not on a lock/target bar, whose intraday order
+    against a low that deep is unknowable. A calendar time exit ends the
+    window at that day's close.
+    """
+    exit_bar = plan.get("bar") if plan.get("exited") else None
+    for i, (d, o, h, l, c) in enumerate(bars):
+        if exit_bar is not None and (i > exit_bar or (
+                i == exit_bar and plan.get("reason") != "stop")):
+            return ""
+        if time_exit_date and d > time_exit_date:
+            return ""
+        try:
+            lo = min(float(o), float(l))
+        except (TypeError, ValueError):
+            continue
+        if lo <= add_px:
+            return d
+    return ""

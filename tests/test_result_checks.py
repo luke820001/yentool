@@ -17,7 +17,7 @@ from scanner.result_checks import (
     check_payload, check_files, COLUMNS, github_annotations, format_report,
 )
 from scanner.scan_mode import (
-    PRELAUNCH_STOP_PCT, PRELAUNCH_TP_PCT, PRELAUNCH_TRAIL_ARM,
+    PRELAUNCH_ADD_PCT, PRELAUNCH_STOP_PCT, PRELAUNCH_TP_PCT, PRELAUNCH_TRAIL_ARM,
     PRELAUNCH_TRAIL_LOCK,
 )
 
@@ -59,6 +59,7 @@ def clean_row(sid="6426", close=312.0, market="OTC", status="pending",
         "Target_Price": round(close * (1 + PRELAUNCH_TP_PCT), 2),
         "Trail_Arm_Price": round(close * (1 + PRELAUNCH_TRAIL_ARM), 2),
         "Trail_Lock_Price": round(close * (1 + PRELAUNCH_TRAIL_LOCK), 2),
+        "Add_Price": round(close * (1 - PRELAUNCH_ADD_PCT), 2),
         "Core_Plus": True,
         "Entry_Date": "", "Exit_Date": "", "Hold_Day": 0, "Hold_Remaining": 10,
         "Hold_Total": 10, "Hold_Cap": 20, "Hold_Status": status,
@@ -67,6 +68,8 @@ def clean_row(sid="6426", close=312.0, market="OTC", status="pending",
         "Fill_Trail_Lock_Price": None, "Fill_Target_Price": None,
         "Plan_Stop": round(close * (1 - PRELAUNCH_STOP_PCT), 2),
         "Plan_Armed": False, "Exit_Signal": "", "Exit_Signal_Date": "",
+        "Plan_Add_Price": round(close * (1 - PRELAUNCH_ADD_PCT), 2),
+        "Add_Hit_Date": "",
         "Exit_Signal_Price": None, "Exit_Note": "reference stop",
         "Buy_Ready": False, "Buy_Block": "regime",
         "Recommendation_ID": None, "Initial_Buy_Price": None,
@@ -84,6 +87,7 @@ def clean_row(sid="6426", close=312.0, market="OTC", status="pending",
             "Fill_Target_Price": round(fill * (1 + PRELAUNCH_TP_PCT), 2),
             "Hold_Note": "held 2/10",
             "Plan_Stop": round(fill * (1 - PRELAUNCH_STOP_PCT), 2),
+            "Plan_Add_Price": round(fill * (1 - PRELAUNCH_ADD_PCT), 2),
             "Exit_Note": "sell if it trades below the stop",
         })
     return r
@@ -93,7 +97,7 @@ def clean_payload(rows=None):
     rows = rows if rows is not None else [clean_row()]
     return {
         "meta": {
-            "mode": "mode_prelaunch", "strategy_version": "prelaunch-2026-09-09",
+            "mode": "mode_prelaunch", "strategy_version": "prelaunch-2026-09-20",
             "scan_time": DATE + " 15:05:00", "session_date": DATE,
             "data_date": DATE, "count": len(rows), "empty_ok": not rows,
             "regime": {"ok": True, "risk_on": True, "enter_ok": False,

@@ -32,10 +32,11 @@ true intraday sequence. The order below is a stated assumption:
      bar itself arms, and both before the target.
 """
 
-# The rule as adopted on 2026-08-06, kept here so callers share one definition.
+# The rule as adopted on 2026-08-06 (stop widened 2026-09-17, see
+# scan_mode.PRELAUNCH_STOP_PCT), kept here so callers share one definition.
 # Fractions, not percents.
 DEFAULT_RULE = {
-    "stop_pct": 0.15,     # disaster stop below entry
+    "stop_pct": 0.20,     # disaster stop below entry
     "tp_pct": 0.20,       # take profit above entry
     "arm_pct": 0.06,      # gain that arms the trailing lock
     "lock_pct": 0.02,     # where the stop moves once armed

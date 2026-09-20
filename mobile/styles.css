@@ -146,6 +146,7 @@ body {
 .pending li.p-gap   { border-left-color: var(--orange); }
 .pending li.p-trail { border-left-color: var(--accent); }
 .pending li.p-stop  { border-left-color: var(--red); }
+.pending li.p-add   { border-left-color: var(--accent); }
 .pending li.p-shares{ border-left-color: var(--orange); }
 
 /* --- collapsible strategy card (report 7.4) -------------------------------*/

@@ -39,11 +39,13 @@ const TZ = "Asia/Taipei";
 // they live in one labelled place and every position stores the version that
 // priced it.
 const STRATEGY = {
-  version: "prelaunch-2026-06",
-  stopPct: -15,      // initial stop, from the real average cost
+  version: "prelaunch-2026-09-20",
+  stopPct: -20,      // initial stop, from the FIRST fill (see basePrice below)
   armPct: 6,         // gain that ARMS the trailing lock (a condition, not a state)
   lockPct: 2,        // stop moves here once armed; ratchets up only
   targetPct: 20,     // take-profit target
+  addPct: -10,       // optional staged entry: buy the rest here (2026-09-20)
+  addFirstPct: 50,   // how much of the planned size the first buy is
   horizon: 10,       // base hold, trading days
   cap: 20,           // maximum hold when the exit is delayed by a weak market
 };
@@ -56,8 +58,9 @@ const MODE_CARDS = {
     summary: "起漲前埋伏：只買後端標示「可買」的列，隔日開盤計畫進場，抱 10 天",
     body:
       "買進條件（全部成立才算可買）：大盤站上 20MA 與 60MA · 上櫃 · 出貨排名前 20 · 通過核心+ 品質閘門 · 資料完整性通過 · 當日資料 · 第一天入榜的新訊號。\n" +
-      "出場計畫：災難停損 -15% · 獲利 +6% 後鎖利上調至 +2% · 目標 +20% · 基本抱 10 個交易日（大盤轉弱時最晚延至 20 天）。\n" +
-      "回測：順風年約 71%、6 年全周期約 64%，皆為含條件的歷史統計，不是未來勝率。\n" +
+      "兩種買法擇一，出場價位完全相同（都以第一筆成交價計算）：一次買滿；或先買一半、跌到成交價 -10% 再補另一半。\n" +
+      "出場計畫：災難停損 -20% · 獲利 +6% 後鎖利上調至 +2% · 目標 +20% · 基本抱 10 個交易日（大盤轉弱時最晚延至 20 天）。\n" +
+      "回測（2017-2026，564 筆，近 3 年）：一次買滿 68.5% 勝、每筆平均 +2.2%；分批 71.4% 勝、每筆平均 +1.5%、大虧較少。含手續費與證交稅的歷史統計，不是未來勝率。\n" +
       "名單上其餘的列是觀察與持倉追蹤，不是買點。",
   },
   mode_momentum_leader: {
@@ -605,6 +608,10 @@ function replay(execsSorted, through) {
   let realizedNetU = 0;
   let realizedGrossU = 0;
   let opened = null, closed = null, buys = 0, sells = 0;
+  // The FIRST buy of the position, kept because every plan level is anchored
+  // to it (2026-09-20). Staged entry adds a second buy at a lower price, so
+  // the average cost is no longer the price the rule was measured against.
+  let firstBuy = null, cycleBuys = 0;
 
   for (const e of execsSorted) {
     if (through && e.session_date > through) break;
@@ -612,6 +619,8 @@ function replay(execsSorted, through) {
     const consideration = e.price_cents * sh;    // exact: both are integers
     if (e.side === "BUY") {
       buys += 1;
+      if (shares === 0 && cycleBuys === 0) firstBuy = e.price_cents;
+      cycleBuys += 1;
       if (!opened) opened = e.session_date;
       shares += sh;
       costU += toSub(consideration + e.fee_cents);
@@ -627,7 +636,7 @@ function replay(execsSorted, through) {
       costU -= removedBook;
       grossU -= removedGross;
       shares -= sh;
-      if (shares === 0) closed = e.session_date;
+      if (shares === 0) { closed = e.session_date; cycleBuys = 0; firstBuy = null; }
     }
   }
   if (shares === 0) { costU = 0; grossU = 0; }   // clear rounding residue
@@ -643,6 +652,8 @@ function replay(execsSorted, through) {
     avg_cost: shares ? fromSub(divRound(grossU, shares)) : 0,
     opened_session: opened,
     closed_session: shares === 0 ? closed : null,
+    first_buy_price: firstBuy,
+    cycle_buys: cycleBuys,
     buys, sells,
   };
 }
@@ -657,6 +668,8 @@ function applyDerived(pos, execsSorted) {
   pos.realized_gross = d.realized_gross;
   pos.opened_session = d.opened_session;
   pos.closed_session = d.closed_session;
+  pos.first_buy_price = d.first_buy_price;
+  pos.cycle_buys = d.cycle_buys;
   // An archived or voided position keeps that state; otherwise shares decide.
   if (pos.status !== "archived" && pos.status !== "void") {
     pos.status = d.shares > 0 ? "open" : (execsSorted.length ? "closed" : "open");
@@ -1084,6 +1097,17 @@ async function loadLedger() {
   for (const e of execs) {
     (STATE.execsByPos[e.position_id] = STATE.execsByPos[e.position_id] || []).push(e);
   }
+  // Positions written before 2026-09-20 have no first_buy_price. Derive it in
+  // memory from the executions we just loaded rather than rewriting the store:
+  // the plan levels need it, and a read must not mutate the ledger.
+  for (const pos of STATE.positions) {
+    if (pos.first_buy_price) continue;
+    const execs = currentExecutions(STATE.execsByPos[pos.position_id] || []);
+    if (!execs.length) continue;
+    const d = replay(execs, null);
+    pos.first_buy_price = d.first_buy_price;
+    pos.cycle_buys = d.cycle_buys;
+  }
   const marks = await dbGetAll("marks");
   STATE.marksByPos = {};
   for (const m of marks) {
@@ -1219,12 +1243,17 @@ function latestMark(posId) {
 }
 
 function activePlan(pos) {
-  // Stop and target are derived from the REAL average cost and stored as a
-  // strategy snapshot, not from a drifting close price. Report 5.4: the
-  // protective stop ratchets UP only -- a falling market must never recompute
-  // a lower stop and quietly widen the risk.
+  // Every level is derived from the FIRST fill and stored as a strategy
+  // snapshot, not from a drifting close price. Report 5.4: the protective stop
+  // ratchets UP only -- a falling market must never recompute a lower stop and
+  // quietly widen the risk.
+  //
+  // 2026-09-20: the anchor is the first buy, not the average cost. Staged entry
+  // buys the second half lower, which would otherwise drag the whole plan down
+  // with it -- and the staged rule was measured with the levels held still.
+  // Positions with one buy are unaffected: their first buy IS their average.
   if (!pos.open_shares || !pos.avg_cost) return null;
-  const base = pos.avg_cost;
+  const base = pos.first_buy_price || pos.avg_cost;
   const stop0 = divRound(base * (100 + STRATEGY.stopPct), 100);
   const arm = divRound(base * (100 + STRATEGY.armPct), 100);
   const lock = divRound(base * (100 + STRATEGY.lockPct), 100);
@@ -1237,12 +1266,19 @@ function activePlan(pos) {
     }
   }
   const armed = high !== null && high >= arm;
+  // Staged entry: the second half is still outstanding while the position has
+  // had exactly one buy. A buy limit rounds DOWN to a real tick, the same
+  // "never claim a better price than is orderable" rule the stop follows.
+  const add = divRound(base * (100 + STRATEGY.addPct), 100);
+  const staged = (pos.cycle_buys || 0) <= 1;
   return {
     stop: armed ? Math.max(stop0, lock) : stop0,
     stop_orderable: tickRound(armed ? Math.max(stop0, lock) : stop0, "down"),
     initial_stop: stop0,
     arm, lock, target,
     target_orderable: tickRound(target, "up"),
+    add, add_orderable: tickRound(add, "down"), add_open: staged,
+    base,
     armed, armed_on: armed ? highOn : "",
     highest_close: high,
   };
@@ -1295,6 +1331,11 @@ function pendingItems() {
       out.push({
         kind: "stop", pos,
         text: `${name}：收盤 ${fmtPrice(m.close_price)} 已在有效停損 ${fmtPrice(plan.stop)} 之下，請確認出場計畫`,
+      });
+    } else if (plan && plan.add_open && m.close_price !== null && m.close_price <= plan.add) {
+      out.push({
+        kind: "add", pos,
+        text: `${name}：收盤 ${fmtPrice(m.close_price)} 已到加碼價 ${fmtPrice(plan.add)}（分批買法才補另一半；一次買滿的話忽略）`,
       });
     }
   }
@@ -1660,14 +1701,36 @@ function planStopKv(r) {
     return kv("參考停損", esc(fmtPrice(fallback)), "", "依參考價推算，未成交前非實際風控");
   }
   if (!status || status === "pending") {
-    return kv("停損（跌破先出）", esc(fmtPrice(stop)), "", "成交後改以成交價 × 0.85 為準，只升不降");
+    return kv("停損（跌破先出）", esc(fmtPrice(stop)), "", "成交後改以成交價 × 0.80 為準，只升不降");
   }
   const sub = r.Exit_Signal
     ? "此價位為出場當時的有效停損"
     : r.Plan_Armed
       ? "鎖利已啟動：停損已上調到成交價 × 1.02，只升不降"
-      : `推估成交價 ${esc(fmtPrice(cents(r.Entry_Open)))} × 0.85；漲到 +6% 後上調到 +2%`;
+      : `推估成交價 ${esc(fmtPrice(cents(r.Entry_Open)))} × 0.80；漲到 +6% 後上調到 +2%`;
   return kv("停損（跌破先出）", esc(fmtPrice(stop)), r.Exit_Signal ? "" : "gold", sub);
+}
+
+// The optional staged entry (scan_mode.PRELAUNCH_ADD_PCT, 2026-09-20). Shown
+// as a plain price with what it is FOR: buying the second half is a choice,
+// so the row must never read like an order.
+function planAddKv(r) {
+  const add = cents(r.Plan_Add_Price);
+  // A trade the exit stack has already taken out cannot be added to: showing a
+  // buy level under a "已出場" badge would read as an instruction to re-enter.
+  if (add === null || r.Exit_Signal) return "";
+  const status = String(r.Hold_Status || "");
+  const hitOn = String(r.Add_Hit_Date || "").slice(0, 10);
+  if (!status || status === "pending") {
+    return kv("加碼價（分批買法）", esc(fmtPrice(add)), "",
+              "先買一半者在此補另一半；成交後改以成交價 × 0.90 為準");
+  }
+  if (hitOn) {
+    return kv("加碼價（分批買法）", esc(fmtPrice(add)), "gold",
+              `${esc(hitOn)} 已到過此價位；一次買滿的話忽略這列`);
+  }
+  return kv("加碼價（分批買法）", esc(fmtPrice(add)), "",
+            "尚未到價 · 一次買滿的話忽略這列");
 }
 
 function exitSignalSummary(rows) {
@@ -1703,6 +1766,7 @@ function pickCard(r) {
     kv("最新觀察參考", esc(fmtPrice(latestRef)), "", "每次掃描重算，非新的買進指令") +
     kv("停損距離%", esc(fmt(r.Risk_Pct, 1, "%")), "", "價格到停損的距離，不是虧損機率") +
     planStopKv(r) +
+    planAddKv(r) +
     kv("參考停利目標", esc(fmtPrice(cents(r.Target_Price))), "gold", "條件價，不代表已達成") +
     kv(sc.label, esc(fmt(r[sc.key], 1)), "", "規則分數，不是上漲機率") +
     kv("外資5日", esc(fmtSigned(r.Foreign_Net_5D, 0)), signClass(r.Foreign_Net_5D), "最近5筆法人資料（張）");
@@ -1850,6 +1914,12 @@ function positionCard(pos, pinned) {
        pos.initial_buy_price ? "固定，不隨掃描改動" : "此持倉未連結固定建議") +
     kv("有效停損", plan ? esc(fmtPrice(plan.stop)) : "-", "",
        plan ? `可掛單 ${fmtPrice(plan.stop_orderable)}（依升降單位）` : "") +
+    kv("加碼價（分批買法）", plan && plan.add_open ? esc(fmtPrice(plan.add)) : "-", "",
+       plan
+         ? (plan.add_open
+             ? `第一筆成交價 ${fmtPrice(plan.base)} × 0.90 · 可掛單 ${fmtPrice(plan.add_orderable)}；一次買滿就不用`
+             : "此筆已有兩次以上買進，不再加碼")
+         : "") +
     kv("停利目標", plan ? esc(fmtPrice(plan.target)) : "-", "gold",
        plan ? `條件價 · 可掛單 ${fmtPrice(plan.target_orderable)}` : "") +
     kv("已實現淨損益", esc(fmtPnl(pos.realized_net)), signClass(pos.realized_net), "已扣實際費稅") +
@@ -1865,11 +1935,19 @@ function positionCard(pos, pinned) {
         : `<div class="plan">鎖利：尚未啟動；啟動門檻 ${esc(fmtPrice(plan.arm))}（條件，非已達成）· 未啟動前停損維持 ${esc(fmtPrice(plan.initial_stop))}</div>`)
     : "";
 
+  // "續抱" on its own is what the 2026-09-17 complaint was about: a position
+  // 10% under water read exactly like one 10% up. The prices that decide what
+  // to do next belong in the sentence.
+  const holdLine = plan
+    ? `建議：續抱。跌破 ${fmtPrice(plan.stop)} 先出場${
+        plan.add_open ? `；分批買法可在 ${fmtPrice(plan.add)} 補另一半` : ""
+      }；${plan.armed ? "鎖利已啟動" : `漲到 ${fmtPrice(plan.arm)} 後停損上調到 ${fmtPrice(plan.lock)}`}。`
+    : "建議：續抱，下一個交易日重新評估（收盤後更新）。";
   const advice = dayIdx === null
     ? `<div class="plan">建議：無法計算持有天數，請確認成交日期。</div>`
     : dayIdx >= horizon
       ? `<div class="plan alert">建議：第 ${horizon} 個交易日已到，依策略應於收盤出場；實際賣出以你的成交回報為準。</div>`
-      : `<div class="plan">建議：續抱，下一個交易日重新評估（收盤後更新）。</div>`;
+      : `<div class="plan">${esc(holdLine)}</div>`;
 
   return `<article class="card pos state-${stateCls}${pinned ? " pin" : ""}">
     <div class="card-head">

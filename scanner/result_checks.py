@@ -136,6 +136,7 @@ COLUMNS = {
     "Target_Price":        _c("num", lo=0.01, phone=True),
     "Trail_Arm_Price":     _c("num", lo=0.01),
     "Trail_Lock_Price":    _c("num", lo=0.01),
+    "Add_Price":           _c("num", lo=0.01),
     "Core_Plus":           _c("bool"),
     "Entry_Date":          _c("date", nullable=True),
     "Exit_Date":           _c("date", nullable=True),
@@ -153,6 +154,9 @@ COLUMNS = {
     # exit plan (holding_tracker, 2026-09-14): the one price to act on
     "Plan_Stop":           _c("num", nullable=True, lo=0.01, phone=True),
     "Plan_Armed":          _c("bool", phone=True),
+    # optional staged entry (2026-09-20): buy the rest at fill x (1 - ADD_PCT)
+    "Plan_Add_Price":      _c("num", nullable=True, lo=0.01, phone=True),
+    "Add_Hit_Date":        _c("date", nullable=True, phone=True),
     "Exit_Signal":         _c("choice", nullable=True, choices=EXIT_SIGNALS,
                               phone=True),
     "Exit_Signal_Date":    _c("date", nullable=True, phone=True),
@@ -379,18 +383,18 @@ def _trade_params():
     try:
         from scanner.scan_mode import (PRELAUNCH_STOP_PCT, PRELAUNCH_TP_PCT,
                                        PRELAUNCH_TRAIL_ARM, PRELAUNCH_TRAIL_LOCK,
-                                       N_ENTER)
+                                       PRELAUNCH_ADD_PCT, N_ENTER)
         return PRELAUNCH_STOP_PCT, PRELAUNCH_TP_PCT, PRELAUNCH_TRAIL_ARM, \
-            PRELAUNCH_TRAIL_LOCK, N_ENTER
+            PRELAUNCH_TRAIL_LOCK, PRELAUNCH_ADD_PCT, N_ENTER
     except Exception:
-        return 0.15, 0.20, 0.06, 0.02, 20
+        return 0.20, 0.20, 0.06, 0.02, 0.10, 20
 
 
 def _check_rows(rows, meta, rep, scan_mode):
     if not rows:
         return
     data_date = str(meta.get("data_date") or "")[:10]
-    stop_pct, tp_pct, arm_pct, lock_pct, n_enter = _trade_params()
+    stop_pct, tp_pct, arm_pct, lock_pct, add_pct, n_enter = _trade_params()
     prelaunch = scan_mode == "mode_prelaunch"
 
     counters = {}
@@ -462,6 +466,9 @@ def _check_rows(rows, meta, rep, scan_mode):
             risk = _num(r.get("Risk_Pct"))
             if risk is not None and abs(risk - stop_pct * 100) > 0.11:
                 hit("risk_pct_mismatch", sid, "Risk_Pct")
+            add = _num(r.get("Add_Price"))
+            if add is not None and abs(add - round(close * (1 - add_pct), 2)) > _PRICE_TOL:
+                hit("add_pct_mismatch", sid, "Add_Price")
 
         # Core_Plus derives from three columns on the same row
         if prelaunch and "Core_Plus" in r:
@@ -535,6 +542,24 @@ def _check_rows(rows, meta, rep, scan_mode):
                     want = round(fill * ((1 + lock_pct) if armed else (1 - stop_pct)), 2)
                     if abs(plan_stop - want) > _PRICE_TOL:
                         hit("plan_stop_level_mismatch", sid, "Plan_Stop")
+            # staged entry (2026-09-20): the add level never moves, so it is
+            # the reference before entry and fill x (1 - add) afterwards.
+            if "Plan_Add_Price" in r:
+                plan_add = _num(r.get("Plan_Add_Price"))
+                hit_on = r.get("Add_Hit_Date")
+                if status == "pending":
+                    ref_add = _num(r.get("Add_Price"))
+                    if plan_add is not None and ref_add is not None:
+                        if abs(plan_add - ref_add) > _PRICE_TOL:
+                            hit("plan_add_level_mismatch", sid, "Plan_Add_Price")
+                    if not _is_null(hit_on):
+                        hit("add_hit_on_pending_row", sid, "Add_Hit_Date")
+                elif fill is not None and plan_add is not None:
+                    if abs(plan_add - round(fill * (1 - add_pct), 2)) > _PRICE_TOL:
+                        hit("plan_add_level_mismatch", sid, "Plan_Add_Price")
+                if not _is_null(hit_on) and not _is_null(entry):
+                    if str(hit_on)[:10] < str(entry)[:10]:
+                        hit("add_hit_before_entry", sid, "Add_Hit_Date")
                 if not _is_null(sig):
                     if _is_null(r.get("Exit_Signal_Date")) or _num(r.get("Exit_Signal_Price")) is None:
                         hit("exit_signal_partial", sid, "Exit_Signal")
@@ -588,6 +613,8 @@ def _check_rows(rows, meta, rep, scan_mode):
         "blocked_without_reason", "buy_ready_violates_gate", "buy_ready_on_stale_row",
         "recommendation_partial", "recommendation_orphan_value", "non_positive",
         "sup_gap_mismatch", "res_gap_mismatch", "squeeze_mismatch",
+        "add_pct_mismatch", "plan_add_level_mismatch", "add_hit_on_pending_row",
+        "add_hit_before_entry",
         "exit_signal_on_pending_row", "plan_stop_pending_mismatch",
         "plan_stop_level_mismatch", "exit_signal_partial",
     }
@@ -631,7 +658,11 @@ def _check_rows(rows, meta, rep, scan_mode):
         "non_positive": "MA / volume average not positive",
         "exit_signal_on_pending_row": "exit booked before entry",
         "plan_stop_pending_mismatch": "pending Plan_Stop is not the reference stop",
-        "plan_stop_level_mismatch": "Plan_Stop is not fill x 0.85 (or x 1.02 when armed)",
+        "plan_stop_level_mismatch": "Plan_Stop is not fill x (1 - stop) (or x 1.02 when armed)",
+        "add_pct_mismatch": "Add_Price is not close * (1 - PRELAUNCH_ADD_PCT)",
+        "plan_add_level_mismatch": "Plan_Add_Price is not the reference (pending) or fill x (1 - add)",
+        "add_hit_on_pending_row": "staged add booked before entry",
+        "add_hit_before_entry": "Add_Hit_Date earlier than Entry_Date",
         "exit_signal_partial": "Exit_Signal without its date or price",
         "exit_signal": "rows where the exit stack says the trade is already out",
     }
