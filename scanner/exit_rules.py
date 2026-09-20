@@ -1,7 +1,7 @@
 """
 The exit stack, as ONE parameterised implementation. ASCII only, stdlib only.
 
-Why this file exists. The adopted exit parameters (stop 15%, take profit 20%,
+Why this file exists. The adopted exit parameters (stop 20%, take profit 20%,
 arm 6%, lock 2%) were chosen by archive/research/eval_winrate_round2.sim_trail,
 while live forward performance was measured by
 scanner.signal_ledger._simulate_rule. Two implementations of one rule, written

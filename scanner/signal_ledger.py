@@ -24,7 +24,7 @@ Two tables in a single append-only SQLite file (config.SIGNAL_LEDGER_FILE):
               fwd_return_pct  raw signal quality: buy the signal-day close, no
                               stop, no target, hold the full horizon.
               rule_return_pct what the TRADING RULE would have returned: enter
-                              at the next bar's OPEN, disaster stop -15%, lock
+                              at the next bar's OPEN, disaster stop -20%, lock
                               +2% once +6% trades, take profit +20%, else exit
                               on the horizon's close.
             Only the second one describes the strategy. Keeping the first is
@@ -449,8 +449,8 @@ def _simulate_rule(opens, highs, lows, closes, hold):
          pessimistic, and the same convention the round2 simulator used. That
          means the stop carried into the bar is tested before the lock the bar
          itself arms, and both before the target: a bar with high 125 and low 80
-         on a 100 entry could have gone down first (-15%), or up through the arm
-         and back down (+2%), or up through the target (+20%), and -15% is the
+         on a 100 entry could have gone down first (-20%), or up through the arm
+         and back down (+2%), or up through the target (+20%), and -20% is the
          one we cannot rule out. A fill inside the bar is at the level itself (a
          gap through it was already handled in step 1).
 

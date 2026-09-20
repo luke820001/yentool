@@ -957,6 +957,11 @@ def append_history(history_path, report, meta, keep=HISTORY_KEEP):
     """Rolling history of check outcomes, small enough to commit."""
     hist = _load_json(history_path) or {}
     runs = hist.get("runs") if isinstance(hist.get("runs"), list) else []
+    # The scan and the workflow step both check the same publish; one line
+    # per publish, not one per checker invocation.
+    if runs and runs[-1].get("scan_time") == meta.get("scan_time") \
+            and runs[-1].get("status") == report.get("status"):
+        return len(runs)
     runs.append({
         "checked_at": report.get("checked_at"),
         "session_date": meta.get("data_date"),

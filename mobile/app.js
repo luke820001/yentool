@@ -61,6 +61,7 @@ const MODE_CARDS = {
       "兩種買法擇一，出場價位完全相同（都以第一筆成交價計算）：一次買滿；或先買一半、跌到成交價 -10% 再補另一半。\n" +
       "出場計畫：災難停損 -20% · 獲利 +6% 後鎖利上調至 +2% · 目標 +20% · 基本抱 10 個交易日（大盤轉弱時最晚延至 20 天）。\n" +
       "回測（2017-2026，564 筆，近 3 年）：一次買滿 68.5% 勝、每筆平均 +2.2%；分批 71.4% 勝、每筆平均 +1.5%、大虧較少。含手續費與證交稅的歷史統計，不是未來勝率。\n" +
+      "2026-09-20 起停損由 -15% 放寬到 -20%，既有持倉一併套用，所以舊部位畫面上的停損價會往下移。\n" +
       "名單上其餘的列是觀察與持倉追蹤，不是買點。",
   },
   mode_momentum_leader: {
@@ -1332,7 +1333,11 @@ function pendingItems() {
         kind: "stop", pos,
         text: `${name}：收盤 ${fmtPrice(m.close_price)} 已在有效停損 ${fmtPrice(plan.stop)} 之下，請確認出場計畫`,
       });
-    } else if (plan && plan.add_open && m.close_price !== null && m.close_price <= plan.add) {
+    } else if (plan && plan.add_open && m.close_price !== null && m.close_price <= plan.add
+               && !(m.day_index !== null && m.day_index >= horizon)) {
+      // Past the planned hold the trade is on its way out; telling someone to
+      // buy the second half of a position they should be closing is worse
+      // than saying nothing.
       out.push({
         kind: "add", pos,
         text: `${name}：收盤 ${fmtPrice(m.close_price)} 已到加碼價 ${fmtPrice(plan.add)}（分批買法才補另一半；一次買滿的話忽略）`,
@@ -1675,7 +1680,7 @@ function filteredRows() {
 // --- exit plan columns (scanner/holding_tracker.py, 2026-09-14) -------------
 // Plan_Stop is the ONE price to act on: "sell first if it trades below this".
 // Before entry it is the close-based reference; once the row is entered it is
-// fill x 0.85, raised to fill x 1.02 when the +6% lock has armed. Exit_Signal
+// fill x 0.80, raised to fill x 1.02 when the +6% lock has armed. Exit_Signal
 // is what the shared exit stack (scanner/exit_rules.py) says already happened.
 const EXIT_LABEL = {
   stop: "已跌破停損 · 先出場",
@@ -2298,6 +2303,8 @@ function renderResearch() {
     ["首日建議價", "第一次通過完整買進規則時固定下來，之後不再改動"],
     ["最新觀察參考", "每次掃描重算的參考價，不是新的買進指令"],
     ["停損距離%", "價格到停損價的距離，不是虧損機率，也不是帳戶風險"],
+    ["停損（跌破先出）", "第一筆成交價 × 0.80，鎖利啟動後上調到 × 1.02，只升不降"],
+    ["加碼價（分批買法）", "第一筆成交價 × 0.90。只有「先買一半」的買法要用；一次買滿就忽略"],
     ["20日平均日振幅%", "20日平均 (最高-最低)/收盤，未含前收跳空，故不等於標準 ATR"],
     ["通道上緣接近", "壓縮區間且收盤接近前40日高的97%，不一定真的突破"],
     ["近3日均量/20日均量", "量能萎縮比，不是當日單日量縮"],

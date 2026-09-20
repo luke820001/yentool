@@ -283,7 +283,7 @@ class RowIdentities(unittest.TestCase):
         self.assertIn("exit_signal_on_pending_row",
                       codes(self._broken(Exit_Signal="stop", Exit_Signal_Date=DATE,
                                          Exit_Signal_Price=250.0), "error"))
-        # entered rows: the stop is fill x 0.85, or x 1.02 once armed
+        # entered rows: the stop is fill x (1 - stop pct), or x 1.02 once armed
         base = clean_row(status="holding", entry_open=300.0)
         self.assertIn("plan_stop_level_mismatch", codes(self._broken(base, Plan_Stop=280.0), "error"))
         base = clean_row(status="holding", entry_open=300.0)
@@ -430,10 +430,23 @@ class FilesAndOutput(unittest.TestCase):
                 back = json.load(f)
             self.assertEqual(back["meta"]["checks"]["status"], "ok")
             self.assertEqual(back["meta"]["count"], 1)
+            # The scan and the workflow step both check the SAME publish, so
+            # the history keeps one line per publish, not one per invocation.
+            with open(hist, encoding="utf-8") as f:
+                runs = json.load(f)["runs"]
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[-1]["session_date"], DATE)
+
+            # a genuinely new publish (new scan_time) still appends
+            p2 = clean_payload()
+            p2["meta"]["scan_time"] = DATE + " 18:05:00"
+            with open(scan, "w", encoding="utf-8") as f:
+                json.dump(p2, f)
+            check_files(scan, quotes_path=quotes, history_path=hist)
             with open(hist, encoding="utf-8") as f:
                 runs = json.load(f)["runs"]
             self.assertEqual(len(runs), 2)
-            self.assertEqual(runs[-1]["session_date"], DATE)
+            self.assertEqual(runs[-1]["scan_time"], DATE + " 18:05:00")
 
     def test_unreadable_payload_fails(self):
         rep = check_files("/nonexistent/scan_result.json", write=False)
