@@ -351,6 +351,19 @@ C 單獨計算、不混入：報告 §14 自己就把研究列為後續工作（
 - [ ] **舊 ledger outcomes 混用兩套停損**：2026-09-20 之前記錄的 `rule_return_pct` 是 -15% 停損的
   結果，之後是 -20%。要比較時用 `picks.rule_version` 分群，或整批 `reset_rule_outcomes()` + 重算。
 
+### 2026-09-20 外部健檢報告的未決項目（`PROJECT_AUDIT_REPORT_2026-09-20.md`）
+
+報告中已修的項目見該檔開頭的處理狀態表；剩下兩項需要擁有者決定，一項是待補工作。
+
+- [ ] **AUD-005 手機是否保留 GitHub Token 機制。** 現況：token 存在 IndexedDB，用來一鍵觸發掃描；
+  沒有 token 時按鈕改為開啟 GitHub 的 Run workflow 頁面（你先前選的就是這條路）。
+  要移除的話，同時移除 token 表單、IndexedDB meta 欄位與 Bearer 呼叫。
+- [ ] **AUD-007 大型行情 DB 是否脫離 Git。** 好處：版本庫瘦身（現約 100 MiB）、不再需要 rebase autostash。
+  代價：被追蹤的 DB 目前是 **Actions 快取失效時的冷啟動備援**，拿掉後冷啟動要重抓約 2000 檔，
+  既慢又可能撞上資料源頻率限制。要換的話需先確認冷啟動路徑可行（或改用有 checksum 的壓縮 artifact）。
+- [ ] **AUD-009 其餘部分：** GUI 啟動／互動測試、PWA 的 Service Worker / IndexedDB 單元測試與瀏覽器 E2E。
+  擷取層解析測試已於 2026-09-20 補上（`tests/test_ingestion_parsing.py`）。
+
 ### 更正：先前寫的「763 檔沒有真正更新」是錯的
 
 我原本根據 `refresh_result.json` 寫下「763 檔保留舊資料、佔宇宙 39%」。**這個說法不成立**,
