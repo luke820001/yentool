@@ -32,9 +32,14 @@ import time
 from pathlib import Path
 
 import requests
-import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# TLS verification stays ON. Every one of these endpoints was checked on
+# 2026-09-20 with verification enabled and answered HTTP 200 (TWSE
+# STOCK_DAY and T86, TPEX openapi and stock day, TDCC open data and the
+# portal), so the old verify=False bought nothing and cost the one check
+# that tells a real exchange response from an intercepted or captive-
+# portal one. Prices written here become indicators, picks and stops; a
+# forged response is not a display bug.
 
 BASE = Path(__file__).resolve().parent.parent
 DB_OUT = BASE / "data" / "tdcc_history.db"
@@ -65,7 +70,7 @@ class Collector:
         self.dates = []
 
     def refresh_form(self):
-        r = self.s.get(URL, timeout=30, verify=False)
+        r = self.s.get(URL, timeout=30)
         r.raise_for_status()
         m = re.search(r'name="SYNCHRONIZER_TOKEN" value="([^"]+)"', r.text)
         if not m:
@@ -79,7 +84,7 @@ class Collector:
         """One (stock, week) table -> list of (level, holders, shares, pct)."""
         for attempt in range(RETRIES):
             try:
-                r = self.s.post(URL, timeout=30, verify=False, data={
+                r = self.s.post(URL, timeout=30, data={
                     "SYNCHRONIZER_TOKEN": self.token,
                     "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
                     "method": "submit", "firDate": self.dates[0],

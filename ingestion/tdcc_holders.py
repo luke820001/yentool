@@ -18,12 +18,17 @@ import sqlite3
 from datetime import datetime, date as _date
 
 import requests
-import urllib3
 import pandas as pd
 
 from config.settings import LARGE_HOLDER_FILE
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# TLS verification stays ON. Every one of these endpoints was checked on
+# 2026-09-20 with verification enabled and answered HTTP 200 (TWSE
+# STOCK_DAY and T86, TPEX openapi and stock day, TDCC open data and the
+# portal), so the old verify=False bought nothing and cost the one check
+# that tells a real exchange response from an intercepted or captive-
+# portal one. Prices written here become indicators, picks and stops; a
+# forged response is not a display bug.
 
 TDCC_URL = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
 _HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -38,7 +43,7 @@ def fetch_tdcc_latest() -> pd.DataFrame:
     15 tiers, whole market) into data/tdcc_history.db -- the panel the
     big-holder behaviour study accumulates on (docs/SANDBOX_PLAN.md H5).
     The aggregate frame this returns is unchanged."""
-    r = requests.get(TDCC_URL, timeout=60, verify=False, headers=_HEADERS)
+    r = requests.get(TDCC_URL, timeout=60, headers=_HEADERS)
     r.raise_for_status()
     df = pd.read_csv(io.BytesIO(r.content), encoding="utf-8", dtype=str)
     df.columns = [c.strip() for c in df.columns]

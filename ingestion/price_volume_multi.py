@@ -10,9 +10,14 @@ from datetime import date, timedelta
 
 import requests
 import pandas as pd
-import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# TLS verification stays ON. Every one of these endpoints was checked on
+# 2026-09-20 with verification enabled and answered HTTP 200 (TWSE
+# STOCK_DAY and T86, TPEX openapi and stock day, TDCC open data and the
+# portal), so the old verify=False bought nothing and cost the one check
+# that tells a real exchange response from an intercepted or captive-
+# portal one. Prices written here become indicators, picks and stops; a
+# forged response is not a display bug.
 
 # yfinance logs "possibly delisted / 404" to console when a probed ticker has no
 # data (e.g. trying the .TW suffix on an OTC stock before falling back to .TWO).
@@ -157,7 +162,6 @@ def _tpex_one_month(stock_id, year, month):
             },
             headers=_HEADERS,
             timeout=REQUEST_TIMEOUT,
-            verify=False,
         )
         resp.raise_for_status()
         payload = resp.json()

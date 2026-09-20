@@ -2,13 +2,18 @@ import json
 import time
 import warnings
 import requests
-import urllib3
 import pandas as pd
 from config.settings import PRICE_FILTER_MAX, VOLUME_TOP_N, PREFILTER_TOP_N, DATA_DIR
 
 _NAME_CACHE_FILE = DATA_DIR / "stock_names.json"
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# TLS verification stays ON. Every one of these endpoints was checked on
+# 2026-09-20 with verification enabled and answered HTTP 200 (TWSE
+# STOCK_DAY and T86, TPEX openapi and stock day, TDCC open data and the
+# portal), so the old verify=False bought nothing and cost the one check
+# that tells a real exchange response from an intercepted or captive-
+# portal one. Prices written here become indicators, picks and stops; a
+# forged response is not a display bug.
 
 TSE_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 OTC_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
@@ -28,11 +33,11 @@ _HEADERS = {
 }
 
 
-def _fetch_json(url: str, verify_ssl: bool = True) -> list:
+def _fetch_json(url: str) -> list:
     for attempt in range(1, RETRY_LIMIT + 1):
         try:
             resp = requests.get(
-                url, headers=_HEADERS, timeout=REQUEST_TIMEOUT, verify=verify_ssl
+                url, headers=_HEADERS, timeout=REQUEST_TIMEOUT
             )
             resp.raise_for_status()
             return resp.json()
@@ -156,7 +161,7 @@ def fetch_full_market() -> pd.DataFrame:
     print("  -> TSE raw rows: {}".format(len(tse_df)))
 
     print("  Fetching OTC market data ...")
-    otc_raw = _fetch_json(OTC_URL, verify_ssl=False)
+    otc_raw = _fetch_json(OTC_URL)
     otc_df = _normalize_otc(otc_raw)
     print("  -> OTC raw rows: {}".format(len(otc_df)))
 
@@ -304,7 +309,7 @@ def lookup_stock_info(stock_id: str):
     tse = _normalize_tse(_fetch_json(TSE_URL))
     if not tse.empty:
         _cache_names(tse, "TSE", cache)
-    otc = _normalize_otc(_fetch_json(OTC_URL, verify_ssl=False))
+    otc = _normalize_otc(_fetch_json(OTC_URL))
     if not otc.empty:
         _cache_names(otc, "OTC", cache)
 

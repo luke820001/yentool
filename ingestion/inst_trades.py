@@ -8,12 +8,17 @@ import sqlite3
 from datetime import datetime, date as _date, timedelta
 
 import requests
-import urllib3
 import pandas as pd
 
 from config.settings import DATA_DIR
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# TLS verification stays ON. Every one of these endpoints was checked on
+# 2026-09-20 with verification enabled and answered HTTP 200 (TWSE
+# STOCK_DAY and T86, TPEX openapi and stock day, TDCC open data and the
+# portal), so the old verify=False bought nothing and cost the one check
+# that tells a real exchange response from an intercepted or captive-
+# portal one. Prices written here become indicators, picks and stops; a
+# forged response is not a display bug.
 
 INST_DB = DATA_DIR / "inst_trades.db"
 _H = {"User-Agent": "Mozilla/5.0", "Accept": "application/json,*/*"}
@@ -50,7 +55,7 @@ def _num(x):
 def fetch_twse_inst(ymd: str) -> pd.DataFrame:
     """TWSE T86 for one date 'YYYYMMDD' -> {stock_id, Foreign_Net, Trust_Net, Inst_Net} in lots."""
     try:
-        r = requests.get(T86_URL.format(ymd), headers=_H, timeout=20, verify=False)
+        r = requests.get(T86_URL.format(ymd), headers=_H, timeout=20)
         j = r.json()
     except Exception:
         return pd.DataFrame()
@@ -89,7 +94,7 @@ def fetch_twse_inst(ymd: str) -> pd.DataFrame:
 def fetch_tpex_inst() -> pd.DataFrame:
     """TPEX openapi (latest available day) -> same schema, in lots, plus its date."""
     try:
-        r = requests.get(TPEX_URL, headers=_H, timeout=30, verify=False)
+        r = requests.get(TPEX_URL, headers=_H, timeout=30)
         data = r.json()
     except Exception:
         return pd.DataFrame()
