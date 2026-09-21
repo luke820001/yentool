@@ -49,8 +49,25 @@ class ScanWorker:
             # candidate pool so the hysteresis layer can actually retain them
             # even if their single-day volume slipped below the prefilter cap.
             prior_ids = load_held_ids(self._scan_mode)
+            # Names the ledger picked recently are force-included too, exactly
+            # as scan_headless does. Without them the desktop cannot build the
+            # tracked block at all, and a holding that dropped off the list
+            # would lose its chips, averages and exit plan here -- the gap
+            # scanner/tracked_rows.py exists to close.
+            tracked_ids, tracked_picks = set(), {}
+            try:
+                from scanner.tracked_rows import recent_pick_ids
+                from config.settings import (PRICE_VOLUME_FILE,
+                                             SIGNAL_LEDGER_FILE)
+                tracked_picks = recent_pick_ids(
+                    PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE, self._scan_mode,
+                    with_dates=True)
+                tracked_ids = set(tracked_picks)
+            except Exception as e:
+                print("  [tracked] id lookup skipped: {}".format(e))
             candidates = get_candidate_list(
-                scan_mode=self._scan_mode, include_ids=prior_ids)
+                scan_mode=self._scan_mode,
+                include_ids=set(prior_ids) | tracked_ids)
 
             if candidates.empty:
                 self._on_error("Failed to fetch market data. Check your connection.")
@@ -80,8 +97,9 @@ class ScanWorker:
                 self._on_progress(rank, total, "Scanning {} ({}/{})".format(
                     stock_id, rank, total))
 
-            result_df = verify_candidates(candidates, progress_callback=progress_callback)
-            result_df = apply_scan_mode(result_df, self._scan_mode)
+            verified = verify_candidates(candidates,
+                                         progress_callback=progress_callback)
+            result_df = apply_scan_mode(verified, self._scan_mode)
             result_df = sort_for_mode(result_df, self._scan_mode)
             # Hysteresis top-N: stabilizes the shortlist day-to-day (see
             # scanner.scan_mode.select_with_hysteresis). Persist the kept set so
@@ -125,10 +143,27 @@ class ScanWorker:
             except Exception as e:
                 print("  [chips] skipped: {}".format(e))
 
+            # Full rows for names that dropped off the list but could still
+            # be held. The desktop publishes the SAME payload the phone reads,
+            # so leaving this out silently stripped the dropped-out holdings
+            # whenever the app was opened after a cloud scan.
+            tracked_df = None
+            try:
+                from scanner.tracked_rows import annotate_tracked, split_tracked
+                tracked_df = split_tracked(verified, result_df, tracked_ids,
+                                           picked_on=tracked_picks)
+                if tracked_df is not None and not tracked_df.empty:
+                    tracked_df = annotate_tracked(tracked_df, self._scan_mode)
+                    print("  [tracked] published full data for {} dropped-out "
+                          "name(s)".format(len(tracked_df)))
+            except Exception as e:
+                print("  [tracked] skipped: {}".format(e))
+
             # Persist the latest result (overwrites previous) for offline review.
             try:
                 path = export_scan_result(result_df, self._scan_mode,
-                                          degraded=degraded)
+                                          degraded=degraded,
+                                          tracked=tracked_df)
                 if path:
                     print("  [export] scan result -> {}".format(path))
             except Exception as e:

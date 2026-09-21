@@ -233,5 +233,29 @@ class StoredPricesAreQuotedPrices(unittest.TestCase):
         self.assertEqual(out[("1000", "2026-09-21")], 534.5)
 
 
+class DesktopPublishesTheSamePayload(unittest.TestCase):
+    """The desktop runs the SAME export the phone reads. Leaving the tracked
+    block out of it stripped the dropped-out holdings whenever the app was
+    opened after a cloud scan."""
+
+    def _src(self):
+        return (Path(__file__).resolve().parent.parent / "gui"
+                / "scan_worker.py").read_text(encoding="utf-8")
+
+    def test_the_verified_frame_is_kept(self):
+        src = self._src()
+        self.assertIn("verified = verify_candidates(", src,
+                      "apply_scan_mode overwrote it, so there was nothing "
+                      "left to split the tracked rows out of")
+
+    def test_the_export_is_given_the_tracked_block(self):
+        self.assertIn("tracked=tracked_df", self._src())
+
+    def test_recent_picks_are_force_included(self):
+        src = self._src()
+        self.assertIn("recent_pick_ids(", src)
+        self.assertIn("set(prior_ids) | tracked_ids", src)
+
+
 if __name__ == "__main__":
     unittest.main()

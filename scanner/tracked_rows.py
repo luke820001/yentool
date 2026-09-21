@@ -120,7 +120,7 @@ def split_tracked(verified, published, tracked_ids, limit=MAX_TRACKED,
     return out.reset_index(drop=True)
 
 
-def annotate_tracked(df, scan_mode, session_date=None):
+def annotate_tracked(df, scan_mode):
     """Give a tracked row the same treatment a listed row gets, so the phone
     can render it with the same code path: trade levels, holding day, exit
     plan, chip readout. Buy_Ready is forced false -- a name that is no longer

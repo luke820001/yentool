@@ -254,8 +254,7 @@ def run_scan(scan_mode="mode_prelaunch"):
         tracked_df = split_tracked(verified, result_df, tracked_ids,
                                    picked_on=tracked_picks)
         if tracked_df is not None and not tracked_df.empty:
-            tracked_df = annotate_tracked(tracked_df, scan_mode,
-                                          session_date=session_date)
+            tracked_df = annotate_tracked(tracked_df, scan_mode)
             print("  [tracked] published full data for {} dropped-out "
                   "name(s)".format(len(tracked_df)))
     except Exception as e:
