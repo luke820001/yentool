@@ -183,5 +183,55 @@ class TrackedCapKeepsTheNewest(unittest.TestCase):
         self.assertEqual(sorted(out["Stock_ID"]), ["2222", "3333"])
 
 
+class StoredPricesAreQuotedPrices(unittest.TestCase):
+    """Taiwan quotes carry at most two decimals. yfinance hands back
+    float32-widened numbers (13.1499996185303 for 13.15), and every published
+    level is one of them times something, so a 1e-5 artefact becomes a FULL
+    TICK once the product is snapped onto the ladder."""
+
+    def _db(self, tmp, opens):
+        db = Path(tmp) / "pv.db"
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute("CREATE TABLE data (%s)" % COLS)
+            for i, op in enumerate(opens):
+                conn.execute(
+                    "INSERT INTO data VALUES ('2026-09-21',?,?,?,?,?,1,1,"
+                    "NULL,NULL,NULL,NULL)",
+                    ("%04d" % (1000 + i), op, op, op, op))
+            conn.commit()
+        finally:
+            conn.close()
+        return db
+
+    def test_a_float_artefact_is_rounded_away(self):
+        from scanner.market_snapshot import round_stored_prices
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._db(tmp, [13.1499996185303, 534.5045776367, 47.6])
+            self.assertEqual(round_stored_prices(db, log=lambda *a: None), 2)
+            conn = sqlite3.connect(db)
+            try:
+                got = [r[0] for r in conn.execute(
+                    "SELECT open FROM data ORDER BY stock_id")]
+            finally:
+                conn.close()
+        self.assertEqual(got, [13.15, 534.5, 47.6])
+
+    def test_a_clean_store_is_not_rewritten(self):
+        from scanner.market_snapshot import round_stored_prices
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._db(tmp, [13.15, 534.5])
+            self.assertEqual(round_stored_prices(db, log=lambda *a: None), 0)
+
+    def test_the_fill_price_is_read_as_a_price(self):
+        import scanner.holding_tracker as tracker
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._db(tmp, [534.5045776367])
+            with mock.patch.object(tracker, "PRICE_VOLUME_FILE", db):
+                out = tracker._entry_opens([("1000", "2026-09-21")])
+        self.assertEqual(out[("1000", "2026-09-21")], 534.5)
+
+
 if __name__ == "__main__":
     unittest.main()

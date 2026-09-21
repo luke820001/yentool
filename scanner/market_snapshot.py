@@ -281,6 +281,47 @@ def refill_rolling_columns(price_db, log=print):
 BASIS_TOLERANCE_PCT = 0.5
 
 
+def round_stored_prices(price_db, log=print):
+    """Round every stored OHLC value to two decimals where it is not already.
+
+    Taiwan quotes carry at most two decimals. yfinance hands back
+    float32-widened numbers -- 13.1499996185303 for a 13.15 open,
+    534.5045776367 for 534.50 -- and 10,352 of 21,337 bars stored since
+    2026-09-01 were like that. Harmless to look at, not harmless to compute
+    with: every published level is one of these numbers times something, and
+    a 1e-5 artefact becomes a FULL TICK once the product is snapped onto the
+    ladder (3,086 level computations across the stored opens since
+    2026-08-01, worst case 5.00 on 2383).
+
+    New bars are rounded on the way in (ingestion/price_volume_multi and the
+    exchange feed, which is clean anyway). This heals what is already there,
+    and costs one query on a store that is already clean.
+
+    Returns the number of rows rewritten.
+    """
+    conn = sqlite3.connect(str(price_db), timeout=120)
+    cols = ("open", "high", "low", "close")
+    try:
+        where = " OR ".join(
+            "ABS({c} * 100 - ROUND({c} * 100)) > 1e-6".format(c=c) for c in cols)
+        n = conn.execute(
+            "SELECT COUNT(*) FROM data WHERE %s" % where).fetchone()[0]
+        if not n:
+            return 0
+        conn.execute(
+            "UPDATE data SET %s WHERE %s"
+            % (", ".join("{c} = ROUND({c}, 2)".format(c=c) for c in cols), where))
+        conn.commit()
+        log("  [snapshot] rounded {} stored bar(s) to two decimals (float "
+            "artefacts from the batch feed)".format(n))
+        return n
+    except Exception as e:
+        log("  [snapshot] price rounding skipped: {}".format(str(e)[:80]))
+        return 0
+    finally:
+        conn.close()
+
+
 def compare_to_store(price_db, df, log=print, tol=BASIS_TOLERANCE_PCT):
     """Report stored closes that disagree with the exchange's own figure.
 
@@ -360,6 +401,7 @@ def refresh_market(price_db, log=print):
     n = store_snapshot(price_db, df, log=log)
     log("  [snapshot] stored {} whole-market bars (TSE {} / OTC {})".format(
         n, health["TSE"], health["OTC"]))
+    round_stored_prices(price_db, log=log)
     refill_rolling_columns(price_db, log=log)
     health["basis"] = compare_to_store(price_db, df, log=log)
     return n, health

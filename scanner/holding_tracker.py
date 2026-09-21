@@ -192,7 +192,15 @@ def _entry_opens(pairs):
         except (TypeError, ValueError):
             continue
         if op > 0:
-            out[(str(sid), str(d)[:10])] = op
+            # A quoted price has two decimals. Bars fetched through yfinance
+            # come back float32-widened (534.5045776367 for a 534.50 open),
+            # and EVERY published level is this number times something, so a
+            # 1e-5 storage artefact can become a full tick once the product is
+            # snapped onto the ladder -- measured 2026-09-21 at 3,086 level
+            # computations across the stored opens since 2026-08-01, worst
+            # case 5.00. New bars are rounded on the way in; this covers the
+            # ones already stored.
+            out[(str(sid), str(d)[:10])] = round(op, 2)
     return out
 
 
