@@ -647,6 +647,19 @@
    "errors": 0,
    "warnings": 0,
    "codes": []
+  },
+  {
+   "checked_at": "2026-09-22 00:44:33",
+   "session_date": "2026-09-21",
+   "scan_time": "2026-09-22 00:44:32",
+   "status": "warn",
+   "rows": 44,
+   "errors": 0,
+   "warnings": 3,
+   "codes": [
+    "tracked_null",
+    "tracked_range_high"
+   ]
   }
  ]
 }
