@@ -117,6 +117,14 @@ class ScanWorker:
             except Exception as e:
                 print("  [buyrule] skipped: {}".format(e))
 
+            # Chip verdict for tomorrow (scanner/chip_signal.py, 2026-09-21):
+            # today's institutional flow read per held row. Needs Hold_Status.
+            try:
+                from scanner.chip_signal import annotate_chip_action
+                result_df = annotate_chip_action(result_df, self._scan_mode)
+            except Exception as e:
+                print("  [chips] skipped: {}".format(e))
+
             # Persist the latest result (overwrites previous) for offline review.
             try:
                 path = export_scan_result(result_df, self._scan_mode,

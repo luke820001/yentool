@@ -49,11 +49,52 @@ import pandas as pd
 from config.settings import PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE
 from scanner.scan_mode import (
     PRELAUNCH_ADD_PCT as ADD_PCT,
+    PRELAUNCH_SCALE_OUT_PCT as SCALE_OUT_PCT,
     PRELAUNCH_STOP_PCT as STOP_PCT,
     PRELAUNCH_TP_PCT as TP_PCT,
     PRELAUNCH_TRAIL_ARM as TRAIL_ARM,
     PRELAUNCH_TRAIL_LOCK as TRAIL_LOCK,
 )
+from scanner.tick import round_to_tick
+
+
+def _num(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None
+
+
+def _still_strong(row):
+    """Is this stock still trending on its own terms -- today's close at or
+    above its own 5-bar mean?
+
+    2026-09-21 (archive/research/sandbox_daily_plan.py). Asked what to do when
+    a position is still rising on exit day, the owner's instinct was to keep
+    riding, and on the corrected exit engine that is the single cleanest
+    win-rate gain available: extending past the 10-bar exit while the close
+    holds above its own 5-bar mean scores RECENT 69.1% / OLD 67.0% against
+    67.1% / 65.1% for the fixed exit, with no cost in mean return, no extra
+    capital and no change to the stop. Both window halves and both windows
+    improve.
+
+    The market-based delay (below 20MA but above 60MA) survives alongside it
+    but is nearly inert on its own (+0.2pp RECENT); taking EITHER condition
+    scored best in the older window, so both are kept and OR'd.
+    """
+    close, ma5 = _num(row.get("Close_Price")), _num(row.get("MA5"))
+    if close is None or ma5 is None:
+        return False
+    return close > ma5
+
+
+def _lvl(fill, pct, direction):
+    """A level off the fill, on the exchange's quote ladder. See
+    scanner/tick.py for why an un-snapped price is not a plan."""
+    if not fill:
+        return None
+    return round_to_tick(fill * (1 + pct), direction)
 
 # Time-exit horizon per mode (trading bars). Modes without a validated time
 # exit are left out and simply get no holding annotation.
@@ -262,11 +303,19 @@ def annotate_holding(df, scan_mode):
             statuses.append("exit_today" if today_idx == cap_idx else "overdue")
             notes.append("day {} (delay cap {}), exit now".format(day_no, cap))
             tdate = cal[cap_idx] if cap_idx <= last_idx else cal[today_idx]
-        elif disturbed and cap > hold:
-            # at/past base exit but the market is disturbed -> hold and watch
+        elif cap > hold and (disturbed or _still_strong(r)):
+            # At or past the base exit, but the trade has earned more time --
+            # either the STOCK is still strong (its close is above its own
+            # 5-bar mean) or the MARKET is in a pullback inside an uptrend.
             statuses.append("delay")
-            notes.append("day {}: TAIEX below 20MA, hold until it recovers "
-                         "(cap day {})".format(day_no, cap))
+            if _still_strong(r):
+                notes.append("day {}: close {} still above its 5-bar mean {}, "
+                             "keep riding (cap day {})".format(
+                                 day_no, _num(r.get("Close_Price")),
+                                 _num(r.get("MA5")), cap))
+            else:
+                notes.append("day {}: TAIEX below 20MA, hold until it recovers "
+                             "(cap day {})".format(day_no, cap))
         else:
             statuses.append("exit_today" if remaining == 0 else "overdue")
             notes.append("day {}, exit at close".format(day_no))
@@ -289,14 +338,11 @@ def annotate_holding(df, scan_mode):
     fills = [opens.get((str(sid), ed)) for sid, ed
              in zip(df["Stock_ID"].astype(str), entry_dates)]
     df["Entry_Open"] = fills
-    df["Fill_Stop_Loss"] = [
-        round(f * (1 - STOP_PCT), 2) if f else None for f in fills]
-    df["Fill_Trail_Arm_Price"] = [
-        round(f * (1 + TRAIL_ARM), 2) if f else None for f in fills]
-    df["Fill_Trail_Lock_Price"] = [
-        round(f * (1 + TRAIL_LOCK), 2) if f else None for f in fills]
-    df["Fill_Target_Price"] = [
-        round(f * (1 + TP_PCT), 2) if f else None for f in fills]
+    df["Fill_Stop_Loss"] = [_lvl(f, -STOP_PCT, "down") for f in fills]
+    df["Fill_Trail_Arm_Price"] = [_lvl(f, TRAIL_ARM, "up") for f in fills]
+    df["Fill_Trail_Lock_Price"] = [_lvl(f, TRAIL_LOCK, "down") for f in fills]
+    df["Fill_Target_Price"] = [_lvl(f, TP_PCT, "up") for f in fills]
+    df["Fill_Scale_Out_Price"] = [_lvl(f, SCALE_OUT_PCT, "up") for f in fills]
 
     # Exit plan (2026-09-14): one column that says below what price to sell
     # first, and whether the rule has already taken the trade out. The shared
@@ -375,17 +421,17 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
                         if not fill else "no bars since entry yet")
             continue
 
-        add_px = round(fill * (1 - ADD_PCT), 2)
+        add_px = _lvl(fill, -ADD_PCT, "down")
         plan_add.append(add_px)
         bars = [b for b in bars_by.get(sid, []) if b[0] >= ed]
         if not bars:
             add_hit.append("")
-            plan_stop.append(round(fill * (1 - STOP_PCT), 2))
+            plan_stop.append(_lvl(fill, -STOP_PCT, "down"))
             plan_armed.append(False)
             sig.append(""); sig_date.append(""); sig_price.append(None)
-            note.append("sell if it trades below {:.2f} (fill {:.2f} x {:.2f}); "
-                        "no bars since entry in the store".format(
-                            fill * (1 - STOP_PCT), fill, 1 - STOP_PCT))
+            note.append("sell if it trades below {} (fill {:.2f} x {:.2f}, "
+                        "on the tick ladder); no bars since entry in the store"
+                        .format(_lvl(fill, -STOP_PCT, "down"), fill, 1 - STOP_PCT))
             continue
 
         dates = [b[0] for b in bars]
@@ -397,7 +443,10 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
                                      if status in ("exit_today", "overdue") else None))
         armed = bool(plan.get("armed"))
         stop = plan.get("stop")
-        stop = round(float(stop), 2) if stop else round(fill * (1 - STOP_PCT), 2)
+        # The replay works in exact prices; the owner has to place the order,
+        # so the published level is the one on the quote ladder.
+        stop = (round_to_tick(float(stop), "down") if stop
+                else _lvl(fill, -STOP_PCT, "down"))
         plan_armed.append(armed)
         plan_stop.append(stop)
 
@@ -424,12 +473,13 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
 
         sig.append(""); sig_date.append(""); sig_price.append(None)
         if armed:
-            note.append("lock armed: sell if it trades below {:.2f} "
+            note.append("lock armed: sell if it trades below {} "
                         "(fill {:.2f} x {:.2f})".format(stop, fill, 1 + TRAIL_LOCK))
         else:
-            note.append("sell if it trades below {:.2f} (fill {:.2f} x {:.2f}); "
-                        "lock arms at {:.2f}".format(
-                            stop, fill, 1 - STOP_PCT, fill * (1 + TRAIL_ARM)))
+            note.append("sell if it trades below {} (fill {:.2f} x {:.2f}); the "
+                        "lock arms on a CLOSE at or above {}".format(
+                            stop, fill, 1 - STOP_PCT,
+                            _lvl(fill, TRAIL_ARM, "up")))
 
     df["Plan_Stop"] = plan_stop
     df["Plan_Add_Price"] = plan_add

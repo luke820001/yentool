@@ -179,6 +179,19 @@ def run_scan(scan_mode="mode_prelaunch"):
     except Exception as e:
         print("  [buyrule] skipped: {}".format(e))
 
+    # Chip verdict for tomorrow (2026-09-21): today's three-institution flow
+    # read against the validated rule, per held row. After annotate_holding
+    # (needs Hold_Status / Exit_Signal) and independent of the buy gate.
+    try:
+        from scanner.chip_signal import annotate_chip_action
+        result_df = annotate_chip_action(result_df, scan_mode)
+        if "Chip_Action" in result_df.columns:
+            acts = result_df["Chip_Action"].value_counts().to_dict()
+            print("  [chips] verdicts: {}".format(
+                {k: int(v) for k, v in acts.items() if k}))
+    except Exception as e:
+        print("  [chips] skipped: {}".format(e))
+
     # Freeze the first-day recommendation for anything that qualified today,
     # and hang the frozen price off every row we already have one for. After
     # this, Suggested_Buy_Price (recomputed daily) and Initial_Buy_Price (fixed)

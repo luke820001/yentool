@@ -39,15 +39,21 @@ const TZ = "Asia/Taipei";
 // they live in one labelled place and every position stores the version that
 // priced it.
 const STRATEGY = {
-  version: "prelaunch-2026-09-20",
+  version: "prelaunch-2026-09-21",
   stopPct: -20,      // initial stop, from the FIRST fill (see basePrice below)
-  armPct: 6,         // gain that ARMS the trailing lock (a condition, not a state)
+  // 2026-09-21: the lock ARMS on a CLOSE at or above this, and the raised stop
+  // is the order you place for the NEXT session. It used to arm intraday at
+  // +6% and the backtest let the same bar be stopped on it -- a protection
+  // nobody could have placed. Re-measured the executable way, the old rule
+  // scored 63.0% and this one 67.1% (recent 3 years).
+  armPct: 2.5,
   lockPct: 2,        // stop moves here once armed; ratchets up only
   targetPct: 20,     // take-profit target
   addPct: -10,       // optional staged entry: buy the rest here (2026-09-20)
   addFirstPct: 50,   // how much of the planned size the first buy is
+  scaleOutPct: 15,   // optional: sell half here (2026-09-21)
   horizon: 10,       // base hold, trading days
-  cap: 20,           // maximum hold when the exit is delayed by a weak market
+  cap: 20,           // maximum hold when the exit is delayed (see rideNote)
 };
 
 // Strategy blurb. Report 7.4: this used to be a fixed header block eating half
@@ -59,8 +65,9 @@ const MODE_CARDS = {
     body:
       "買進條件（全部成立才算可買）：大盤站上 20MA 與 60MA · 上櫃 · 出貨排名前 20 · 通過核心+ 品質閘門 · 資料完整性通過 · 當日資料 · 第一天入榜的新訊號。\n" +
       "兩種買法擇一，出場價位完全相同（都以第一筆成交價計算）：一次買滿；或先買一半、跌到成交價 -10% 再補另一半。\n" +
-      "出場計畫：災難停損 -20% · 獲利 +6% 後鎖利上調至 +2% · 目標 +20% · 基本抱 10 個交易日（大盤轉弱時最晚延至 20 天）。\n" +
-      "回測（2017-2026，564 筆，近 3 年）：一次買滿 68.5% 勝、每筆平均 +2.2%；分批 71.4% 勝、每筆平均 +1.5%、大虧較少。含手續費與證交稅的歷史統計，不是未來勝率。\n" +
+      "出場計畫：災難停損 -20% · 收盤站上 +2.5% 後，隔一個交易日起停損上調到 +2% · 目標 +20% · 基本抱 10 個交易日，第 10 天收盤若仍站上自己的 5 日均價就續抱，最晚第 20 天。\n" +
+      "回測（2017-2026，564 筆，近 3 年，含手續費與證交稅）：67.1% 勝、每筆平均 +2.0%；加上續抱規則 69.1%。歷史統計，不是未來勝率。\n" +
+      "2026-09-21 修正：鎖利原本「當天盤中觸及 +6%」就算數，但你是收盤後才看到、隔天才下得了單。改成收盤判定、隔日生效後重算同一批交易，舊規則真實勝率 63.0%、新規則 67.1%——先前畫面上的約 70% 有一大半是模擬器產生的。\n" +
       "2026-09-20 起停損由 -15% 放寬到 -20%，既有持倉一併套用，所以舊部位畫面上的停損價會往下移。\n" +
       "名單上其餘的列是觀察與持倉追蹤，不是買點。",
   },
@@ -1266,12 +1273,24 @@ function activePlan(pos) {
       high = m.close_price; highOn = m.session_date;
     }
   }
+  // The lock is armed by a CLOSE at or above the arm price, and the raised
+  // stop is the order placed for the NEXT session -- which is exactly what
+  // `marks` are (one close per session), so the phone and the backend read
+  // the same event. 2026-09-21: the backend used to arm on the intraday high
+  // and let that same bar be stopped on it; see STRATEGY.armPct.
   const armed = high !== null && high >= arm;
   // Staged entry: the second half is still outstanding while the position has
   // had exactly one buy. A buy limit rounds DOWN to a real tick, the same
   // "never claim a better price than is orderable" rule the stop follows.
   const add = divRound(base * (100 + STRATEGY.addPct), 100);
+  const scaleOut = divRound(base * (100 + STRATEGY.scaleOutPct), 100);
   const staged = (pos.cycle_buys || 0) <= 1;
+  // The stock's own 5-bar mean, from the sessions actually priced. The time
+  // exit is extended while the close is above it (2026-09-21).
+  const closes = marks.filter((m) => m.close_price !== null).map((m) => m.close_price);
+  const last5 = closes.slice(-5);
+  const ma5 = last5.length === 5 ? divRound(last5.reduce((a, b) => a + b, 0), 5) : null;
+  const lastClose = closes.length ? closes[closes.length - 1] : null;
   return {
     stop: armed ? Math.max(stop0, lock) : stop0,
     stop_orderable: tickRound(armed ? Math.max(stop0, lock) : stop0, "down"),
@@ -1279,10 +1298,90 @@ function activePlan(pos) {
     arm, lock, target,
     target_orderable: tickRound(target, "up"),
     add, add_orderable: tickRound(add, "down"), add_open: staged,
+    scale_out: scaleOut, scale_out_orderable: tickRound(scaleOut, "up"),
     base,
     armed, armed_on: armed ? highOn : "",
     highest_close: high,
+    ma5, last_close: lastClose,
+    riding: ma5 !== null && lastClose !== null && lastClose > ma5,
   };
+}
+
+// --- tomorrow's orders ------------------------------------------------------
+// Owner's request 2026-09-21: "at the close, tell me tomorrow's plan too --
+// below which price do I cut or add, above which do I take some profit or keep
+// riding". Every rung below is a price you can place as an order tonight, and
+// each one says whether the rule requires it or merely allows it.
+//
+// What is NOT here is as deliberate as what is: reducing part of the position
+// on a break has now been tested twice, on two different engines, and loses
+// win rate AND money both times, so there is no "cut some on the way down"
+// rung to place.
+function tomorrowOrders(pos, plan, dayIdx, horizon) {
+  if (!plan) return "";
+  const rows = [];
+  const past = dayIdx !== null && dayIdx >= horizon;
+
+  rows.push({
+    side: "sell", must: true,
+    price: plan.target_orderable,
+    label: "全部停利",
+    note: `成交價 +${STRATEGY.targetPct}%`,
+  });
+  if (plan.scale_out < plan.target) {
+    rows.push({
+      side: "sell", must: false,
+      price: plan.scale_out_orderable,
+      label: "可賣一半（選用）",
+      note: `成交價 +${STRATEGY.scaleOutPct}%；回測勝率 +0.5pp、平均報酬 -0.15pp`,
+    });
+  }
+  if (!plan.armed) {
+    rows.push({
+      side: "watch", must: false,
+      price: tickRound(plan.arm, "up"),
+      label: "收盤站上這裡 → 隔日起停損上調",
+      note: `收盤 ≥ 成交價 +${STRATEGY.armPct}%，隔一個交易日起停損改掛 ${fmtPrice(tickRound(plan.lock, "down"))}`,
+    });
+  }
+  rows.push({
+    side: "stop", must: true,
+    price: plan.stop_orderable,
+    label: plan.armed ? "跌破全部出場（鎖利價）" : "跌破全部出場（災難停損）",
+    note: plan.armed
+      ? `鎖利已啟動，這個價位只升不降`
+      : `成交價 ${STRATEGY.stopPct}%；這是唯一非守不可的價位`,
+  });
+  if (plan.add_open && !past) {
+    rows.push({
+      side: "buy", must: false,
+      price: plan.add_orderable,
+      label: "可加碼（選用）",
+      note: `成交價 ${STRATEGY.addPct}%；先買一半的買法在此補滿。加碼會放大最大虧損，出場價位仍以第一筆成交價計算`,
+    });
+  }
+
+  const order = { sell: 0, watch: 1, stop: 2, buy: 3 };
+  rows.sort((a, b) => (order[a.side] - order[b.side]) || (b.price - a.price));
+
+  const timeLine = dayIdx === null
+    ? "持有天數未知，請先確認成交日期。"
+    : past
+      ? `第 ${horizon} 天已到：收盤若仍站上 5 日均價 ${plan.ma5 === null ? "（資料不足）" : fmtPrice(plan.ma5)} 就續抱，否則收盤出場（最晚第 ${STRATEGY.cap} 天）。`
+      : `第 ${dayIdx}/${horizon} 天。到第 ${horizon} 天收盤出場，但當天收盤若仍站上自己的 5 日均價就續抱，最晚第 ${STRATEGY.cap} 天。`;
+
+  const ride = plan.ma5 === null ? "" :
+    `<div class="hint">目前收盤 ${fmtPrice(plan.last_close)}｜5 日均價 ${fmtPrice(plan.ma5)}｜${
+      plan.riding ? "站上，到期可續抱" : "跌破，到期就出場"}</div>`;
+
+  return `<div class="sec-title">明日委託（收盤後更新，價位皆可直接掛單）</div>` +
+    `<table class="tbl"><thead><tr><th>價位</th><th>動作</th><th>必守</th></tr></thead><tbody>${
+      rows.map((r) => `<tr class="${r.side === "stop" ? "neg" : ""}">
+        <td><b>${esc(fmtPrice(r.price))}</b></td>
+        <td>${esc(r.label)}<br><span class="hint">${esc(r.note)}</span></td>
+        <td>${r.must ? "必守" : "選用"}</td></tr>`).join("")
+    }</tbody></table>` +
+    `<div class="plan">時間：${esc(timeLine)}</div>` + ride;
 }
 
 // The one place that decides what needs a human today (report 7.2).
@@ -1716,6 +1815,68 @@ function planStopKv(r) {
   return kv("停損（跌破先出）", esc(fmtPrice(stop)), r.Exit_Signal ? "" : "gold", sub);
 }
 
+// --- chip verdict (scanner/chip_signal.py, 2026-09-21) ---------------------
+// Inst_Net is today's three-institution net in lots, Inst_Pct the same as a
+// share of the 20-day average volume. Chip_Action is the backend's verdict
+// for the NEXT open on a held row: "sell" / "add" / "hold"; empty when the
+// row is not a position, the flow lags the price data, or no rule is
+// validated. The phone renders; it never derives an action of its own.
+const CHIP_ACTION_TEXT = {
+  sell: "隔日開盤先出場",
+  add: "隔日開盤補另一半（分批買法）",
+  hold: "續抱，籌碼無動作理由",
+};
+// 2026-09-21 實測結論（archive/research/sandbox_chip_manage.py）：
+// 「法人賣超就隔天賣」勝率 67.1% → 47.4%；「法人買超就加碼」也是負的。
+// 原因是訊號全在隔日跳空裡：今日法人買賣超對隔日「收盤對收盤」相關 +0.041
+// (t=11.6)，但對隔日「開盤對收盤」只有 -0.003 (t=-0.9)，而你最快只能在隔日
+// 開盤成交。所以籌碼在這裡只是確認欄位，不產生動作。
+const CHIP_CONFIRM_ONLY = "籌碼僅供確認，不產生買賣動作（實測：照籌碼進出會降低勝率）";
+
+function chipSummary(r) {
+  const net = num(r.Inst_Net);
+  if (net === null) return "";
+  const pct = num(r.Inst_Pct);
+  const streak = num(r.Inst_Streak);
+  const parts = [`三大法人 ${fmtSigned(net, 0)} 張`];
+  if (pct !== null) parts.push(`占均量 ${fmtSigned(pct, 1)}%`);
+  if (streak !== null && Math.abs(streak) >= 2) parts.push(`連 ${Math.abs(streak)} 日${streak > 0 ? "買超" : "賣超"}`);
+  const d5 = num(r.Inst_Net_5D);
+  if (d5 !== null) parts.push(`5日 ${fmtSigned(d5, 0)}`);
+  return parts.join(" · ");
+}
+
+function chipKv(r) {
+  const net = num(r.Inst_Net);
+  if (net === null) {
+    return kv("外資5日", esc(fmtSigned(r.Foreign_Net_5D, 0)), signClass(r.Foreign_Net_5D), "最近5筆法人資料（張）");
+  }
+  const basis = String(r.Chip_Basis || "");
+  const when = String(r.Inst_Date || "").slice(5, 10);
+  const sub = basis === "lag"
+    ? `法人資料 ${when} 落後行情日，暫無判定`
+    : (r.Chip_Action ? CHIP_ACTION_TEXT[r.Chip_Action] || r.Chip_Action : "確認欄位，不進評分") +
+      (num(r.Inst_Sessions) !== null && num(r.Inst_Sessions) < 5 ? `（僅 ${num(r.Inst_Sessions)}/5 日有資料）` : "");
+  return kv("法人今日", esc(chipSummary(r)), signClass(net), esc(sub));
+}
+
+// For a position card: the verdict sentence, or an honest "no data" line.
+function chipAdvice(stockId) {
+  const r = STATE.rows.find((x) => String(x.Stock_ID) === String(stockId));
+  if (!r) return `<div class="plan dim">籌碼：此檔已不在今日名單，沒有當日法人資料。</div>`;
+  const net = num(r.Inst_Net);
+  if (net === null) return `<div class="plan dim">籌碼：本次掃描沒有這檔的法人資料。</div>`;
+  const basis = String(r.Chip_Basis || "");
+  if (basis === "lag") {
+    return `<div class="plan dim">籌碼：法人資料只到 ${esc(String(r.Inst_Date || "").slice(0, 10))}，落後行情，今天不做籌碼判定。${esc(chipSummary(r))}</div>`;
+  }
+  const act = String(r.Chip_Action || "");
+  const cls = act === "sell" ? "plan alert" : act === "add" ? "plan armed" : "plan";
+  const head = act ? `隔日籌碼動作：${CHIP_ACTION_TEXT[act] || act}` : "籌碼（確認用）";
+  const tail = act ? "" : `<br><span class="hint">${esc(CHIP_CONFIRM_ONLY)}</span>`;
+  return `<div class="${cls}">${esc(head)} · ${esc(chipSummary(r))}${tail}</div>`;
+}
+
 // The optional staged entry (scan_mode.PRELAUNCH_ADD_PCT, 2026-09-20). Shown
 // as a plain price with what it is FOR: buying the second half is a choice,
 // so the row must never read like an order.
@@ -1773,8 +1934,11 @@ function pickCard(r) {
     planStopKv(r) +
     planAddKv(r) +
     kv("參考停利目標", esc(fmtPrice(cents(r.Target_Price))), "gold", "條件價，不代表已達成") +
+    (cents(r.Scale_Out_Price) === null ? "" :
+      kv("可賣一半（選用）", esc(fmtPrice(cents(r.Scale_Out_Price))), "",
+         "成交後改以成交價 +15% 為準；選用，會降低平均報酬")) +
     kv(sc.label, esc(fmt(r[sc.key], 1)), "", "規則分數，不是上漲機率") +
-    kv("外資5日", esc(fmtSigned(r.Foreign_Net_5D, 0)), signClass(r.Foreign_Net_5D), "最近5筆法人資料（張）");
+    chipKv(r);
 
   const valid = String(r.Rec_Valid_Until || "").slice(0, 10);
   const recLine = r.Recommendation_ID
@@ -1917,16 +2081,16 @@ function positionCard(pos, pinned) {
        m ? `${m.session_date}｜${DATA_STATUS_TEXT[m.data_status] || m.data_status}` : "無報價") +
     kv("首日建議價", pos.initial_buy_price ? esc(fmtPrice(pos.initial_buy_price)) : "-", "",
        pos.initial_buy_price ? "固定，不隨掃描改動" : "此持倉未連結固定建議") +
-    kv("有效停損", plan ? esc(fmtPrice(plan.stop)) : "-", "",
-       plan ? `可掛單 ${fmtPrice(plan.stop_orderable)}（依升降單位）` : "") +
-    kv("加碼價（分批買法）", plan && plan.add_open ? esc(fmtPrice(plan.add)) : "-", "",
+    kv("有效停損", plan ? esc(fmtPrice(plan.stop_orderable)) : "-", "",
+       plan ? `可直接掛單（已對齊升降單位）` : "") +
+    kv("加碼價（分批買法）", plan && plan.add_open ? esc(fmtPrice(plan.add_orderable)) : "-", "",
        plan
          ? (plan.add_open
-             ? `第一筆成交價 ${fmtPrice(plan.base)} × 0.90 · 可掛單 ${fmtPrice(plan.add_orderable)}；一次買滿就不用`
+             ? `第一筆成交價 ${fmtPrice(plan.base)} × 0.90，已對齊升降單位；一次買滿就不用`
              : "此筆已有兩次以上買進，不再加碼")
          : "") +
-    kv("停利目標", plan ? esc(fmtPrice(plan.target)) : "-", "gold",
-       plan ? `條件價 · 可掛單 ${fmtPrice(plan.target_orderable)}` : "") +
+    kv("停利目標", plan ? esc(fmtPrice(plan.target_orderable)) : "-", "gold",
+       plan ? "條件價 · 已對齊升降單位" : "") +
     kv("已實現淨損益", esc(fmtPnl(pos.realized_net)), signClass(pos.realized_net), "已扣實際費稅") +
     kv("若今日全數賣出", m && m.net_if_liquidated !== null ? esc(fmtPnl(m.net_if_liquidated)) : "-",
        m && m.net_if_liquidated !== null ? signClass(m.net_if_liquidated) : "",
@@ -1936,17 +2100,17 @@ function positionCard(pos, pinned) {
   // CONDITION, and armed / not-armed must look obviously different.
   const trail = plan
     ? (plan.armed
-        ? `<div class="plan armed">鎖利：已啟動（曾達 ${esc(fmtPrice(plan.highest_close))}，${esc(plan.armed_on)}）· 有效停損已上調至 ${esc(fmtPrice(plan.stop))}，只升不降</div>`
-        : `<div class="plan">鎖利：尚未啟動；啟動門檻 ${esc(fmtPrice(plan.arm))}（條件，非已達成）· 未啟動前停損維持 ${esc(fmtPrice(plan.initial_stop))}</div>`)
+        ? `<div class="plan armed">鎖利：已啟動（收盤曾達 ${esc(fmtPrice(plan.highest_close))}，${esc(plan.armed_on)}）· 有效停損已上調至 ${esc(fmtPrice(plan.stop_orderable))}，只升不降</div>`
+        : `<div class="plan">鎖利：尚未啟動；需要<b>收盤</b>站上 ${esc(fmtPrice(tickRound(plan.arm, "up")))}（條件，非已達成），隔一個交易日起生效 · 未啟動前停損維持 ${esc(fmtPrice(tickRound(plan.initial_stop, "down")))}</div>`)
     : "";
 
   // "續抱" on its own is what the 2026-09-17 complaint was about: a position
   // 10% under water read exactly like one 10% up. The prices that decide what
   // to do next belong in the sentence.
   const holdLine = plan
-    ? `建議：續抱。跌破 ${fmtPrice(plan.stop)} 先出場${
-        plan.add_open ? `；分批買法可在 ${fmtPrice(plan.add)} 補另一半` : ""
-      }；${plan.armed ? "鎖利已啟動" : `漲到 ${fmtPrice(plan.arm)} 後停損上調到 ${fmtPrice(plan.lock)}`}。`
+    ? `建議：續抱。跌破 ${fmtPrice(plan.stop_orderable)} 先出場${
+        plan.add_open ? `；分批買法可在 ${fmtPrice(plan.add_orderable)} 補另一半` : ""
+      }；${plan.armed ? "鎖利已啟動" : `收盤站上 ${fmtPrice(tickRound(plan.arm, "up"))} 後，隔一個交易日起停損上調到 ${fmtPrice(tickRound(plan.lock, "down"))}`}。`
     : "建議：續抱，下一個交易日重新評估（收盤後更新）。";
   const advice = dayIdx === null
     ? `<div class="plan">建議：無法計算持有天數，請確認成交日期。</div>`
@@ -1965,6 +2129,8 @@ function positionCard(pos, pinned) {
     <div class="kv2">${grid}</div>
     ${trail}
     ${advice}
+    ${chipAdvice(pos.stock_id)}
+    ${tomorrowOrders(pos, plan, dayIdx, horizon)}
     <div class="btns">
       ${btn("sell", "登錄賣出", "primary", { pos: pos.position_id })}
       ${btn("execs", "補登／更正成交", "", { pos: pos.position_id })}
@@ -2305,12 +2471,17 @@ function renderResearch() {
     ["停損距離%", "價格到停損價的距離，不是虧損機率，也不是帳戶風險"],
     ["停損（跌破先出）", "第一筆成交價 × 0.80，鎖利啟動後上調到 × 1.02，只升不降"],
     ["加碼價（分批買法）", "第一筆成交價 × 0.90。只有「先買一半」的買法要用；一次買滿就忽略"],
+    ["明日委託", "收盤後就把隔天要掛的單算好：停利、選用的賣一半、鎖利啟動門檻、停損、選用的加碼。每個價位都已對齊台股升降單位，可以直接掛"],
+    ["鎖利啟動", "要「收盤」站上成交價 +2.5%，而且是隔一個交易日才生效——因為你收盤後才看得到，隔天才下得了單"],
+    ["續抱（到期不賣）", "第 10 天收盤若仍站上自己的 5 日均價就續抱，最晚第 20 天"],
     ["20日平均日振幅%", "20日平均 (最高-最低)/收盤，未含前收跳空，故不等於標準 ATR"],
     ["通道上緣接近", "壓縮區間且收盤接近前40日高的97%，不一定真的突破"],
     ["近3日均量/20日均量", "量能萎縮比，不是當日單日量縮"],
     ["距近一年最高收盤", "比較約252筆的收盤最高，不是盤中歷史最高"],
     ["起漲條件分 / 動能分 / 盤整蓄勢分", "都是規則分數，不是上漲機率"],
     ["上漲日量能占比", "上漲日成交量佔上漲＋下跌日成交量的比例，不等於主力吸籌證據"],
+    ["法人今日 / 合計占均量%", "當日三大法人買賣超（張）除以 20 日均量；資料日必須等於行情日才做判定"],
+    ["隔日籌碼動作", "目前一律空白：2026-09-21 用 562 筆交易實測，照法人買賣超決定隔天賣出或加碼，勝率反而從 67.1% 掉到 47.4%。原因是訊號全在隔日跳空裡（對隔日收盤相關 +0.041、對隔日開盤後那段只有 -0.003），而你最快只能在隔日開盤成交。籌碼因此只當確認欄位"],
   ].map(([k, v]) => drow(k, esc(v))).join("");
 
   document.getElementById("page-research").innerHTML =
@@ -2626,8 +2797,17 @@ function openDetail(stockId) {
     grp("每日法人買賣超（張）",
       drow("外資", esc(fmtSigned(r.Foreign_Net, 0))) +
       drow("投信", esc(fmtSigned(r.Trust_Net, 0))) +
-      drow("外資近5筆累計", esc(fmtSigned(r.Foreign_Net_5D, 0))) +
-      drow("外資近5筆買超天數", esc(fmt(r.Inst_Buy_Days, 0)))) +
+      drow("自營商", esc(fmtSigned(r.Dealer_Net, 0))) +
+      drow("三大法人合計", esc(fmtSigned(r.Inst_Net, 0))) +
+      drow("合計占20日均量%", esc(fmtSigned(r.Inst_Pct, 1, "%"))) +
+      drow("三大法人近5日累計", esc(fmtSigned(r.Inst_Net_5D, 0))) +
+      drow("外資近5日累計", esc(fmtSigned(r.Foreign_Net_5D, 0))) +
+      drow("投信近5日累計", esc(fmtSigned(r.Trust_Net_5D, 0))) +
+      drow("連續買(+)/賣(−)超日數", esc(fmtSigned(r.Inst_Streak, 0))) +
+      drow("外資近5日買超天數", esc(fmt(r.Inst_Buy_Days, 0))) +
+      drow("法人資料日", esc(String(r.Inst_Date || "-"))) +
+      drow("隔日籌碼動作", esc(r.Chip_Action ? (CHIP_ACTION_TEXT[r.Chip_Action] || r.Chip_Action) : "無（非持倉或無驗證規則）")) +
+      drow("說明", esc(String(r.Chip_Note || "-")))) +
     grp("集保籌碼（週更新，400,001股以上級距）",
       drow("400張+持股%", esc(fmt(r.Large_Holder_Pct, 2, "%"))) +
       drow("大戶變動（百分點）", esc(fmtSigned(r.Large_Pct_Change, 4))) +

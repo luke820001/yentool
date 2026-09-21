@@ -425,8 +425,8 @@ def _simulate_rule(opens, highs, lows, closes, hold):
       entry  = the first forward bar's OPEN (the live rule is a market order at
                the next open; no limit is posted)
       stop   = entry * (1 - PRELAUNCH_STOP_PCT), disaster insurance only
-      lock   = once a bar's high reaches +PRELAUNCH_TRAIL_ARM, the stop rises to
-               entry * (1 + PRELAUNCH_TRAIL_LOCK)
+      lock   = once a bar CLOSES at or above +PRELAUNCH_TRAIL_ARM, the stop
+               rises to entry * (1 + PRELAUNCH_TRAIL_LOCK) from the NEXT bar
       target = entry * (1 + PRELAUNCH_TP_PCT), taken intraday
 
     EVENT ORDER WITHIN ONE BAR (F09, report sections 5.4 / 15). A daily bar is
@@ -439,32 +439,34 @@ def _simulate_rule(opens, highs, lows, closes, hold):
          profit at the open (a gap up to 125 with a 120 target books +25%, not
          the +2% lock that the old low-first ordering booked), and an open at or
          below the live stop is a stop at the open.
-      2. ARMING, same bar. A bar whose high reaches arm_px can be stopped out on
-         the lock it just armed. The old code only applied arming from the NEXT
-         bar, which contradicted this docstring: high 107 / low 100 on a 100
-         entry armed at 106 and broke 102 within one bar, and was booked
-         "time +5%" instead of "lock +2%".
-      3. THE REST OF THE BAR, where high-vs-low ordering is unknowable, so the
+      2. THE REST OF THE BAR, where high-vs-low ordering is unknowable, so the
          LOWEST exit level the bar actually touched is booked -- deliberately
-         pessimistic, and the same convention the round2 simulator used. That
-         means the stop carried into the bar is tested before the lock the bar
-         itself arms, and both before the target: a bar with high 125 and low 80
-         on a 100 entry could have gone down first (-20%), or up through the arm
-         and back down (+2%), or up through the target (+20%), and -20% is the
-         one we cannot rule out. A fill inside the bar is at the level itself (a
-         gap through it was already handled in step 1).
+         pessimistic. Only the stop CARRIED IN to the bar counts: a bar with
+         high 125 and low 80 on a 100 entry could have gone down first (-20%)
+         or up through the target (+20%), and -20% is the one we cannot rule
+         out. A fill inside the bar is at the level itself (a gap through it
+         was already handled in step 1).
+      3. THE CLOSE, where arming is observed (2026-09-21). A close at or above
+         arm_px raises the stop to the lock FOR THE NEXT SESSION. It used to
+         arm on the intraday high and let that same bar be stopped on the lock
+         it had just armed -- a protection nobody could have placed, since the
+         scan runs after the close and the order goes in the next morning. On
+         the 564 CORE+ trades that ordering reported 69.7% wins where the
+         executable version scores 63.0%; see scanner/exit_rules.py.
 
-    Because arming now bites on its own bar and the open is settled first, this
-    function returns DIFFERENT rule_return_pct / rule_exit values than it did
-    before 2026-09-09: same-bar arm-and-break bars move from "time" to "lock",
-    and gap-through-target bars move from "stop"/"lock" to "tp". Any published
-    figure derived from it (docs/STRATEGY.md D.4 quotes one) predates the fix
-    and must be recomputed -- reset_rule_outcomes() then backfill_outcomes() --
-    before being quoted again. eval_winrate_round2.sim_trail carries the SAME
-    two ordering bugs (its comment describes this order, its code does not), so
-    until that research file is fixed too the ledger and the backtest that chose
-    these thresholds no longer agree bar for bar. The ledger is the corrected
-    one; the disagreement is the old backtest's, not this function's.
+    This function has therefore returned three different sets of numbers: the
+    pre-2026-09-09 order, the F09 same-bar-arming order, and the 2026-09-21
+    executable order. Any stored rule_return_pct / rule_exit written before
+    today was produced by a rule the app no longer follows, so it must be
+    recomputed -- reset_rule_outcomes() then backfill_outcomes() -- before
+    being compared with anything new. Group by picks.rule_version when
+    comparing across the change.
+
+    The old research simulator (archive/research/eval_winrate_round2.sim_trail)
+    still carries the pre-F09 ordering and is NOT the reference any more; the
+    2026-09-21 parameters were selected on archive/research/sandbox_lock_delay.py,
+    which was verified bar-for-bar against exit_rules.replay_exit over all 564
+    CORE+ trades with zero disagreements.
     """
     # ONE implementation, shared with any parameter search, so the rule
     # that chooses the numbers and the rule that measures them can never

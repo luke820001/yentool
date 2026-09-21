@@ -24,22 +24,42 @@ true intraday sequence. The order below is a stated assumption:
      the day. A bar that opens through a level fills AT THE OPEN, not at the
      level: an open above the target is a take profit at the open, an open at or
      below the live stop is a stop at the open.
-  2. ARMING, on the same bar. A bar whose high reaches the arm price can be
-     stopped out on the lock it just armed.
-  3. THE REST OF THE BAR, where high-vs-low ordering is unknowable, so the
+  2. THE REST OF THE BAR, where high-vs-low ordering is unknowable, so the
      LOWEST exit level the bar actually touched is booked -- deliberately
-     pessimistic. The stop carried into the bar is tested before the lock the
-     bar itself arms, and both before the target.
+     pessimistic. The stop carried INTO the bar is tested before the target.
+  3. THE CLOSE, where arming is observed: a close at or above the arm price
+     raises the stop to the lock, and that raised stop guards from the NEXT
+     session.
+
+WHY ARMING WAITES FOR THE CLOSE (2026-09-21, owner's decision). Until now the
+lock armed the instant a bar's HIGH touched +6%, and that same bar could then
+be stopped on the lock it had just armed. Nobody trades that. The scan runs
+after the close, the owner reads the payload in the evening and places orders
+for the next session, so a stop that the backtest exercised intraday on the
+arming day never existed in the market. The gap was not cosmetic: on the 564
+CORE+ first-day trades the old ordering reported 69.7% wins with a mean of
+-0.43% (RECENT), while the same trades executed the way the owner actually
+receives them scored 63.0% / +1.54% -- the reported win rate was seven points
+of simulator.
+
+Arming is read off the CLOSE rather than the high for the same reason: the
+close is the number the payload and the phone both have (mobile/quotes.json
+ships closes), so the backend, the ledger and the phone cannot disagree about
+whether a position is armed. On the same trades, close-arming at the re-tuned
+threshold also beat high-arming outright (67.1% vs 65.0% RECENT).
+
+See archive/research/sandbox_lock_delay.py for the four engines, the parameter
+surface and the slippage stress test.
 """
 
 # The rule as adopted on 2026-08-06 (stop widened 2026-09-17, see
-# scan_mode.PRELAUNCH_STOP_PCT), kept here so callers share one definition.
-# Fractions, not percents.
+# scan_mode.PRELAUNCH_STOP_PCT; lock timing and arm threshold 2026-09-21),
+# kept here so callers share one definition. Fractions, not percents.
 DEFAULT_RULE = {
     "stop_pct": 0.20,     # disaster stop below entry
     "tp_pct": 0.20,       # take profit above entry
-    "arm_pct": 0.06,      # gain that arms the trailing lock
-    "lock_pct": 0.02,     # where the stop moves once armed
+    "arm_pct": 0.025,     # CLOSE at or above this arms the trailing lock
+    "lock_pct": 0.02,     # where the stop moves once armed (from the next bar)
     "hold_bars": 10,      # time exit
 }
 
@@ -92,8 +112,9 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
       date        dates[bar] when `dates` is given
       exit_price  the price the rule books for the exit
       ret_pct     exit_price / entry - 1, in percent
-      armed       trailing lock armed at some bar
-      stop        the stop carried out of the last bar (lock when armed)
+      armed       trailing lock armed at some bar's close
+      stop        the stop carried out of the last bar (lock when armed) --
+                  i.e. the level to place for the NEXT session
       arm_px, lock_px, target   the rule's levels off the fill
     """
     rule = DEFAULT_RULE
@@ -135,7 +156,8 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
     for i in range(n):
         try:
             op, hi, lo = float(opens[i]), float(highs[i]), float(lows[i])
-        except (TypeError, ValueError):
+            cl = float(closes[i])
+        except (TypeError, ValueError, IndexError):
             continue
         # A bar with a missing high or low disables every exit for that bar,
         # because every comparison against NaN is False. Skip it and say so
@@ -149,16 +171,17 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
         if stop_px is not None and op <= stop_px:
             return booked(i, op, "lock" if armed else "stop")
 
-        # 2/3. ambiguous remainder: lowest exit level touched wins
+        # 2. ambiguous remainder: the lowest exit level the bar touched wins.
+        # Only the stop CARRIED IN counts -- a lock this bar is about to arm
+        # protects from tomorrow, not from the rest of today.
         if stop_px is not None and lo <= stop_px:
             return booked(i, stop_px, "lock" if armed else "stop")
-        arm_here = (arm_px is not None) and (not armed) and hi >= arm_px
-        if arm_here and lo <= lock_px:
-            return booked(i, lock_px, "lock")
         if target is not None and hi >= target:
             return booked(i, target, "tp")
 
-        if arm_here:
+        # 3. the close: arming is what the evening payload can see, and the
+        # raised stop is the order placed for the next session.
+        if (arm_px is not None) and (not armed) and cl == cl and cl >= arm_px:
             armed = True
             stop_px = lock_px if stop_px is None else max(stop_px, lock_px)
 

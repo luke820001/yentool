@@ -483,6 +483,17 @@ def verify_candidates(
             "Trust_Net":          inst_feats.get(stock_id, {}).get("Trust_Net"),
             "Foreign_Net_5D":     inst_feats.get(stock_id, {}).get("Foreign_Net_5D"),
             "Inst_Buy_Days":      inst_feats.get(stock_id, {}).get("Inst_Buy_Days"),
+            # 2026-09-21: the whole three-institution picture for the chip
+            # verdict (scanner/chip_signal.py): dealer leg, the total, the
+            # 5-session sums, the buy/sell streak and WHICH session the
+            # figures belong to, so a lagging feed is visible, not silent.
+            "Dealer_Net":         inst_feats.get(stock_id, {}).get("Dealer_Net"),
+            "Inst_Net":           inst_feats.get(stock_id, {}).get("Inst_Net"),
+            "Inst_Net_5D":        inst_feats.get(stock_id, {}).get("Inst_Net_5D"),
+            "Trust_Net_5D":       inst_feats.get(stock_id, {}).get("Trust_Net_5D"),
+            "Inst_Streak":        inst_feats.get(stock_id, {}).get("Inst_Streak"),
+            "Inst_Sessions":      inst_feats.get(stock_id, {}).get("Inst_Sessions"),
+            "Inst_Date":          inst_feats.get(stock_id, {}).get("Inst_Date"),
             "MA5":                ta.get("MA5"),
             "MA10":               ta.get("MA10"),
             "MA20":               sr.get("MA20"),

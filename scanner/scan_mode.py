@@ -10,6 +10,21 @@ def _safe_num(df, col, fill):
     return pd.Series([fill] * len(df), index=df.index, dtype=float)
 
 
+def _levels(base, pct, direction):
+    """base * (1 + pct), snapped onto the exchange's quote ladder.
+
+    `direction` is "down" for anything the owner sells INTO weakness or buys
+    on a dip, "up" for a profit target -- the rounding must never flatter the
+    level (see scanner/tick.py). A base that is missing or non-positive keeps
+    a null instead of inventing a price.
+    """
+    from scanner.tick import round_to_tick
+    return pd.Series(
+        [round_to_tick(float(b) * (1 + pct), direction)
+         if b == b and float(b) > 0 else None for b in base],
+        index=base.index, dtype="float64")
+
+
 def _safe_bool(df, col):
     """Return boolean Series for col; MISSING AND NaN both become False.
 
@@ -321,6 +336,23 @@ PRELAUNCH_STOP_PCT = 0.20
 PRELAUNCH_ADD_PCT = 0.10
 PRELAUNCH_ADD_FIRST = 0.5
 
+# Optional scale-out (2026-09-21, archive/research/sandbox_daily_plan.py). The
+# owner asked what to do "if it rises": selling HALF at +15% from the fill is
+# the only upside ladder that passes the adoption gate in both windows --
+# RECENT win 67.1 -> 67.6%, OLD 65.1 -> 65.1%, and inside the full ladder
+# (add + ride) it takes the win rate to 70.5%. It costs mean return (-0.15pp
+# alone) because it caps half the position before the +20% target, so like the
+# staged entry it is OFFERED, not applied. Selling half at +8 or +10% raises
+# the win rate slightly more but costs 3-4x as much mean.
+#
+# REJECTED in the same study, on the corrected engine, so this is a second
+# independent refutation rather than a quote of the 2026-09-17 verdict:
+# cutting 30% or 50% of the position when it breaks -5/-8/-10/-12% fails win
+# rate AND mean in BOTH windows, every variant (best case -0.19pp mean and
+# -2.4pp win). "Reduce on a break" remains the one idea this project has
+# tested twice and refuted twice.
+PRELAUNCH_SCALE_OUT_PCT = 0.15
+
 # Take-profit target, same eval: an intraday +20% TP on the CORE+ subset lifts
 # win 62.2 -> 64.5% for only -0.5pp mean (win-rate/mean trade-off chosen
 # deliberately -- the user optimizes win rate). Shown as Target_Price; the live
@@ -328,15 +360,35 @@ PRELAUNCH_ADD_FIRST = 0.5
 PRELAUNCH_TP_PCT = 0.20
 
 # Trailing profit lock (2026-07-10 round 2, eval_winrate_round2/2b.py): once
-# the position has traded PRELAUNCH_TRAIL_ARM above entry, the stop rises to
-# entry * (1 + PRELAUNCH_TRAIL_LOCK) -- "gave it all back" losers become small
-# wins. Full replay, CORE+ base: win 62.6 -> 70.9% pooled and 67.1 -> 71.3% on
-# the streak==1 real-entry view (all four quarters 68-76%), mean +5.08 -> +3.96
-# (accepted win-rate/mean trade-off). The arm/lock surface is a smooth plateau
-# (arm 6-10 x lock +1..+3 all 65-71%), not a fitted spike. Locking at +0%
-# (breakeven) is the one bad choice: 45% win -- normal pullbacks get scratched.
-# Both prices must be recomputed off the actual fill in live trading.
-PRELAUNCH_TRAIL_ARM = 0.06
+# the position CLOSES PRELAUNCH_TRAIL_ARM above entry, the stop rises to
+# entry * (1 + PRELAUNCH_TRAIL_LOCK) for the NEXT session -- "gave it all back"
+# losers become small wins. Locking at +0% (breakeven) is the one bad choice:
+# 45% win, normal pullbacks get scratched. Both prices must be recomputed off
+# the actual fill in live trading.
+#
+# The 2026-07-10 headline for this leg (62.6 -> 70.9% pooled, 71.3% streak==1)
+# was produced by a simulator that let the lock fire intraday on its own arming
+# bar. It cannot be executed that way and the number is withdrawn; see
+# scanner/exit_rules.py and the re-measurement below.
+# 2026-09-21 (archive/research/sandbox_lock_delay.py, same 564 CORE+ first-day
+# trades): the arm threshold moved 0.06 -> 0.025 at the same time the lock
+# stopped acting on its own arming bar (see scanner/exit_rules.py for why the
+# old timing was unexecutable). Measured against the previous rule AS THE OWNER
+# ACTUALLY EXECUTES IT (read the payload after the close, place orders for the
+# next session): RECENT win 63.0 -> 67.1%, mean +1.54 -> +1.98, bootLo 58.2 ->
+# 62.3, and 26 of 28 quarters at least as good. Against the same-engine
+# baseline every adoption-gate test passes in both windows and 28/28 quarters.
+#
+# The threshold sits on a plateau, not a peak: arm 0.025-0.035 x lock
+# 0.015-0.030 all score 64.5-67.1% RECENT. It was also stress-tested for fills:
+# re-pricing every stop/lock exit 0.5% worse leaves this pair at 66.8%, while
+# lock 0.01 collapses from 67.6% to 29.8% (a +1% lock nets ~0 after the 0.585%
+# round trip, so a fraction of a percent of slippage flips every locked trade
+# into a loss). lock 0.02 is therefore the floor, not a preference.
+#
+# This is NOT a scalp: the average win stays +7.8% and take-profit exits remain
+# 21% of trades. The lock only catches positions that stall after a small gain.
+PRELAUNCH_TRAIL_ARM = 0.025
 PRELAUNCH_TRAIL_LOCK = 0.02
 
 # CORE+ entry-quality gate (eval_winrate_search/final.py, full 214-day replay,
@@ -352,7 +404,7 @@ CORE_PLUS_RET5_MAX = 5.0
 # Third gate condition (sandbox 2026-07-11, docs/SANDBOX_PLAN.md H2 C3):
 # 6-year research replay showed the LOWEST-volatility quartile of CORE+
 # picks is the worst bucket in BOTH the train (<=2024) and valid (2025+)
-# windows -- a too-quiet stock cannot reach the +6% trail arm / +20% tp
+# windows -- a too-quiet stock cannot reach the trail arm / +20% tp
 # that the exit stack needs. Requiring ATR_Pct (20-day mean of
 # (high-low)/close, percent) >= 4.5 lifts the 6y pooled win 61.2 -> 63.5
 # (train 59.0->61.5, valid 66.3->67.4) and is neutral-positive on the
@@ -394,15 +446,25 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
     min3  = _safe_num(df, "Min_Price_3", 0.0)
 
     if scan_mode == "mode_prelaunch":
+        # Every level below is a price the owner is meant to SEND to a broker,
+        # so it is snapped onto the exchange's quote ladder (scanner/tick.py).
+        # 191.50 x 0.80 = 153.20 is not an orderable price at all; printing it
+        # left the rounding to the owner at 09:00, which is where a -20% stop
+        # quietly becomes -19.7% or -20.3%. Sell-stops round DOWN and targets
+        # round UP, so a rounded level never claims a better price than the
+        # ladder can actually give.
         buy  = close
-        stop = close * (1 - PRELAUNCH_STOP_PCT)
         df["Suggested_Buy_Price"] = buy.round(2)
-        df["Strict_Stop_Loss"]    = stop.round(2)
-        df["Risk_Pct"]            = round(PRELAUNCH_STOP_PCT * 100, 1)
-        df["Target_Price"]        = (close * (1 + PRELAUNCH_TP_PCT)).round(2)
-        df["Trail_Arm_Price"]     = (close * (1 + PRELAUNCH_TRAIL_ARM)).round(2)
-        df["Trail_Lock_Price"]    = (close * (1 + PRELAUNCH_TRAIL_LOCK)).round(2)
-        df["Add_Price"]           = (close * (1 - PRELAUNCH_ADD_PCT)).round(2)
+        df["Strict_Stop_Loss"]    = _levels(close, -PRELAUNCH_STOP_PCT, "down")
+        df["Target_Price"]        = _levels(close, PRELAUNCH_TP_PCT, "up")
+        df["Trail_Arm_Price"]     = _levels(close, PRELAUNCH_TRAIL_ARM, "up")
+        df["Trail_Lock_Price"]    = _levels(close, PRELAUNCH_TRAIL_LOCK, "down")
+        df["Add_Price"]           = _levels(close, -PRELAUNCH_ADD_PCT, "down")
+        df["Scale_Out_Price"]     = _levels(close, PRELAUNCH_SCALE_OUT_PCT, "up")
+        # Risk_Pct is the distance to the stop the owner can actually place,
+        # not the nominal one: with the rounding it is never quite 20.0%.
+        df["Risk_Pct"] = ((close - df["Strict_Stop_Loss"])
+                          / close.replace(0, float("nan")) * 100).round(1)
         # CORE+ entry-quality flag (see CORE_PLUS_* block comment). Missing
         # feature values fail the gate rather than pass it.
         dist52 = _safe_num(df, "Dist_52W_High_Pct", 999.0)
@@ -479,7 +541,10 @@ BUY_RULE_MODES = ("mode_prelaunch",)
 #   2026-08-06  buy rule enforced in the app (regime + fresh-signal gates)
 #   2026-09-09  F06 -- data date, Integrity_OK and unknown-hold-status now block
 #   2026-09-20  disaster stop 0.15 -> 0.20; optional staged entry (Add_Price)
-STRATEGY_VERSION = "prelaunch-2026-09-20"
+#   2026-09-21  trailing lock arms on the CLOSE and guards from the NEXT
+#               session (it used to fire intraday on its own arming bar, which
+#               no one can trade); arm threshold 0.06 -> 0.025
+STRATEGY_VERSION = "prelaunch-2026-09-21"
 
 # signal_ledger stamps every stored pick with this so a past row can be judged
 # against the rule that actually produced it. It is the SAME string on purpose:

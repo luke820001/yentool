@@ -47,6 +47,28 @@ BUY_BLOCKS = ("", "regime", "held", "unknown", "quality", "market", "rank",
               "integrity", "stale", "no_rule")
 REC_STATUSES = ("active", "expired", "converted", "cancelled", "closed")
 EXIT_SIGNALS = ("", "stop", "lock", "tp", "time")
+CHIP_BASES = ("", "current", "lag")
+CHIP_ACTIONS = ("", "sell", "add", "hold")
+
+# Columns whose value is a price the owner is meant to place as an order, so
+# each one must sit on the exchange's quote ladder (scanner/tick.py).
+ORDER_LEVEL_COLUMNS = (
+    "Strict_Stop_Loss", "Target_Price", "Trail_Arm_Price", "Trail_Lock_Price",
+    "Add_Price", "Scale_Out_Price",
+    "Fill_Stop_Loss", "Fill_Trail_Arm_Price", "Fill_Trail_Lock_Price",
+    "Fill_Target_Price", "Fill_Scale_Out_Price",
+    "Plan_Stop", "Plan_Add_Price",
+    "Initial_Stop_Price", "Initial_Target_Price",
+)
+
+
+def _on_tick(price):
+    try:
+        from scanner.tick import is_on_tick
+    except Exception:
+        return True
+    return is_on_tick(price)
+
 
 _ID_RE = re.compile(r"^[0-9]{4,6}[A-Z]?$")
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -101,6 +123,19 @@ COLUMNS = {
     "Trust_Net":           _c("num", phone=True),
     "Foreign_Net_5D":      _c("num", phone=True),
     "Inst_Buy_Days":       _c("int", lo=0, hi=5, phone=True),
+    # 2026-09-21 three-institution picture (ingestion/inst_trades.py)
+    "Dealer_Net":          _c("num", nullable=True, phone=True),
+    "Inst_Net":            _c("num", nullable=True, phone=True),
+    "Inst_Net_5D":         _c("num", nullable=True, phone=True),
+    "Trust_Net_5D":        _c("num", nullable=True, phone=True),
+    "Inst_Streak":         _c("int", nullable=True, lo=-20, hi=20, phone=True),
+    "Inst_Sessions":       _c("int", nullable=True, lo=0, hi=5, phone=True),
+    "Inst_Date":           _c("date", nullable=True, phone=True),
+    # chip verdict for the next open (scanner/chip_signal.py)
+    "Inst_Pct":            _c("num", nullable=True, lo=-100, hi=100, phone=True),
+    "Chip_Basis":          _c("choice", nullable=True, choices=CHIP_BASES, phone=True),
+    "Chip_Action":         _c("choice", nullable=True, choices=CHIP_ACTIONS, phone=True),
+    "Chip_Note":           _c("str", nullable=True, phone=True),
     "MA5":                 _c("num", lo=0.01),
     "MA10":                _c("num", lo=0.01),
     "MA20":                _c("num", lo=0.01),
@@ -137,11 +172,17 @@ COLUMNS = {
     "Trail_Arm_Price":     _c("num", lo=0.01),
     "Trail_Lock_Price":    _c("num", lo=0.01),
     "Add_Price":           _c("num", lo=0.01),
+    # optional scale-out (2026-09-21): sell half at +15% from the fill
+    "Scale_Out_Price":     _c("num", lo=0.01, phone=True),
     "Core_Plus":           _c("bool"),
     "Entry_Date":          _c("date", nullable=True),
     "Exit_Date":           _c("date", nullable=True),
-    "Hold_Day":            _c("int", lo=0, hi=400),
-    "Hold_Remaining":      _c("int", lo=-400, hi=400),
+    # Nullable: a listed name with no ledger anchor has an UNKNOWN holding
+    # day, and null is the honest value for that. Before 2026-09-21 the
+    # registry demanded a number, so a single unanchored row failed the whole
+    # payload -- the producer and the contract disagreed.
+    "Hold_Day":            _c("int", nullable=True, lo=0, hi=400),
+    "Hold_Remaining":      _c("int", nullable=True, lo=-400, hi=400),
     "Hold_Total":          _c("int", lo=1, hi=60, phone=True),
     "Hold_Cap":            _c("int", lo=1, hi=120, phone=True),
     "Hold_Status":         _c("choice", nullable=True, choices=HOLD_STATUSES),
@@ -151,6 +192,7 @@ COLUMNS = {
     "Fill_Trail_Arm_Price": _c("num", nullable=True, lo=0.01),
     "Fill_Trail_Lock_Price": _c("num", nullable=True, lo=0.01),
     "Fill_Target_Price":   _c("num", nullable=True, lo=0.01),
+    "Fill_Scale_Out_Price": _c("num", nullable=True, lo=0.01, phone=True),
     # exit plan (holding_tracker, 2026-09-14): the one price to act on
     "Plan_Stop":           _c("num", nullable=True, lo=0.01, phone=True),
     "Plan_Armed":          _c("bool", phone=True),
@@ -216,7 +258,22 @@ def _is_bool(v):
 
 
 def _is_int(v):
-    return isinstance(v, int) and not isinstance(v, bool)
+    """Is this a whole number?
+
+    JSON has one number type, so 24 and 24.0 are the same value; which one
+    lands in the file depends on whether pandas gave the column an int64 or a
+    float64 dtype, and that in turn depends on whether ANY row in it was null.
+    The 2026-09-21 end-to-end run caught exactly that: one listed name with no
+    ledger anchor turned Hold_Day into float64 and every other row failed this
+    rule as a "wrong type". That is an artefact of serialization, not a defect
+    in the data, so an integral float counts as an integer. A fractional one
+    still does not.
+    """
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return True
+    return isinstance(v, float) and v == v and float(v).is_integer()
 
 
 def _date_ok(v):
@@ -388,18 +445,32 @@ def _trade_params():
     try:
         from scanner.scan_mode import (PRELAUNCH_STOP_PCT, PRELAUNCH_TP_PCT,
                                        PRELAUNCH_TRAIL_ARM, PRELAUNCH_TRAIL_LOCK,
-                                       PRELAUNCH_ADD_PCT, N_ENTER)
-        return PRELAUNCH_STOP_PCT, PRELAUNCH_TP_PCT, PRELAUNCH_TRAIL_ARM, \
-            PRELAUNCH_TRAIL_LOCK, PRELAUNCH_ADD_PCT, N_ENTER
+                                       PRELAUNCH_ADD_PCT, PRELAUNCH_SCALE_OUT_PCT,
+                                       N_ENTER)
+        return (PRELAUNCH_STOP_PCT, PRELAUNCH_TP_PCT, PRELAUNCH_TRAIL_ARM,
+                PRELAUNCH_TRAIL_LOCK, PRELAUNCH_ADD_PCT, PRELAUNCH_SCALE_OUT_PCT,
+                N_ENTER)
     except Exception:
-        return 0.20, 0.20, 0.06, 0.02, 0.10, 20
+        return 0.20, 0.20, 0.025, 0.02, 0.10, 0.15, 20
+
+
+def _lvl(base, pct, direction):
+    """The published level for base * (1 + pct): snapped onto the exchange's
+    quote ladder, the same way scan_mode and holding_tracker compute it."""
+    try:
+        from scanner.tick import round_to_tick
+    except Exception:
+        return round(base * (1 + pct), 2)
+    got = round_to_tick(base * (1 + pct), direction)
+    return got if got is not None else round(base * (1 + pct), 2)
 
 
 def _check_rows(rows, meta, rep, scan_mode):
     if not rows:
         return
     data_date = str(meta.get("data_date") or "")[:10]
-    stop_pct, tp_pct, arm_pct, lock_pct, add_pct, n_enter = _trade_params()
+    (stop_pct, tp_pct, arm_pct, lock_pct, add_pct, out_pct,
+     n_enter) = _trade_params()
     prelaunch = scan_mode == "mode_prelaunch"
 
     counters = {}
@@ -464,16 +535,23 @@ def _check_rows(rows, meta, rep, scan_mode):
         if prelaunch and close is not None and buy is not None:
             if abs(buy - close) > _PRICE_TOL:
                 hit("entry_ref_not_close", sid, "Suggested_Buy_Price")
-            if stop is not None and abs(stop - round(close * (1 - stop_pct), 2)) > _PRICE_TOL:
+            # Since 2026-09-21 every level is snapped onto the exchange's
+            # quote ladder, so the identity is "the rounded level", not the raw
+            # multiplication: 191.50 x 0.80 = 153.20 is not an orderable price.
+            if stop is not None and abs(stop - _lvl(close, -stop_pct, "down")) > _PRICE_TOL:
                 hit("stop_pct_mismatch", sid, "Strict_Stop_Loss")
-            if tgt is not None and abs(tgt - round(close * (1 + tp_pct), 2)) > _PRICE_TOL:
+            if tgt is not None and abs(tgt - _lvl(close, tp_pct, "up")) > _PRICE_TOL:
                 hit("target_pct_mismatch", sid, "Target_Price")
             risk = _num(r.get("Risk_Pct"))
-            if risk is not None and abs(risk - stop_pct * 100) > 0.11:
-                hit("risk_pct_mismatch", sid, "Risk_Pct")
+            if risk is not None and close and stop is not None:
+                if abs(risk - (close - stop) / close * 100) > 0.11:
+                    hit("risk_pct_mismatch", sid, "Risk_Pct")
             add = _num(r.get("Add_Price"))
-            if add is not None and abs(add - round(close * (1 - add_pct), 2)) > _PRICE_TOL:
+            if add is not None and abs(add - _lvl(close, -add_pct, "down")) > _PRICE_TOL:
                 hit("add_pct_mismatch", sid, "Add_Price")
+            out = _num(r.get("Scale_Out_Price"))
+            if out is not None and abs(out - _lvl(close, out_pct, "up")) > _PRICE_TOL:
+                hit("scale_out_pct_mismatch", sid, "Scale_Out_Price")
 
         # Core_Plus derives from three columns on the same row
         if prelaunch and "Core_Plus" in r:
@@ -533,13 +611,16 @@ def _check_rows(rows, meta, rep, scan_mode):
                 if fill is None:
                     hit("held_row_without_fill", sid, "Entry_Open")
                 else:
-                    pairs = (("Fill_Stop_Loss", 1 - stop_pct),
-                             ("Fill_Trail_Arm_Price", 1 + arm_pct),
-                             ("Fill_Trail_Lock_Price", 1 + lock_pct),
-                             ("Fill_Target_Price", 1 + tp_pct))
-                    for col, mult in pairs:
+                    pairs = (("Fill_Stop_Loss", -stop_pct, "down"),
+                             ("Fill_Trail_Arm_Price", arm_pct, "up"),
+                             ("Fill_Trail_Lock_Price", lock_pct, "down"),
+                             ("Fill_Target_Price", tp_pct, "up"),
+                             ("Fill_Scale_Out_Price", out_pct, "up"))
+                    for col, pct, side in pairs:
+                        if col not in r:
+                            continue
                         got = _num(r.get(col))
-                        if got is None or abs(got - round(fill * mult, 2)) > _PRICE_TOL:
+                        if got is None or abs(got - _lvl(fill, pct, side)) > _PRICE_TOL:
                             hit("fill_level_mismatch", sid, col)
                             break
             if not _is_null(entry) and not _is_null(exit_) and str(exit_)[:10] < str(entry)[:10]:
@@ -559,7 +640,8 @@ def _check_rows(rows, meta, rep, scan_mode):
                             and abs(plan_stop - stop) > _PRICE_TOL:
                         hit("plan_stop_pending_mismatch", sid, "Plan_Stop")
                 elif fill is not None and plan_stop is not None and _is_bool(armed):
-                    want = round(fill * ((1 + lock_pct) if armed else (1 - stop_pct)), 2)
+                    want = (_lvl(fill, lock_pct, "down") if armed
+                            else _lvl(fill, -stop_pct, "down"))
                     if abs(plan_stop - want) > _PRICE_TOL:
                         hit("plan_stop_level_mismatch", sid, "Plan_Stop")
             # staged entry (2026-09-20): the add level never moves, so it is
@@ -575,7 +657,7 @@ def _check_rows(rows, meta, rep, scan_mode):
                     if not _is_null(hit_on):
                         hit("add_hit_on_pending_row", sid, "Add_Hit_Date")
                 elif fill is not None and plan_add is not None:
-                    if abs(plan_add - round(fill * (1 - add_pct), 2)) > _PRICE_TOL:
+                    if abs(plan_add - _lvl(fill, -add_pct, "down")) > _PRICE_TOL:
                         hit("plan_add_level_mismatch", sid, "Plan_Add_Price")
                 if not _is_null(hit_on) and not _is_null(entry):
                     if str(hit_on)[:10] < str(entry)[:10]:
@@ -618,6 +700,16 @@ def _check_rows(rows, meta, rep, scan_mode):
             if f is not None and f <= 0:
                 hit("non_positive", sid, col)
 
+        # Every level below is meant to be SENT to a broker, so it has to be a
+        # price the exchange actually quotes. The owner reported 2026-09-21
+        # that the published prices had decimals that cannot be entered
+        # (191.50 x 0.80 = 153.20 on a 0.50 ladder); this is the rule that
+        # would have caught it, so it can never come back silently.
+        for col in ORDER_LEVEL_COLUMNS:
+            f = _num(r.get(col))
+            if f is not None and not _on_tick(f):
+                hit("price_off_tick", sid, col)
+
     dups = [s for s, n in ids_seen.items() if n > 1]
     if dups:
         rep.error("duplicate_stock", "Stock_ID", len(dups), "same id on more than one row",
@@ -637,6 +729,7 @@ def _check_rows(rows, meta, rep, scan_mode):
         "add_hit_before_entry",
         "exit_signal_on_pending_row", "plan_stop_pending_mismatch",
         "plan_stop_level_mismatch", "exit_signal_partial",
+        "scale_out_pct_mismatch", "price_off_tick",
     }
     warns = {"daily_move_over_limit", "row_stale", "held_row_without_fill",
              "integrity_flags_on_ok_row", "integrity_fail_without_flags"}
@@ -686,6 +779,9 @@ def _check_rows(rows, meta, rep, scan_mode):
         "add_hit_on_pending_row": "staged add booked before entry",
         "add_hit_before_entry": "Add_Hit_Date earlier than Entry_Date",
         "exit_signal_partial": "Exit_Signal without its date or price",
+        "scale_out_pct_mismatch": "Scale_Out_Price is not close x (1 + PRELAUNCH_SCALE_OUT_PCT)",
+        "price_off_tick": "an order level that the exchange does not quote "
+                          "(not on the tick ladder, so it cannot be placed)",
         "exit_signal": "rows where the exit stack says the trade is already out",
     }
     for code, n in counters.items():

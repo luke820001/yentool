@@ -74,6 +74,7 @@ MAIN_COLUMNS = [
     ("Entry_Price",         "進場價",    3.5),
     ("Stop_Price",          "停損價",    3.5),
     ("Take_Profit_Price",   "停利目標",  3.5),
+    ("Scale_Out_Price",     "賣半(選)",  3.5),
     ("Rank_Score",          "主分數",    3.5),
     ("Gain_3M_Pct",         "3月漲幅%",  3.5),
     ("Foreign_Net_5D",      "外資5日",   3.5),
@@ -118,7 +119,8 @@ BLOCK_TEXT = {
 MODE_RULE_CARDS = {
     "mode_prelaunch": (
         "只買OTC核心+(貼近52週高、未起漲、日振幅≥4.5%) · 順風才進場 · 隔日開盤進 · -20%災難停損 · "
-        "漲6%後鎖利+2% · 觸+20%停利 · 抱10天(大盤弱可延至20天) · 順風年回測約71%、6年全周期約64%",
+        "收盤站上+2.5%後隔日起停損上調到+2% · 觸+20%停利 · 抱10天，第10天收盤仍站上5日均價則續抱(最晚20天) · "
+        "回測(2017-2026, 564筆, 近3年, 含費稅)：67.1%勝/每筆+2.0%，加續抱規則69.1%。不是未來勝率",
         "accent"),
     "mode_momentum_leader": (
         "警告：此模式照建議操作的實戰紀錄為負期望值（勝率 23%、59% 觸發停損），"
@@ -132,8 +134,16 @@ DETAIL_SECTIONS = [
     ("每日法人買賣超（張）", [
         ("外資買賣超",    "Foreign_Net",     "{:+.0f}",  True),   # True = 正負上色
         ("投信買賣超",    "Trust_Net",       "{:+.0f}",  True),
+        ("自營商買賣超",  "Dealer_Net",      "{:+.0f}",  True),
+        ("三大法人合計",  "Inst_Net",        "{:+.0f}",  True),
+        ("合計占均量%",   "Inst_Pct",        "{:+.1f}%", True),
+        ("三大法人5日",   "Inst_Net_5D",     "{:+.0f}",  True),
         ("外資5日累計",   "Foreign_Net_5D",  "{:+.0f}",  True),
+        ("投信5日累計",   "Trust_Net_5D",    "{:+.0f}",  True),
+        ("連續買/賣超日", "Inst_Streak",     "{:+.0f}",  True),
         ("外資5日買超天", "Inst_Buy_Days",   "{:.0f}",   False),
+        ("法人資料日",    "Inst_Date",       "{}",       False),
+        ("隔日籌碼動作",  "Chip_Action",     "{}",       False),
     ]),
     ("集保籌碼（週更新）", [
         ("400張+持股%",   "Large_Holder_Pct",  "{:.2f}%",  False),
@@ -465,6 +475,7 @@ def _levels(row):
             "target":     _num(row.get("Fill_Target_Price")),
             "trail_arm":  _num(row.get("Fill_Trail_Arm_Price")),
             "trail_lock": _num(row.get("Fill_Trail_Lock_Price")),
+            "scale_out":  _num(row.get("Fill_Scale_Out_Price")),
         }
     return {
         "anchored":   False,
@@ -474,6 +485,7 @@ def _levels(row):
         "target":     _num(row.get("Target_Price")),
         "trail_arm":  _num(row.get("Trail_Arm_Price")),
         "trail_lock": _num(row.get("Trail_Lock_Price")),
+        "scale_out":  _num(row.get("Scale_Out_Price")),
     }
 
 
@@ -1307,6 +1319,7 @@ class ScannerApp(tk.Tk):
                 _fmt_price(lv["entry"]),
                 _fmt_price(lv["stop"]),
                 _fmt_price(lv["target"]),
+                _fmt_price(lv["scale_out"]),
                 _fmt_score(data.get(score_key)),
                 _fmt_gain(data.get("Gain_3M_Pct")),
                 _fmt_net(data.get("Foreign_Net_5D")),
@@ -1321,6 +1334,7 @@ class ScannerApp(tk.Tk):
             data["Entry_Price"] = lv["entry"]
             data["Stop_Price"] = lv["stop"]
             data["Take_Profit_Price"] = lv["target"]
+            data["Scale_Out_Price"] = lv["scale_out"]
             data["Rank_Score"] = _num(data.get(score_key))
             self._row_data[item] = data
             shown += 1

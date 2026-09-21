@@ -13,16 +13,23 @@ import os
 import tempfile
 import unittest
 
+from scanner.tick import round_to_tick
 from scanner.result_checks import (
     check_payload, check_files, COLUMNS, github_annotations, format_report,
 )
 from scanner.scan_mode import (
-    PRELAUNCH_ADD_PCT, PRELAUNCH_STOP_PCT, PRELAUNCH_TP_PCT, PRELAUNCH_TRAIL_ARM,
-    PRELAUNCH_TRAIL_LOCK,
+    PRELAUNCH_ADD_PCT, PRELAUNCH_SCALE_OUT_PCT, PRELAUNCH_STOP_PCT,
+    PRELAUNCH_TP_PCT, PRELAUNCH_TRAIL_ARM, PRELAUNCH_TRAIL_LOCK,
 )
 
 DATE = "2026-09-14"
 SESSIONS = ["2026-09-10", "2026-09-11", DATE]
+
+
+def lvl(base, pct, direction):
+    """The published level: base * (1 + pct) snapped onto the quote ladder,
+    exactly as scan_mode and holding_tracker compute it (2026-09-21)."""
+    return round_to_tick(base * (1 + pct), direction)
 
 
 def clean_row(sid="6426", close=312.0, market="OTC", status="pending",
@@ -43,6 +50,10 @@ def clean_row(sid="6426", close=312.0, market="OTC", status="pending",
         "Large_Holder_Pct": 50.5, "Large_Pct_Change": 5.3, "Retail_Pct": 28.9,
         "Retail_Pct_Change": -4.9, "Foreign_Net": 243.2, "Trust_Net": -33.0,
         "Foreign_Net_5D": 722.6, "Inst_Buy_Days": 2,
+        "Dealer_Net": 12.0, "Inst_Net": 222.2, "Inst_Net_5D": 640.1,
+        "Trust_Net_5D": -80.5, "Inst_Streak": 2, "Inst_Sessions": 5,
+        "Inst_Date": DATE, "Inst_Pct": 6.38, "Chip_Basis": "current",
+        "Chip_Action": "", "Chip_Note": "institutions net bought +222 lots (+6.4% of avg volume)",
         "MA5": 312.8, "MA10": 292.15, "MA20": 271.4, "MA60": 214.1,
         "Resist_60H": 328.0, "Support_60L": 135.25, "Support_20L": 219.6,
         "Support_Used": 292.15, "VP_Zone1": 322.4, "VP_Zone2": 306.9,
@@ -54,21 +65,24 @@ def clean_row(sid="6426", close=312.0, market="OTC", status="pending",
         "Cond_A_5D": False, "Integrity_OK": True, "Integrity_Flags": "",
         "Recent_Jump": False,
         "Suggested_Buy_Price": close,
-        "Strict_Stop_Loss": round(close * (1 - PRELAUNCH_STOP_PCT), 2),
-        "Risk_Pct": round(PRELAUNCH_STOP_PCT * 100, 1),
-        "Target_Price": round(close * (1 + PRELAUNCH_TP_PCT), 2),
-        "Trail_Arm_Price": round(close * (1 + PRELAUNCH_TRAIL_ARM), 2),
-        "Trail_Lock_Price": round(close * (1 + PRELAUNCH_TRAIL_LOCK), 2),
-        "Add_Price": round(close * (1 - PRELAUNCH_ADD_PCT), 2),
+        "Strict_Stop_Loss": lvl(close, -PRELAUNCH_STOP_PCT, "down"),
+        "Risk_Pct": round((close - lvl(close, -PRELAUNCH_STOP_PCT, "down"))
+                          / close * 100, 1),
+        "Target_Price": lvl(close, PRELAUNCH_TP_PCT, "up"),
+        "Trail_Arm_Price": lvl(close, PRELAUNCH_TRAIL_ARM, "up"),
+        "Trail_Lock_Price": lvl(close, PRELAUNCH_TRAIL_LOCK, "down"),
+        "Add_Price": lvl(close, -PRELAUNCH_ADD_PCT, "down"),
+        "Scale_Out_Price": lvl(close, PRELAUNCH_SCALE_OUT_PCT, "up"),
         "Core_Plus": True,
         "Entry_Date": "", "Exit_Date": "", "Hold_Day": 0, "Hold_Remaining": 10,
         "Hold_Total": 10, "Hold_Cap": 20, "Hold_Status": status,
         "Hold_Note": "next-open entry", "Entry_Open": entry_open,
         "Fill_Stop_Loss": None, "Fill_Trail_Arm_Price": None,
         "Fill_Trail_Lock_Price": None, "Fill_Target_Price": None,
-        "Plan_Stop": round(close * (1 - PRELAUNCH_STOP_PCT), 2),
+        "Fill_Scale_Out_Price": None,
+        "Plan_Stop": lvl(close, -PRELAUNCH_STOP_PCT, "down"),
         "Plan_Armed": False, "Exit_Signal": "", "Exit_Signal_Date": "",
-        "Plan_Add_Price": round(close * (1 - PRELAUNCH_ADD_PCT), 2),
+        "Plan_Add_Price": lvl(close, -PRELAUNCH_ADD_PCT, "down"),
         "Add_Hit_Date": "",
         "Exit_Signal_Price": None, "Exit_Note": "reference stop",
         "Buy_Ready": False, "Buy_Block": "regime",
@@ -81,13 +95,14 @@ def clean_row(sid="6426", close=312.0, market="OTC", status="pending",
         r.update({
             "Entry_Date": "2026-09-11", "Hold_Day": 2, "Hold_Remaining": 8,
             "Entry_Open": fill,
-            "Fill_Stop_Loss": round(fill * (1 - PRELAUNCH_STOP_PCT), 2),
-            "Fill_Trail_Arm_Price": round(fill * (1 + PRELAUNCH_TRAIL_ARM), 2),
-            "Fill_Trail_Lock_Price": round(fill * (1 + PRELAUNCH_TRAIL_LOCK), 2),
-            "Fill_Target_Price": round(fill * (1 + PRELAUNCH_TP_PCT), 2),
+            "Fill_Stop_Loss": lvl(fill, -PRELAUNCH_STOP_PCT, "down"),
+            "Fill_Trail_Arm_Price": lvl(fill, PRELAUNCH_TRAIL_ARM, "up"),
+            "Fill_Trail_Lock_Price": lvl(fill, PRELAUNCH_TRAIL_LOCK, "down"),
+            "Fill_Target_Price": lvl(fill, PRELAUNCH_TP_PCT, "up"),
+            "Fill_Scale_Out_Price": lvl(fill, PRELAUNCH_SCALE_OUT_PCT, "up"),
             "Hold_Note": "held 2/10",
-            "Plan_Stop": round(fill * (1 - PRELAUNCH_STOP_PCT), 2),
-            "Plan_Add_Price": round(fill * (1 - PRELAUNCH_ADD_PCT), 2),
+            "Plan_Stop": lvl(fill, -PRELAUNCH_STOP_PCT, "down"),
+            "Plan_Add_Price": lvl(fill, -PRELAUNCH_ADD_PCT, "down"),
             "Exit_Note": "sell if it trades below the stop",
         })
     return r
@@ -479,3 +494,70 @@ class FilesAndOutput(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TickLadder(unittest.TestCase):
+    """Every level the payload publishes must be a price a broker accepts
+    (owner report 2026-09-21). These are the rules that keep it that way."""
+
+    def test_off_tick_stop_is_an_error(self):
+        row = clean_row()
+        row["Strict_Stop_Loss"] = 153.2        # 0.50 ladder at this price
+        p = clean_payload([row])
+        rep = check_payload(p, quotes=clean_quotes(p["rows"]))
+        self.assertIn("price_off_tick", codes(rep, "error"))
+
+    def test_off_tick_target_is_an_error(self):
+        row = clean_row()
+        row["Target_Price"] = 229.8
+        p = clean_payload([row])
+        rep = check_payload(p, quotes=clean_quotes(p["rows"]))
+        self.assertIn("price_off_tick", codes(rep, "error"))
+
+    def test_every_published_level_sits_on_the_ladder(self):
+        from scanner.result_checks import ORDER_LEVEL_COLUMNS
+        from scanner.tick import is_on_tick
+        for status, fill in (("pending", None), ("holding", 300.0)):
+            row = clean_row(status=status, entry_open=fill)
+            for col in ORDER_LEVEL_COLUMNS:
+                value = row.get(col)
+                if value is None:
+                    continue
+                self.assertTrue(is_on_tick(value), "%s %s = %s" % (status, col, value))
+
+    def test_scale_out_level_identity(self):
+        row = clean_row()
+        row["Scale_Out_Price"] = row["Scale_Out_Price"] + 5
+        p = clean_payload([row])
+        rep = check_payload(p, quotes=clean_quotes(p["rows"]))
+        self.assertIn("scale_out_pct_mismatch", codes(rep, "error"))
+
+
+class SerializationArtefacts(unittest.TestCase):
+    """A number written as 24.0 instead of 24 is the same number. JSON has one
+    numeric type; which one appears depends on whether any row in the column
+    was null (2026-09-21 end-to-end run)."""
+
+    def test_integral_float_counts_as_an_integer(self):
+        row = clean_row()
+        row["Hold_Day"] = 0.0
+        row["Hold_Remaining"] = 10.0
+        p = clean_payload([row])
+        rep = check_payload(p, quotes=clean_quotes(p["rows"]))
+        self.assertEqual(rep["status"], "ok", format_report(rep))
+
+    def test_a_fractional_value_is_still_a_type_error(self):
+        row = clean_row()
+        row["Hold_Day"] = 2.5
+        p = clean_payload([row])
+        rep = check_payload(p, quotes=clean_quotes(p["rows"]))
+        self.assertIn("type", codes(rep, "error"))
+
+    def test_unanchored_row_may_report_an_unknown_holding_day(self):
+        row = clean_row()
+        row["Hold_Day"] = None
+        row["Hold_Remaining"] = None
+        row["Hold_Status"] = ""
+        p = clean_payload([row])
+        rep = check_payload(p, quotes=clean_quotes(p["rows"]))
+        self.assertNotIn("null", codes(rep, "error"))

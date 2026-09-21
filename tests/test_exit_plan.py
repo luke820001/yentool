@@ -24,6 +24,9 @@ import scanner.holding_tracker as tracker
 # Levels the rule puts on a 100.00 entry, so the fixtures follow the constants
 # instead of restating them (the 2026-09-20 stop change broke every literal).
 STOP = round(100.0 * (1 - DEFAULT_RULE["stop_pct"]), 2)
+ARM = round(100.0 * (1 + DEFAULT_RULE["arm_pct"]), 2)
+LOCK = round(100.0 * (1 + DEFAULT_RULE["lock_pct"]), 2)
+TARGET = round(100.0 * (1 + DEFAULT_RULE["tp_pct"]), 2)
 ADD = round(100.0 * (1 - tracker.ADD_PCT), 2)
 
 
@@ -35,14 +38,15 @@ def bars(*rows):
 
 class Replay(unittest.TestCase):
     def test_open_position_reports_live_stop(self):
-        o, h, l, c = bars((100, 103, 99, 102), (102, 104, 100, 103))
+        # both closes stay below the arm price, so nothing is armed
+        o, h, l, c = bars((100, 103, 99, ARM - 0.5), (102, 104, 100, ARM - 0.5))
         p = replay_exit(o, h, l, c, dates=["d1", "d2"], hold_bars=None)
         self.assertEqual(p["reason"], "")
         self.assertFalse(p["exited"])
         self.assertFalse(p["armed"])
         self.assertAlmostEqual(p["stop"], STOP)
-        self.assertAlmostEqual(p["arm_px"], 106.0)
-        self.assertAlmostEqual(p["target"], 120.0)
+        self.assertAlmostEqual(p["arm_px"], ARM)
+        self.assertAlmostEqual(p["target"], TARGET)
 
     def test_stop_hit_books_the_stop_level(self):
         o, h, l, c = bars((100, 101, 98, 99), (99, 100, STOP - 1, STOP))
@@ -60,20 +64,40 @@ class Replay(unittest.TestCase):
         self.assertAlmostEqual(p["exit_price"], 80.0)
 
     def test_arming_raises_the_stop_to_the_lock(self):
-        # the arming bar's low stays above the lock (102), so nothing is booked
-        o, h, l, c = bars((100, 101, 99, 100), (103, 107, 102.5, 106))
+        # a close at or above the arm price arms; the stop reported is the
+        # level to place for the NEXT session
+        o, h, l, c = bars((100, 101, 99, 100), (103, ARM + 2, 102.5, ARM))
         p = replay_exit(o, h, l, c, hold_bars=None)
         self.assertEqual(p["reason"], "")
         self.assertTrue(p["armed"])
-        self.assertAlmostEqual(p["stop"], 102.0)
+        self.assertAlmostEqual(p["stop"], LOCK)
+
+    def test_arming_is_read_from_the_close_not_the_high(self):
+        """A bar that spikes through the arm price but closes below it has not
+        armed: the evening payload and the phone only ever see the close."""
+        o, h, l, c = bars((100, 101, 99, 100), (100, ARM + 5, 99, ARM - 0.5))
+        p = replay_exit(o, h, l, c, hold_bars=None)
+        self.assertFalse(p["armed"])
+        self.assertAlmostEqual(p["stop"], STOP)
+
+    def test_the_arming_bar_itself_cannot_be_stopped_on_the_lock(self):
+        """The raised stop is an order placed for the NEXT session, so a bar
+        that arms at its close after dipping below the lock earlier the same
+        day is not an exit. This is the defect the 2026-09-21 change removed:
+        the old engine booked a lock exit nobody could have placed."""
+        o, h, l, c = bars((100, 101, 99, 100), (103, ARM + 2, LOCK - 1, ARM))
+        p = replay_exit(o, h, l, c, dates=["d1", "d2"], hold_bars=None)
+        self.assertEqual(p["reason"], "")
+        self.assertFalse(p["exited"])
+        self.assertTrue(p["armed"])
 
     def test_armed_then_lock_hit_is_a_lock_exit(self):
-        o, h, l, c = bars((100, 101, 99, 100), (103, 107, 102.5, 106),
-                          (105, 105, 101, 101.5))
+        o, h, l, c = bars((100, 101, 99, 100), (103, ARM + 2, 102.5, ARM),
+                          (ARM, ARM, LOCK - 1, LOCK - 0.5))
         p = replay_exit(o, h, l, c, dates=["d1", "d2", "d3"], hold_bars=None)
         self.assertEqual(p["reason"], "lock")
         self.assertEqual(p["date"], "d3")
-        self.assertAlmostEqual(p["exit_price"], 102.0)
+        self.assertAlmostEqual(p["exit_price"], LOCK)
 
     def test_target_hit(self):
         o, h, l, c = bars((100, 101, 99, 100), (110, 121, 108, 119))
@@ -90,10 +114,12 @@ class Replay(unittest.TestCase):
             bars(*[(100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(12)]),
             bars((100, 101, 98, 99), (99, 100, STOP - 1, STOP),
                  *[(STOP, STOP + 1, STOP - 1, STOP)] * 10),
-            bars((100, 101, 99, 100), (103, 107, 102.5, 106), (105, 105, 101, 101.5),
-                 *[(101, 102, 100, 101)] * 9),
-            bars((100, 101, 99, 100), (101, 107, 100, 106), *[(101, 102, 100, 101)] * 10),
-            bars((100, 101, 99, 100), (110, 121, 108, 119), *[(119, 120, 118, 119)] * 10),
+            bars((100, 101, 99, 100), (103, ARM + 2, 102.5, ARM),
+                 (ARM, ARM, LOCK - 1, LOCK - 0.5), *[(101, 102, 100, 101)] * 9),
+            bars((100, 101, 99, 100), (101, ARM + 2, 100, ARM),
+                 *[(101, 102, 100, 101)] * 10),
+            bars((100, 101, 99, 100), (110, TARGET + 1, 108, TARGET - 1),
+                 *[(119, 120, 118, 119)] * 10),
         ]
         for o, h, l, c in cases:
             entry, ret, reason = simulate_exit(o, h, l, c)
@@ -164,15 +190,15 @@ class TrackerColumns(unittest.TestCase):
         self.assertEqual(by.loc["1111", "Exit_Signal"], "")
         self.assertAlmostEqual(by.loc["1111", "Plan_Stop"], STOP)
         self.assertFalse(by.loc["1111", "Plan_Armed"])
-        self.assertIn("sell if it trades below %.2f" % STOP, by.loc["1111", "Exit_Note"])
+        self.assertIn("sell if it trades below %s" % STOP, by.loc["1111", "Exit_Note"])
 
     def test_armed_row_shows_raised_stop(self):
-        rows = [(100, 101, 99, 100), (100, 101, 99, 100), (103, 107, 102.5, 106)] + \
-               [(106, 107, 105, 106)] * 7
+        rows = [(100, 101, 99, 100), (100, 101, 99, 100),
+                (103, ARM + 2, 102.5, ARM)] + [(ARM, ARM + 1, LOCK + 0.5, ARM)] * 7
         out = self._run({"3333": rows}, {"3333": ["2026-09-01"]})
         r = out.iloc[0]
         self.assertTrue(r["Plan_Armed"])
-        self.assertAlmostEqual(r["Plan_Stop"], 102.0)
+        self.assertAlmostEqual(r["Plan_Stop"], LOCK)
         self.assertEqual(r["Exit_Signal"], "")
         self.assertIn("lock armed", r["Exit_Note"])
 
