@@ -577,6 +577,16 @@
    "errors": 0,
    "warnings": 0,
    "codes": []
+  },
+  {
+   "checked_at": "2026-09-21 21:15:51",
+   "session_date": "2026-09-21",
+   "scan_time": "2026-09-21 21:15:51",
+   "status": "ok",
+   "rows": 44,
+   "errors": 0,
+   "warnings": 0,
+   "codes": []
   }
  ]
 }
