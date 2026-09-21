@@ -1450,7 +1450,7 @@ function pendingItems() {
   const out = [];
   for (const pos of STATE.positions) {
     if (pos.status === "void" || pos.status === "archived") continue;
-    const name = `${pos.stock_name || pos.stock_id}（${pos.stock_id}）`;
+    const name = `${(pos.stock_name && pos.stock_name !== pos.stock_id ? pos.stock_name : stockName(pos.stock_id)) || pos.stock_id}（${pos.stock_id}）`;
 
     if (pos.needs_shares) {
       out.push({ kind: "shares", pos, text: `${name}：由舊版匯入，缺少股數，請補登實際成交` });
@@ -1925,6 +1925,17 @@ function chipKv(r) {
 // For a position card: the verdict sentence, or an honest "no data" line.
 // A holding is looked up in the list FIRST and in the tracked set second, so
 // a name that left the list still has every column it had while it was on it.
+// The name of a stock, wherever it is known from: today's list, the recent
+// recommendations, the whole-market file, or the quote feed's name map.
+function stockName(stockId) {
+  const id = String(stockId || "").trim();
+  if (!id) return "";
+  const r = rowFor(id);
+  if (r && r.Stock_Name) return String(r.Stock_Name);
+  const q = STATE.quotes && STATE.quotes.names && STATE.quotes.names[id];
+  return q ? String(q) : "";
+}
+
 function rowFor(stockId) {
   const id = String(stockId);
   return STATE.rows.find((x) => String(x.Stock_ID) === id) ||
@@ -2079,7 +2090,7 @@ function positionCard(pos, pinned) {
   if (pos.needs_shares) {
     return `<article class="card pos state-attention pin">
       <div class="card-head">
-        <span class="name">${esc(pos.stock_name || pos.stock_id)}</span>
+        <span class="name">${esc(pos.stock_name && pos.stock_name !== pos.stock_id ? pos.stock_name : (stockName(pos.stock_id) || pos.stock_id))}</span>
         <span class="code">${esc(pos.stock_id)}</span>
         <span class="state-chip attention">待補股數</span>
       </div>
@@ -2102,7 +2113,7 @@ function positionCard(pos, pinned) {
   if (pos.status === "closed") {
     return `<article class="card pos state-closed">
       <div class="card-head">
-        <span class="name">${esc(pos.stock_name || pos.stock_id)}</span>
+        <span class="name">${esc(pos.stock_name && pos.stock_name !== pos.stock_id ? pos.stock_name : (stockName(pos.stock_id) || pos.stock_id))}</span>
         <span class="code">${esc(pos.stock_id)}</span>
         <span class="state-chip">已平倉 · 待封存</span>
       </div>
@@ -2217,7 +2228,7 @@ function positionCard(pos, pinned) {
 
   return `<article class="card pos state-${stateCls}${pinned ? " pin" : ""}">
     <div class="card-head">
-      <span class="name">${esc(pos.stock_name || pos.stock_id)}</span>
+      <span class="name">${esc(pos.stock_name && pos.stock_name !== pos.stock_id ? pos.stock_name : (stockName(pos.stock_id) || pos.stock_id))}</span>
       <span class="code">${esc(pos.stock_id)}</span>
       <span class="state-chip ${stateCls}">${esc(stateText)}</span>
     </div>
@@ -2727,6 +2738,26 @@ async function openExecutionForm(cfg) {
       edit: editing ? editing.execution_id : "",
     },
     onOpen(modal) {
+      // The name should never have to be typed: fill it from whatever data we
+      // have as soon as the code is entered (owner, 2026-09-21). The
+      // whole-market file is what makes this work for a stock the scanner
+      // never recommended, so ask for it when the form opens.
+      const idField = modal.querySelector('input[name="stock_id"]');
+      const nameField = modal.querySelector('input[name="stock_name"]');
+      if (idField && nameField) {
+        loadUniverse().catch(() => {});
+        let touched = false;
+        nameField.addEventListener("input", () => { touched = true; });
+        const fill = () => {
+          if (touched && nameField.value.trim()) return;
+          const n = stockName(idField.value);
+          nameField.value = n;
+          nameField.placeholder = n ? "" : "查不到這個代號，可自行輸入";
+        };
+        idField.addEventListener("input", fill);
+        idField.addEventListener("blur", fill);
+        fill();
+      }
       const recalc = () => {
         const v = readForm(modal);
         const p = cents(v.price), sh = /^\d+$/.test(String(v.shares || "")) ? Number(v.shares) : null;
@@ -2798,7 +2829,8 @@ async function saveExecution(data) {
     if (!pos) {
       pos = await createPosition({
         stock_id: sid,
-        stock_name: row ? (row.Stock_Name || sid) : (String(v.stock_name || "").trim() || sid),
+        stock_name: row ? (row.Stock_Name || sid)
+          : (String(v.stock_name || "").trim() || stockName(sid) || sid),
         market: row ? (row.Market || "") : "",
         recommendation_id: row ? (row.Recommendation_ID || null) : null,
         initial_buy_price: row ? cents(row.Initial_Buy_Price) : null,
