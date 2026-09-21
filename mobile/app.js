@@ -2043,6 +2043,7 @@ function pickCard(r) {
     <div class="badges">${badge}${held ? '<span class="verdict held">已有持倉</span>' : ""}${
       r.Integrity_OK === false ? '<span class="verdict no">資料完整性未通過</span>' : ""}${exitSignalBadge(r)}</div>
     ${recLine}
+    ${held && r.Exit_Signal ? `<div class="hint">這個出場訊號算的是<b>系統假設的進場</b>（${esc(String(r.Entry_Date || "").slice(0, 10) || "進場日未知")} 開盤 ${esc(fmtPrice(cents(r.Entry_Open)))}）。你的持倉以<b>你登錄的成交價</b>另外計算，請以「持倉」頁的建議為準。</div>` : ""}
     <div class="kv2">${grid}</div>
     <div class="btns">
       ${btn("buy", "登錄買入", "primary", { id: r.Stock_ID })}
