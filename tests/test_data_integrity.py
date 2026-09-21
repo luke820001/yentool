@@ -162,3 +162,56 @@ class ReaderGuards(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoverageStepChange(unittest.TestCase):
+    """From 2026-09-21 the scan stores the WHOLE market each day (~2,300
+    names) while older dates hold only the daily shortlist. Judging every date
+    against one window median would delete those genuine older sessions from
+    the trading calendar -- the same damage the placeholder bars caused."""
+
+    def test_a_thin_but_real_session_survives_a_coverage_jump(self):
+        old_days = [("2026-08-%02d" % d, 300) for d in range(1, 26)]
+        new_days = [("2026-09-%02d" % d, 2300) for d in range(1, 16)]
+        self.assertEqual(nonsession_dates(old_days + new_days), [])
+
+    def test_a_placeholder_is_still_caught_after_the_jump(self):
+        days = [("2026-09-%02d" % d, 2300) for d in range(1, 16)]
+        days.append(("2026-09-20", 22))          # the real 2026-09-20 shape
+        self.assertEqual(nonsession_dates(days), ["2026-09-20"])
+
+    def test_a_placeholder_among_thin_days_is_still_caught(self):
+        days = [("2026-08-%02d" % d, 300) for d in range(1, 26)]
+        days.append(("2026-08-26", 9))
+        self.assertEqual(nonsession_dates(days), ["2026-08-26"])
+
+    def test_the_boundary_date_itself_is_not_flagged(self):
+        days = ([("2026-08-%02d" % d, 400) for d in range(1, 21)] +
+                [("2026-09-%02d" % d, 2300) for d in range(1, 21)])
+        flagged = nonsession_dates(days)
+        self.assertEqual(flagged, [], "coverage step wrongly read as a holiday")
+
+
+class StepChangeBoundary(unittest.TestCase):
+    """The date where coverage changes level has one neighbour set from each
+    regime. Comparing against the quieter side keeps it out of trouble."""
+
+    def test_the_last_thin_day_before_the_jump_survives(self):
+        days = ([("2026-09-%02d" % d, 84) for d in range(1, 11)] +
+                [("2026-09-%02d" % d, 1930) for d in range(11, 21)])
+        self.assertEqual(nonsession_dates(days), [])
+
+    def test_the_first_full_day_after_a_thin_stretch_survives(self):
+        days = ([("2026-09-%02d" % d, 1930) for d in range(1, 11)] +
+                [("2026-09-%02d" % d, 84) for d in range(11, 21)])
+        self.assertEqual(nonsession_dates(days), [])
+
+    def test_a_placeholder_as_the_newest_date_is_still_caught(self):
+        days = [("2026-09-%02d" % d, 1930) for d in range(1, 19)]
+        days.append(("2026-09-20", 22))
+        self.assertEqual(nonsession_dates(days), ["2026-09-20"])
+
+    def test_a_placeholder_in_the_middle_is_still_caught(self):
+        days = [("2026-09-%02d" % d, 1930) for d in range(1, 21)]
+        days[10] = ("2026-09-11", 20)
+        self.assertEqual(nonsession_dates(days), ["2026-09-11"])

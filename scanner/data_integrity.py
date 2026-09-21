@@ -205,27 +205,55 @@ def audit_store(price_db_path=None, stock_ids=None) -> pd.DataFrame:
 # are left alone by only judging the recent window.
 SESSION_WINDOW = 40    # recent dates to judge; a placeholder only lands here
 SESSION_SHARE = 0.20   # a real session is nowhere near this thin
+SESSION_NEIGHBOURS = 9  # dates compared against, centred on the one judged
 
 
-def nonsession_dates(date_counts, window=SESSION_WINDOW, share=SESSION_SHARE):
+def _median(values):
+    v = sorted(values)
+    if not v:
+        return 0
+    mid = len(v) // 2
+    return v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2.0
+
+
+def nonsession_dates(date_counts, window=SESSION_WINDOW, share=SESSION_SHARE,
+                     neighbours=SESSION_NEIGHBOURS):
     """Dates in the recent `window` whose coverage is a fraction of normal.
 
     `date_counts` is an iterable of (date, stock_count). Returns a sorted list
-    of the dates that cannot be real sessions. Judged against the MEDIAN of the
-    window, so one or two thin days cannot drag the bar down with them.
+    of the dates that cannot be real sessions.
+
+    Each date is judged against the median of its NEAREST NEIGHBOURS, not
+    against the whole window. That matters as soon as coverage changes level:
+    from 2026-09-21 the scan stores the whole market's bar (~2,300 names a
+    day) while older dates hold only what the daily shortlist happened to
+    cover (a few hundred). Against a window median those genuine older
+    sessions fall under the 20% bar and would be deleted from the trading
+    calendar -- hold days and entry dates wrong, which is the exact damage the
+    placeholder-bar incident caused in the first place. Neighbouring dates
+    share whatever coverage regime they belong to, so the comparison stays
+    meaningful on both sides of the change.
     """
     counts = [(str(d)[:10], int(n)) for d, n in date_counts if d]
     if len(counts) < 5:
         return []
     counts.sort()
     recent = counts[-window:]
-    values = sorted(n for _, n in recent)
-    mid = len(values) // 2
-    median = (values[mid] if len(values) % 2
-              else (values[mid - 1] + values[mid]) / 2.0)
-    if median <= 0:
-        return []
-    return [d for d, n in recent if n < median * share]
+    values = [n for _, n in recent]
+    bad = []
+    half = max(1, neighbours // 2)
+    for i, (d, n) in enumerate(recent):
+        before = values[max(0, i - half):i]
+        after = values[i + 1:i + 1 + half]
+        # Compare against the QUIETER side. On the day coverage steps up, one
+        # side is the old regime and the other the new one; taking the lower
+        # median means the step itself is never mistaken for a holiday, while
+        # a placeholder -- thin against everything around it -- still fails.
+        refs = [_median(x) for x in (before, after) if x]
+        ref = min(refs) if refs else _median(values)
+        if ref > 0 and n < ref * share:
+            bad.append(d)
+    return bad
 
 
 def drop_nonsession_rows(frames, window=SESSION_WINDOW, share=SESSION_SHARE):
