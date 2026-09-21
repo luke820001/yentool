@@ -2213,6 +2213,11 @@ function positionCard(pos, pinned) {
     if (close !== null) bits.push(`收盤 ${fmtPrice(close)}（資料日 ${esc(String(mkt.Data_Date || "").slice(5, 10))}）`);
     if (ma5 !== null && close !== null) {
       bits.push(`5 日均價 ${fmtPrice(ma5)}，${close > ma5 ? "站上（到期可續抱）" : "跌破（到期就出場）"}`);
+    } else if (num(mkt.Bars) !== null && num(mkt.Bars) < 5) {
+      // A newly covered instrument (every ETF, the day whole-market storage
+      // began) has a price but not yet an average. Say which, rather than
+      // leaving a gap that looks like a fault.
+      bits.push(`目前只有 ${num(mkt.Bars)} 根日 K，均價還算不出來`);
     }
     const inst = num(mkt.Inst_Net);
     if (inst !== null) bits.push(`三大法人 ${fmtSigned(inst, 0)} 張`);

@@ -26,7 +26,12 @@ from datetime import datetime
 
 import pandas as pd
 
-MIN_BARS = 60          # enough for a 60-day average; below that, say nothing
+# A stock appears as soon as there is anything worth saying about it, and each
+# average is null until it can honestly be computed. Requiring 60 bars up front
+# meant a newly covered instrument -- every ETF, on the day whole-market
+# storage began -- published nothing at all for three months, when its close
+# and its 5-day mean were available immediately.
+MIN_BARS = 1
 RECENT_BARS = 70       # how much history to read per stock
 
 
@@ -70,6 +75,8 @@ def build(price_db, names=None, inst=None, min_bars=MIN_BARS):
         c = g["close"].dropna()
         if len(c) < min_bars:
             continue
+        # Below this there is a price and a date and nothing else; the record
+        # says so via "Bars" and every average stays null.
         g = g.reset_index(drop=True)
         close = float(c.iloc[-1])
         if not close > 0:
@@ -88,12 +95,12 @@ def build(price_db, names=None, inst=None, min_bars=MIN_BARS):
         lo20 = g["low"].tail(20).min()
         rng = ((g["high"] - g["low"]) / g["close"]).tail(20).mean()
         rec = {
+            "Bars": len(c),        # so the phone can say what it is working from
             "Stock_ID": sid,
             "Stock_Name": name,
             "Market": market,
             "Data_Date": str(g["date"].iloc[-1]),
             "Close_Price": round(close, 2),
-            "Close_Prev": round(float(c.iloc[-2]), 2) if len(c) > 1 else None,
             "High_Today": round(float(g["high"].iloc[-1]), 2),
             "Low_Today": round(float(g["low"].iloc[-1]), 2),
             "MA5": ma(5), "MA10": ma(10), "MA20": ma(20), "MA60": ma(60),
@@ -103,6 +110,8 @@ def build(price_db, names=None, inst=None, min_bars=MIN_BARS):
             "Vol_MA20": round(float(g["Volume_Lot"].tail(20).mean()), 1),
             "Vol_Today": round(float(g["Volume_Lot"].iloc[-1]), 1),
         }
+        if len(c) >= 2:
+            rec["Close_Prev"] = round(float(c.iloc[-2]), 2)
         if len(c) >= 6:
             rec["Ret_5D_Pct"] = round((close / float(c.iloc[-6]) - 1) * 100, 2)
         if len(c) >= 64:

@@ -154,3 +154,73 @@ class YfinanceNormalise(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MarketSnapshotCodes(unittest.TestCase):
+    """Which instruments the whole-market snapshot stores (2026-09-21).
+
+    ETF codes are not one shape: 0050 is four characters, 00878 is five and
+    00400A is six with a letter. An earlier version required five, which
+    silently dropped 0050 and 0056 -- the two most likely things somebody
+    holds."""
+
+    def test_etfs_of_every_length(self):
+        from scanner.market_snapshot import _keep_code
+        for code in ("0050", "0056", "00878", "00940", "00400A", "006208"):
+            self.assertTrue(_keep_code(code), code)
+
+    def test_ordinary_shares(self):
+        from scanner.market_snapshot import _keep_code
+        for code in ("2330", "1815", "6488", "12345"):
+            self.assertTrue(_keep_code(code), code)
+
+    def test_warrants_are_dropped(self):
+        from scanner.market_snapshot import _keep_code
+        for code in ("030001", "712345", "", None, "ABCD"):
+            self.assertFalse(_keep_code(code), code)
+
+
+class MarketSnapshotParsing(unittest.TestCase):
+    def test_tse_row(self):
+        from scanner.market_snapshot import parse_tse
+        df = parse_tse([{
+            "Date": "1150918", "Code": "2330", "Name": "x",
+            "TradeVolume": "40892688", "OpeningPrice": "2460.00",
+            "HighestPrice": "2470.00", "LowestPrice": "2435.00",
+            "ClosingPrice": "2460.00",
+        }])
+        r = df.iloc[0]
+        self.assertEqual(r["date"], "2026-09-18")
+        self.assertAlmostEqual(r["close"], 2460.0)
+        self.assertAlmostEqual(r["Volume_Lot"], 40892.688)
+
+    def test_a_suspended_name_is_not_stored(self):
+        from scanner.market_snapshot import parse_tse
+        df = parse_tse([{
+            "Date": "1150918", "Code": "2330", "Name": "x",
+            "TradeVolume": "0", "ClosingPrice": "2460.00",
+        }])
+        self.assertEqual(len(df), 0)
+
+    def test_otc_row(self):
+        from scanner.market_snapshot import parse_otc
+        df = parse_otc([{
+            "Date": "1150921", "SecuritiesCompanyCode": "1815",
+            "CompanyName": "x", "Close": "121.00", "Open": "119.00",
+            "High": "123.00", "Low": "118.50", "TradingShares": "1234000",
+        }])
+        r = df.iloc[0]
+        self.assertEqual(r["date"], "2026-09-21")
+        self.assertAlmostEqual(r["high"], 123.0)
+
+    def test_missing_ohlc_falls_back_to_the_close(self):
+        from scanner.market_snapshot import parse_otc
+        df = parse_otc([{
+            "Date": "1150921", "SecuritiesCompanyCode": "1815",
+            "Close": "121.00", "Open": "--", "High": "--", "Low": "--",
+            "TradingShares": "1000",
+        }])
+        r = df.iloc[0]
+        self.assertAlmostEqual(r["open"], 121.0)
+        self.assertAlmostEqual(r["high"], 121.0)
+        self.assertAlmostEqual(r["low"], 121.0)

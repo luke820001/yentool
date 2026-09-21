@@ -64,14 +64,15 @@ def _keep_code(code):
     """A tradeable instrument somebody could hold, not a warrant.
 
     4-digit ordinary shares, 5-digit (emerging/innovation board), and the
-    00-prefixed ETF codes including the ones with a trailing letter (00400A).
-    Six-digit numeric codes are warrants and are dropped.
+    00-prefixed ETF codes -- which run from FOUR characters (0050, 0056)
+    through five (00878) to six with a trailing letter (00400A). Six-digit
+    numeric codes are warrants and are dropped.
     """
     c = str(code or "").strip()
     if not c:
         return False
     if c.startswith("00"):
-        return 5 <= len(c) <= 7
+        return 4 <= len(c) <= 7
     return c.isdigit() and len(c) in (4, 5)
 
 
