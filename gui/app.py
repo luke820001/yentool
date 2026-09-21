@@ -119,8 +119,9 @@ BLOCK_TEXT = {
 MODE_RULE_CARDS = {
     "mode_prelaunch": (
         "只買OTC核心+(貼近52週高、未起漲、日振幅≥4.5%) · 順風才進場 · 隔日開盤進 · -20%災難停損 · "
-        "收盤站上+2.5%後隔日起停損上調到+2% · 觸+20%停利 · 抱10天，第10天收盤仍站上5日均價則續抱(最晚20天) · "
-        "回測(2017-2026, 564筆, 近3年, 含費稅)：67.1%勝/每筆+2.0%，加續抱規則69.1%。不是未來勝率",
+        "收盤站上+2.5%後隔日起停損上調到+2% · 觸+20%停利 · 第8天起收盤仍有實質獲利(+1%以上)就隔日開盤收下 · "
+        "抱10天，第10天收盤仍站上5日均價則續抱(最晚20天) · "
+        "回測(2017-2026, 556筆, 近3年, 含費稅)：71.7%勝/每筆+1.95%；更早的資料69.5%/+2.04%。不是未來勝率",
         "accent"),
     "mode_momentum_leader": (
         "警告：此模式照建議操作的實戰紀錄為負期望值（勝率 23%、59% 觸發停損），"
@@ -331,6 +332,20 @@ def _calendar(refresh=False):
     return cal
 
 
+def _still_riding(row):
+    """Is this stock still above its own 5-bar mean?
+
+    The stock-strength half of the time-exit extension. Mirrors
+    scanner.holding_tracker._still_strong exactly, including the STRICT
+    comparison -- the two must not drift, because one is what the desktop
+    shows and the other is what the phone and the ledger use.
+    """
+    close, ma5 = _num(row.get("Close_Price")), _num(row.get("MA5"))
+    if close is None or ma5 is None:
+        return False
+    return close > ma5
+
+
 def _live_hold(row, disturbed=False):
     """Recompute the holding day/status as of NOW for one row.
 
@@ -376,7 +391,13 @@ def _live_hold(row, disturbed=False):
             status = "holding"
         elif i_today >= i_cap:
             status = "exit_today" if i_today == i_cap else "overdue"
-        elif disturbed and cap > total:
+        elif cap > total and (disturbed or _still_riding(row)):
+            # The SAME condition as scanner.holding_tracker.annotate_holding:
+            # either the stock is still above its own 5-bar mean, or the market
+            # is in a pullback within an uptrend. Before 2026-09-21 this branch
+            # knew only about the market, so a row the backend shipped as
+            # "delay" (keep riding) was re-derived here as "exit today" -- the
+            # desktop telling you to sell what the phone said to hold.
             status = "delay"
         else:
             status = "exit_today" if remaining == 0 else "overdue"
@@ -438,8 +459,10 @@ def _hold_banner(row, disturbed=False):
             return ("進場計畫：{}進場（實際依券商成交回報，不保證開盤價成交）".format(when),
                     ACCENT)
         if status == "delay":
-            return ("出場提醒：第 {} 天，大盤弱（20MA下）續抱觀察，最晚第 {} 天".format(
-                day, cap), ORANGE)
+            reason = ("個股收盤仍站上5日均價" if _still_riding(row)
+                      else "大盤弱（跌破20MA）")
+            return ("出場提醒：第 {} 天，{}，續抱觀察，最晚第 {} 天".format(
+                day, reason, cap), ORANGE)
         if status == "exit_today":
             return ("出場提醒：★ {}今日收盤出場（第 {} 天）".format(
                 "已到期，" if after_close else "", day), YELLOW)
@@ -684,7 +707,7 @@ class DetailDialog(tk.Toplevel):
                     ("進場開盤價", _fmt_price(lv["entry"])),
                     ("停損價(依進場價)", _fmt_price(lv["stop"])),
                     ("停利目標(依進場價)", _fmt_price(lv["target"])),
-                    ("鎖利啟動(漲6%)", _fmt_price(lv["trail_arm"])),
+                    ("鎖利啟動(收盤站上+2.5%，隔日生效)", _fmt_price(lv["trail_arm"])),
                     ("鎖利價(依進場價)", _fmt_price(lv["trail_lock"])),
                 ]
                 close = _num(row.get("Close_Price"))
@@ -697,7 +720,7 @@ class DetailDialog(tk.Toplevel):
                     ("進場參考價", _fmt_price(lv["entry"])),
                     ("停損參考價", _fmt_price(lv["stop"])),
                     ("停利參考目標", _fmt_price(lv["target"])),
-                    ("鎖利啟動(漲6%)", _fmt_price(lv["trail_arm"])),
+                    ("鎖利啟動(收盤站上+2.5%，隔日生效)", _fmt_price(lv["trail_arm"])),
                     ("鎖利參考價", _fmt_price(lv["trail_lock"])),
                 ]
             # The frozen first-day view, when the ledger has one for this name.
@@ -857,7 +880,8 @@ class ScannerApp(tk.Tk):
                               lambda e: self._update_rule_banner())
 
         # OTC-only display filter. Ledger evidence (docs/EVAL_PLAYBOOK.md):
-        # the prelaunch alpha is concentrated in OTC names (win 71% vs 64%),
+        # the prelaunch alpha is concentrated in OTC names (the full adoption gate
+# rejected broadening to TSE on every metric -- STRATEGY.md appendix C),
         # so the filter defaults ON. It only hides rows from view -- the scan,
         # the ledger and the AI report still cover everything.
         self._otc_var = tk.BooleanVar(value=True)
@@ -1127,7 +1151,7 @@ class ScannerApp(tk.Tk):
         return _truthy(self._regime.get("ok")) and _truthy(self._regime.get("enter_ok"))
 
     def _disturbed(self) -> bool:
-        """Pullback WITHIN an uptrend (below 20MA, still above 60MA): the only
+        """The MARKET half of the exit extension: a pullback within an uptrend (below 20MA, still above 60MA): the only
         case where the exit delay engages. Mirrors holding_tracker."""
         return (_truthy(self._regime.get("ok"))
                 and not _truthy(self._regime.get("above20"))

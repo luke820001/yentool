@@ -1,8 +1,9 @@
 """
 The exit stack, as ONE parameterised implementation. ASCII only, stdlib only.
 
-Why this file exists. The adopted exit parameters (stop 20%, take profit 20%,
-arm 6%, lock 2%) were chosen by archive/research/eval_winrate_round2.sim_trail,
+Why this file exists. The exit parameters adopted at the time (stop 15%, take
+profit 20%, arm 6%, lock 2%) were chosen by
+archive/research/eval_winrate_round2.sim_trail,
 while live forward performance was measured by
 scanner.signal_ledger._simulate_rule. Two implementations of one rule, written
 separately -- and BOTH carried the same two same-bar ordering defects (F09):
@@ -31,7 +32,7 @@ true intraday sequence. The order below is a stated assumption:
      raises the stop to the lock, and that raised stop guards from the NEXT
      session.
 
-WHY ARMING WAITES FOR THE CLOSE (2026-09-21, owner's decision). Until now the
+WHY ARMING WAITS FOR THE CLOSE (2026-09-21, owner's decision). Until now the
 lock armed the instant a bar's HIGH touched +6%, and that same bar could then
 be stopped on the lock it had just armed. Nobody trades that. The scan runs
 after the close, the owner reads the payload in the evening and places orders

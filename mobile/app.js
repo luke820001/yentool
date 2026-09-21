@@ -76,7 +76,7 @@ const MODE_CARDS = {
       "買進條件（全部成立才算可買）：大盤站上 20MA 與 60MA · 上櫃 · 出貨排名前 20 · 通過核心+ 品質閘門 · 資料完整性通過 · 當日資料 · 第一天入榜的新訊號。\n" +
       "兩種買法擇一，出場價位完全相同（都以第一筆成交價計算）：一次買滿；或先買一半、跌到成交價 -10% 再補另一半。\n" +
       "出場計畫：災難停損 -20% · 收盤站上 +2.5% 後隔一個交易日起停損上調到 +2% · 目標 +20% · 第 8 天起收盤仍有實質獲利（+1% 以上）就隔日開盤收下 · 基本抱 10 個交易日，第 10 天收盤若仍站上自己的 5 日均價就續抱，最晚第 20 天。\n" +
-      "回測（2020-2026，556 筆，近 3 年，含手續費與證交稅）：71.7% 勝、每筆平均 +1.95%；更早的資料 69.5%。19 個有效季度裡沒有一季低於 60%。歷史統計，不是未來勝率。\n" +
+      "回測（2017-2026，556 筆，近 3 年，含手續費與證交稅）：71.7% 勝、每筆平均 +1.95%；更早的資料 69.5%。19 個有效季度裡沒有一季低於 60%。歷史統計，不是未來勝率。\n" +
       "「勝」在這裡指「有賺錢」。若改用「至少賺 25% 才算贏」，這套規則只有 2.3%，因為 +20% 就停利了。那個目標有另一套規則（見回測登錄簿 G 節）可達 37.6%，但只有 54.9% 的交易賺錢、資金要卡 16 天。兩者已完整比較過，你選擇維持這一套。\n" +
       "2026-09-21 修正：鎖利原本「當天盤中觸及 +6%」就算數，但你是收盤後才看到、隔天才下得了單。改成收盤判定、隔日生效後重算同一批交易，舊規則真實勝率 63.0%、新規則 67.1%——先前畫面上的約 70% 有一大半是模擬器產生的。\n" +
       "2026-09-20 起停損由 -15% 放寬到 -20%，既有持倉一併套用，所以舊部位畫面上的停損價會往下移。\n" +
@@ -1840,7 +1840,8 @@ function filteredRows() {
 // --- exit plan columns (scanner/holding_tracker.py, 2026-09-14) -------------
 // Plan_Stop is the ONE price to act on: "sell first if it trades below this".
 // Before entry it is the close-based reference; once the row is entered it is
-// fill x 0.80, raised to fill x 1.02 when the +6% lock has armed. Exit_Signal
+// fill x 0.80, raised to fill x 1.02 once a CLOSE at or above fill x 1.025
+// arms the lock -- effective the NEXT session. Exit_Signal
 // is what the shared exit stack (scanner/exit_rules.py) says already happened.
 const EXIT_LABEL = {
   stop: "已跌破停損 · 先出場",
@@ -1873,7 +1874,7 @@ function planStopKv(r) {
     ? "此價位為出場當時的有效停損"
     : r.Plan_Armed
       ? "鎖利已啟動：停損已上調到成交價 × 1.02，只升不降"
-      : `推估成交價 ${esc(fmtPrice(cents(r.Entry_Open)))} × 0.80；漲到 +6% 後上調到 +2%`;
+      : `推估成交價 ${esc(fmtPrice(cents(r.Entry_Open)))} × 0.80；收盤站上 +${STRATEGY.armPct}% 後，隔一個交易日起上調到 +${STRATEGY.lockPct}%`;
   return kv("停損（跌破先出）", esc(fmtPrice(stop)), r.Exit_Signal ? "" : "gold", sub);
 }
 
@@ -2229,7 +2230,7 @@ function positionCard(pos, pinned) {
   const advice = dayIdx === null
     ? `<div class="plan">建議：無法計算持有天數，請確認成交日期。</div>`
     : dayIdx >= horizon
-      ? `<div class="plan alert">建議：第 ${horizon} 個交易日已到，依策略應於收盤出場；實際賣出以你的成交回報為準。</div>`
+      ? `<div class="plan alert">建議：第 ${horizon} 個交易日已到。收盤若仍站上自己的 5 日均價就續抱（最晚第 ${STRATEGY.cap} 天），否則依策略於收盤出場；實際賣出以你的成交回報為準。</div>`
       : `<div class="plan">${esc(holdLine)}</div>`;
 
   return `<article class="card pos state-${stateCls}${pinned ? " pin" : ""}">

@@ -520,7 +520,7 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
 #      buy signals on non-green days out of 21 total; the 13 that completed won
 #      15.4% (median -15.00%, i.e. straight into the disaster stop), against
 #      80% for the 5 fired on green days.
-#   2. FRESH SIGNAL ONLY. The 71% figure is the streak==1 view (STRATEGY.md
+#   2. FRESH SIGNAL ONLY. The headline figure is the streak==1 view (STRATEGY.md
 #      3.6): enter on the first day a name appears, hold 10 bars, done.
 #      Hysteresis keeps a name listed for weeks (79% of the rows shown in that
 #      window were carried over from the previous day, 12% were past their own
@@ -543,7 +543,11 @@ BUY_RULE_MODES = ("mode_prelaunch",)
 #   2026-09-20  disaster stop 0.15 -> 0.20; optional staged entry (Add_Price)
 #   2026-09-21  trailing lock arms on the CLOSE and guards from the NEXT
 #               session (it used to fire intraday on its own arming bar, which
-#               no one can trade); arm threshold 0.06 -> 0.025
+#               no one can trade); arm threshold 0.06 -> 0.025; late profit
+#               take from day 8 (exit_rules.late_from / late_gain); time exit
+#               extended while the close holds above the stock's own 5-bar
+#               mean (holding_tracker._still_strong); optional scale-out at
+#               +15% (PRELAUNCH_SCALE_OUT_PCT)
 STRATEGY_VERSION = "prelaunch-2026-09-21"
 
 # signal_ledger stamps every stored pick with this so a past row can be judged

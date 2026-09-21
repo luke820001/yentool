@@ -2,7 +2,9 @@
 Holding-day / exit-date tracker. ASCII only.
 
 The trade plan is "enter next-day open after the signal, hold N trading days,
-exit on the N-th bar's close". A user who does not open the scanner every day
+exit on the N-th bar's close -- unless the stock is still above its own 5-bar
+mean, in which case keep riding to the cap; and from day 8 take any real
+profit at the next open rather than carrying it into the last day". A user who does not open the scanner every day
 cannot tell which day of the hold a given pick is on. This module answers that
 per stock, anchored to reality rather than to how often the app is opened:
 
@@ -72,7 +74,7 @@ def _num(v):
 
 
 def _still_strong(row):
-    """Is this stock still trending on its own terms -- today's close at or
+    """Is this stock still trending on its own terms -- today's close STRICTLY
     above its own 5-bar mean?
 
     2026-09-21 (archive/research/sandbox_daily_plan.py). Asked what to do when

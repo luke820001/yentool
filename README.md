@@ -3,7 +3,7 @@
 台股盤後掃描與持倉追蹤。每個交易日盤後由 GitHub Actions 自動掃描，結果發布到 GitHub Pages，
 手機以 PWA open 即可查看；桌面另有 Tkinter 介面。
 
-> **現行規格的單一入口是 [`docs/TASKS.md`](docs/TASKS.md)。**
+> **待辦事項的單一入口是 [`docs/TASKS.md`](docs/TASKS.md)；**現行交易規則**請看 [`docs/STRATEGY.md`](docs/STRATEGY.md) §3.5 與 [`docs/BACKTEST_LOG.md`](docs/BACKTEST_LOG.md)。**
 > 設計與缺陷分析在 [`docs/專案完整分析與優化方案_2026-09-09.md`](docs/專案完整分析與優化方案_2026-09-09.md)，
 > 策略與其證據在 [`docs/STRATEGY.md`](docs/STRATEGY.md)。
 > `docs/history/` 是已被取代的舊結論，閱讀時請注意適用版本。
@@ -103,8 +103,13 @@ python -m unittest discover -s tests -v
 
 不要把下面幾點當成已經解決：
 
-- **勝率數字未經新資料驗證。** 舊文件的「順風年約 71%、六年約 64%」是先前特定樣本與
-  規則下的研究結果；2026-09-09 的稽核發現執行假設與版本落差，尚未重新驗證。
+- **勝率已於 2026-09-21 用可執行的口徑重新驗證。** 舊文件的「順風年約 71%、六年約 64%」
+  出自一個讓鎖利在觸價當天盤中就生效的模擬器——現實中你要隔天才下得了單，其中約 6.7 個
+  百分點是模擬器造成的，**那兩個數字已作廢**。修正並重新調參後，現行規則為
+  **近 3 年 71.7% / 每筆 +1.95%，更早的資料 69.5% / +2.04%**（556 筆 CORE+ 首日進場，含費稅）。
+  規則的單一權威是 `scanner/exit_rules.DEFAULT_RULE`；完整敘述見
+  [`docs/STRATEGY.md`](docs/STRATEGY.md) §3.5，每一組測過的組合見
+  [`docs/BACKTEST_LOG.md`](docs/BACKTEST_LOG.md)。
 - **價格基準未分離（F08）。** `price_volume.db` 混有 yfinance 還原價與交易所未還原價，
   且沒有來源欄位，所以 `quotes.json` 的 `price_basis` 標為 `unverified`，不可直接與券商對帳。
 - **持倉存在手機本機。** 目前沒有私人後端，換裝置或清除瀏覽器資料會遺失，請使用匯出功能備份。
