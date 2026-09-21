@@ -224,10 +224,15 @@ def refill_rolling_columns(price_db, log=print):
     """
     conn = sqlite3.connect(str(price_db), timeout=120)
     try:
+        # Only rows that can ACTUALLY be filled count as work. A bar with no
+        # close or no volume can never get a rolling value, and counting it
+        # here would make this pass load the whole table on every future scan
+        # to discover that again.
         need = conn.execute(
-            "SELECT COUNT(*) FROM data WHERE MA5_Volume IS NULL "
+            "SELECT COUNT(*) FROM data WHERE close IS NOT NULL "
+            "AND Volume_Lot IS NOT NULL AND (MA5_Volume IS NULL "
             "OR Min_Volume_20 IS NULL OR Max_Price_20 IS NULL "
-            "OR Min_Price_20 IS NULL").fetchone()[0]
+            "OR Min_Price_20 IS NULL)").fetchone()[0]
         if not need:
             return 0
         df = pd.read_sql_query(
