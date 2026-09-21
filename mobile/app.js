@@ -32,6 +32,10 @@
 
 const DATA_URL = "./scan_result.json";
 const QUOTES_URL = "./quotes.json";
+// Compact data for every stock the scan examined. Fetched ONLY when a
+// registered holding is missing from the list, so most sessions never pay for
+// it (owner, 2026-09-21: advice on a stock the scanner never recommended).
+const UNIVERSE_URL = "./universe.json";
 const TZ = "Asia/Taipei";
 
 // The strategy parameters the old UI hard-coded. They are the CURRENT strategy
@@ -52,6 +56,12 @@ const STRATEGY = {
   addPct: -10,       // optional staged entry: buy the rest here (2026-09-20)
   addFirstPct: 50,   // how much of the planned size the first buy is
   scaleOutPct: 15,   // optional: sell half here (2026-09-21)
+  // Late profit-taking (2026-09-21): from this trading day onward, a CLOSE at
+  // or above the fill + lateGainPct sells at the NEXT open rather than
+  // carrying the profit into the last day. The time exit was closing 28% of
+  // trades at -6.9%; this lifts the win rate 69.1 -> 71.7% at no cost in mean.
+  lateFrom: 8,
+  lateGainPct: 1,
   horizon: 10,       // base hold, trading days
   cap: 20,           // maximum hold when the exit is delayed (see rideNote)
 };
@@ -65,8 +75,9 @@ const MODE_CARDS = {
     body:
       "買進條件（全部成立才算可買）：大盤站上 20MA 與 60MA · 上櫃 · 出貨排名前 20 · 通過核心+ 品質閘門 · 資料完整性通過 · 當日資料 · 第一天入榜的新訊號。\n" +
       "兩種買法擇一，出場價位完全相同（都以第一筆成交價計算）：一次買滿；或先買一半、跌到成交價 -10% 再補另一半。\n" +
-      "出場計畫：災難停損 -20% · 收盤站上 +2.5% 後，隔一個交易日起停損上調到 +2% · 目標 +20% · 基本抱 10 個交易日，第 10 天收盤若仍站上自己的 5 日均價就續抱，最晚第 20 天。\n" +
-      "回測（2017-2026，564 筆，近 3 年，含手續費與證交稅）：67.1% 勝、每筆平均 +2.0%；加上續抱規則 69.1%。歷史統計，不是未來勝率。\n" +
+      "出場計畫：災難停損 -20% · 收盤站上 +2.5% 後隔一個交易日起停損上調到 +2% · 目標 +20% · 第 8 天起收盤仍有實質獲利（+1% 以上）就隔日開盤收下 · 基本抱 10 個交易日，第 10 天收盤若仍站上自己的 5 日均價就續抱，最晚第 20 天。\n" +
+      "回測（2020-2026，556 筆，近 3 年，含手續費與證交稅）：71.7% 勝、每筆平均 +1.95%；更早的資料 69.5%。19 個有效季度裡沒有一季低於 60%。歷史統計，不是未來勝率。\n" +
+      "「勝」在這裡指「有賺錢」。若改用「至少賺 25% 才算贏」，這套規則只有 2.3%，因為 +20% 就停利了。那個目標有另一套規則（見回測登錄簿 G 節）可達 37.6%，但只有 54.9% 的交易賺錢、資金要卡 16 天。兩者已完整比較過，你選擇維持這一套。\n" +
       "2026-09-21 修正：鎖利原本「當天盤中觸及 +6%」就算數，但你是收盤後才看到、隔天才下得了單。改成收盤判定、隔日生效後重算同一批交易，舊規則真實勝率 63.0%、新規則 67.1%——先前畫面上的約 70% 有一大半是模擬器產生的。\n" +
       "2026-09-20 起停損由 -15% 放寬到 -20%，既有持倉一併套用，所以舊部位畫面上的停損價會往下移。\n" +
       "名單上其餘的列是觀察與持倉追蹤，不是買點。",
@@ -1043,6 +1054,14 @@ async function loadCycles() {
 const STATE = {
   meta: {},
   rows: [],
+  // Full rows for names that dropped off the list but were recommended
+  // recently, so a position in one keeps its chips, moving averages and exit
+  // plan (owner, 2026-09-21). The backend publishes the superset; matching it
+  // against what is actually held happens here and never leaves the phone.
+  tracked: [],
+  universe: null,          // {stock_id: row} once fetched
+  universeState: "idle",   // idle | loading | ready | missing
+
   reports: {},
   quotes: null,
   quotesError: "",
@@ -1079,6 +1098,7 @@ async function loadScan() {
   // The shipped order IS the rank. A user's sort must never change it
   // (report 7.4: sorting changes the view, not the recommendation).
   STATE.rows = (data.rows || []).map((r, i) => Object.assign({}, r, { _rank: i + 1 }));
+  STATE.tracked = (data.tracked || []).map((r) => Object.assign({}, r, { _tracked: true }));
   STATE.scanError = "";
 }
 
@@ -1095,6 +1115,35 @@ async function loadQuotes() {
     STATE.quotes = null;
     STATE.quotesError = e.message || String(e);
   }
+}
+
+// Lazy, and at most once per app session. A miss is not an error: an older
+// deploy simply has no universe.json, and the card says what it can.
+async function loadUniverse() {
+  if (STATE.universeState === "ready" || STATE.universeState === "loading") return;
+  STATE.universeState = "loading";
+  try {
+    const u = await fetchJson(UNIVERSE_URL);
+    STATE.universe = (u && u.stocks) || null;
+    STATE.universeMeta = u || null;
+    STATE.universeState = STATE.universe ? "ready" : "missing";
+  } catch (e) {
+    STATE.universe = null;
+    STATE.universeState = "missing";
+  }
+  render();
+}
+
+// Any holding that is not in the list needs the wider file; ask for it once.
+function ensureUniverseFor(positions) {
+  if (STATE.universeState !== "idle") return;
+  const need = (positions || []).some((p) => {
+    if (p.status === "void" || p.status === "archived" || p.status === "closed") return false;
+    const id = String(p.stock_id);
+    return !STATE.rows.some((r) => String(r.Stock_ID) === id) &&
+           !STATE.tracked.some((r) => String(r.Stock_ID) === id);
+  });
+  if (need) loadUniverse().catch(() => {});
 }
 
 async function loadLedger() {
@@ -1141,6 +1190,7 @@ async function load() {
   await loadLedger();
   await rebuildMarks();
   await loadLedger();               // pick the rebuilt marks back up
+  ensureUniverseFor(STATE.positions);
   STATE.loadedAt = nowStamp();
   render();
   setStatus(STATE.scanError ? "更新失敗，顯示上次資料" : "更新於 " + STATE.loadedAt);
@@ -1342,6 +1392,17 @@ function tomorrowOrders(pos, plan, dayIdx, horizon) {
       price: tickRound(plan.arm, "up"),
       label: "收盤站上這裡 → 隔日起停損上調",
       note: `收盤 ≥ 成交價 +${STRATEGY.armPct}%，隔一個交易日起停損改掛 ${fmtPrice(tickRound(plan.lock, "down"))}`,
+    });
+  }
+  // The late profit-take only exists once the hold is far enough along, so it
+  // appears on the card exactly when it becomes actionable.
+  if (dayIdx !== null && dayIdx >= STRATEGY.lateFrom - 1) {
+    const lateAt = tickRound(divRound(plan.base * (100 + STRATEGY.lateGainPct), 100), "up");
+    rows.push({
+      side: "watch", must: true,
+      price: lateAt,
+      label: "收盤在這之上 → 隔日開盤就收下",
+      note: `第 ${STRATEGY.lateFrom} 天起，只要收盤還高於成交價 +${STRATEGY.lateGainPct}%（已蓋過手續費與證交稅）就先出場，不要把獲利帶進最後一天`,
     });
   }
   rows.push({
@@ -1785,6 +1846,7 @@ const EXIT_LABEL = {
   stop: "已跌破停損 · 先出場",
   lock: "鎖利停損觸發 · 出場",
   tp: "達到目標 · 出場",
+  late: "後期仍有獲利 · 隔日開盤先收下",
   time: "持有期滿 · 出場",
 };
 
@@ -1853,22 +1915,37 @@ function chipKv(r) {
   }
   const basis = String(r.Chip_Basis || "");
   const when = String(r.Inst_Date || "").slice(5, 10);
-  const sub = basis === "lag"
-    ? `法人資料 ${when} 落後行情日，暫無判定`
+  const sub = (basis === "lag" || basis === "ahead")
+    ? `法人資料 ${when} 與行情日不同，暫無判定`
     : (r.Chip_Action ? CHIP_ACTION_TEXT[r.Chip_Action] || r.Chip_Action : "確認欄位，不進評分") +
       (num(r.Inst_Sessions) !== null && num(r.Inst_Sessions) < 5 ? `（僅 ${num(r.Inst_Sessions)}/5 日有資料）` : "");
   return kv("法人今日", esc(chipSummary(r)), signClass(net), esc(sub));
 }
 
 // For a position card: the verdict sentence, or an honest "no data" line.
+// A holding is looked up in the list FIRST and in the tracked set second, so
+// a name that left the list still has every column it had while it was on it.
+function rowFor(stockId) {
+  const id = String(stockId);
+  return STATE.rows.find((x) => String(x.Stock_ID) === id) ||
+         STATE.tracked.find((x) => String(x.Stock_ID) === id) ||
+         (STATE.universe && STATE.universe[id]) || null;
+}
+
 function chipAdvice(stockId) {
-  const r = STATE.rows.find((x) => String(x.Stock_ID) === String(stockId));
-  if (!r) return `<div class="plan dim">籌碼：此檔已不在今日名單，沒有當日法人資料。</div>`;
+  const r = rowFor(stockId);
+  if (!r) return `<div class="plan dim">籌碼：此檔不在今日名單，也不在近期推薦名單，因此沒有當日法人資料。</div>`;
   const net = num(r.Inst_Net);
   if (net === null) return `<div class="plan dim">籌碼：本次掃描沒有這檔的法人資料。</div>`;
   const basis = String(r.Chip_Basis || "");
-  if (basis === "lag") {
-    return `<div class="plan dim">籌碼：法人資料只到 ${esc(String(r.Inst_Date || "").slice(0, 10))}，落後行情，今天不做籌碼判定。${esc(chipSummary(r))}</div>`;
+  if (basis === "lag" || basis === "ahead") {
+    // Which side is behind matters: TWSE's whole-market endpoint can publish a
+    // session later than the institutional table, so the PRICE can be the
+    // stale one. Either way the pair is unmatched and no verdict is given.
+    const note = basis === "ahead"
+      ? `行情資料只到 ${esc(String(r.Data_Date || "").slice(0, 10))}，比法人資料（${esc(String(r.Inst_Date || "").slice(0, 10))}）舊`
+      : `法人資料只到 ${esc(String(r.Inst_Date || "").slice(0, 10))}，比行情資料舊`;
+    return `<div class="plan dim">籌碼：${note}，兩者不同日就不做籌碼判定。${esc(chipSummary(r))}</div>`;
   }
   const act = String(r.Chip_Action || "");
   const cls = act === "sell" ? "plan alert" : act === "add" ? "plan armed" : "plan";
@@ -1995,7 +2072,9 @@ function positionCard(pos, pinned) {
   const m = latestMark(pos.position_id);
   const plan = activePlan(pos);
   const horizon = pos.horizon_days || STRATEGY.horizon;
-  const inList = STATE.rows.some((r) => String(r.Stock_ID) === pos.stock_id);
+  const listed = STATE.rows.some((r) => String(r.Stock_ID) === pos.stock_id);
+  const tracked = !listed && STATE.tracked.some((r) => String(r.Stock_ID) === pos.stock_id);
+  const inList = listed || tracked;
 
   if (pos.needs_shares) {
     return `<article class="card pos state-attention pin">
@@ -2108,10 +2187,28 @@ function positionCard(pos, pinned) {
   // 10% under water read exactly like one 10% up. The prices that decide what
   // to do next belong in the sentence.
   const holdLine = plan
-    ? `建議：續抱。跌破 ${fmtPrice(plan.stop_orderable)} 先出場${
+    ? `建議（以你登錄的成交價 ${fmtPrice(plan.base)} 計算）：續抱。跌破 ${fmtPrice(plan.stop_orderable)} 先出場${
         plan.add_open ? `；分批買法可在 ${fmtPrice(plan.add_orderable)} 補另一半` : ""
       }；${plan.armed ? "鎖利已啟動" : `收盤站上 ${fmtPrice(tickRound(plan.arm, "up"))} 後，隔一個交易日起停損上調到 ${fmtPrice(tickRound(plan.lock, "down"))}`}。`
     : "建議：續抱，下一個交易日重新評估（收盤後更新）。";
+  // Everything above is computed from what YOU registered -- your fill price,
+  // your fill date -- and the market data is only used to say where the stock
+  // is relative to those levels (owner, 2026-09-21).
+  const mkt = rowFor(pos.stock_id);
+  const marketLine = !mkt ? "" : (() => {
+    // Prices in this app are integer cents; cents() is the only correct way in.
+    const ma5 = cents(mkt.MA5), close = cents(mkt.Close_Price);
+    const bits = [];
+    if (close !== null) bits.push(`收盤 ${fmtPrice(close)}（資料日 ${esc(String(mkt.Data_Date || "").slice(5, 10))}）`);
+    if (ma5 !== null && close !== null) {
+      bits.push(`5 日均價 ${fmtPrice(ma5)}，${close > ma5 ? "站上（到期可續抱）" : "跌破（到期就出場）"}`);
+    }
+    const inst = num(mkt.Inst_Net);
+    if (inst !== null) bits.push(`三大法人 ${fmtSigned(inst, 0)} 張`);
+    return bits.length
+      ? `<div class="plan dim">個股現況：${esc(bits.join(" · "))}</div>` : "";
+  })();
+
   const advice = dayIdx === null
     ? `<div class="plan">建議：無法計算持有天數，請確認成交日期。</div>`
     : dayIdx >= horizon
@@ -2124,10 +2221,17 @@ function positionCard(pos, pinned) {
       <span class="code">${esc(pos.stock_id)}</span>
       <span class="state-chip ${stateCls}">${esc(stateText)}</span>
     </div>
-    ${inList ? "" : `<div class="hint">已不在今日名單 · 追蹤與估值持續（報價來自 quotes.json）</div>`}
+    ${listed ? "" : (tracked
+        ? `<div class="hint">已不在今日名單，但仍在近期推薦追蹤中 · 法人、均線、出場計畫照常更新</div>`
+        : mkt
+          ? `<div class="hint">系統沒有推薦過這檔 · 仍從當日全市場掃描結果取得法人與均線資料</div>`
+          : STATE.universeState === "loading"
+            ? `<div class="hint">正在取得這檔的全市場資料…</div>`
+            : `<div class="hint">這檔不在當日掃描範圍內（成交值太小），只能用報價估值；停損與出場日仍照你登錄的成交價計算</div>`)}
     ${pl}
     <div class="kv2">${grid}</div>
     ${trail}
+    ${marketLine}
     ${advice}
     ${chipAdvice(pos.stock_id)}
     ${tomorrowOrders(pos, plan, dayIdx, horizon)}
@@ -2474,6 +2578,7 @@ function renderResearch() {
     ["明日委託", "收盤後就把隔天要掛的單算好：停利、選用的賣一半、鎖利啟動門檻、停損、選用的加碼。每個價位都已對齊台股升降單位，可以直接掛"],
     ["鎖利啟動", "要「收盤」站上成交價 +2.5%，而且是隔一個交易日才生效——因為你收盤後才看得到，隔天才下得了單"],
     ["續抱（到期不賣）", "第 10 天收盤若仍站上自己的 5 日均價就續抱，最晚第 20 天"],
+    ["後期收下獲利", "第 8 天起，收盤只要還高於成交價 +1%（扣掉費稅後仍為正）就隔日開盤出場。實測：期滿才出場的那一群平均 -6.9%，是整套規則唯一的虧損來源"],
     ["20日平均日振幅%", "20日平均 (最高-最低)/收盤，未含前收跳空，故不等於標準 ATR"],
     ["通道上緣接近", "壓縮區間且收盤接近前40日高的97%，不一定真的突破"],
     ["近3日均量/20日均量", "量能萎縮比，不是當日單日量縮"],
@@ -2776,7 +2881,7 @@ async function openCycleDetail(posId) {
 }
 
 function openDetail(stockId) {
-  const r = STATE.rows.find((x) => String(x.Stock_ID) === String(stockId));
+  const r = rowFor(stockId);
   if (!r) return;
   const sc = rankScore();
   const grp = (title, body) => `<div class="sec-title">${esc(title)}</div>${body}`;

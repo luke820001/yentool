@@ -93,10 +93,23 @@ def inst_pct(inst_net, vol_ma20):
 
 
 def chip_basis(inst_date, data_date):
+    """'current' | 'lag' | 'ahead' | ''.
+
+    Which side is behind matters and both happen. The institutional table can
+    lag the prices (a missed fetch), and the prices can lag the institutional
+    table -- TWSE's whole-market endpoint published 2026-09-18 on the evening
+    of 2026-09-21 while the T86 institutional table was already current. A
+    verdict needs a MATCHED pair either way, but saying "the chips are behind"
+    when it is the prices that are behind is simply wrong, and the phone shows
+    this string to the owner.
+    """
     d = str(inst_date or "")[:10]
-    if not d:
+    p = str(data_date or "")[:10]
+    if not d or not p:
         return ""
-    return "current" if d == str(data_date or "")[:10] else "lag"
+    if d == p:
+        return "current"
+    return "lag" if d < p else "ahead"
 
 
 def sell_signal(pct, streak, rule=None):

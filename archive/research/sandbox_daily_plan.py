@@ -154,8 +154,22 @@ def run_plan(t, plan, hold=HOLD):
     # Extra lock rungs: each (gain, lock) raises the stop again once the close
     # clears `gain`. The stop only ever ratchets UP.
     steps = sorted(plan.get("steps") or [])
+    # late_profit = (from_bar, min_gain): from that bar's close onward, if the
+    # position is at least `min_gain` above the fill, sell at the NEXT open.
+    # Aimed at the loss-making cell in the stability report: trades that reach
+    # the time exit without ever arming the lock average -6.9%.
+    late = plan.get("late_profit")
+    late_sell = False
+    # late_loss = (from_bar, max_gain): the control -- exit late trades that
+    # are NOT in profit, which is cutting losses on a clock instead of a price.
+    late_l = plan.get("late_loss")
+    late_loss_sell = False
 
     n = min(len(o), max(hold, cap))
+    # `last` must exist even when the very first bar closes the position (a
+    # +10% target can fill on bar 0); without this the function raised instead
+    # of returning. It never produced a wrong number -- only an exception.
+    last = 0
     for i in range(n):
         if not p.open:
             break
@@ -165,6 +179,9 @@ def run_plan(t, plan, hold=HOLD):
 
         # --- fills from orders resting since the previous close ---------
         # The open is the one moment whose timing is known.
+        if late_sell or late_loss_sell:
+            p.close_at(op, "late" if late_sell else "latecut", i)
+            break
         if tp_px is not None and op >= tp_px:
             p.close_at(op, "tp", i)
             break
@@ -205,6 +222,12 @@ def run_plan(t, plan, hold=HOLD):
                     want = E * (1 + lv)
                     stop_px = want if stop_px is None else max(stop_px, want)
                     armed = True
+
+        # Decided at this close, acted on at the next open.
+        if late and i + 1 >= late[0] and cl >= E * (1 + late[1]):
+            late_sell = True
+        if late_l and i + 1 >= late_l[0] and cl < E * (1 + late_l[1]):
+            late_loss_sell = True
 
         last = i
         if i >= hold - 1:

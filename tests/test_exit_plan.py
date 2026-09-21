@@ -129,10 +129,62 @@ class Replay(unittest.TestCase):
             self.assertAlmostEqual(ret, p["ret_pct"])
 
     def test_simulate_exit_time_exit_unchanged(self):
-        o, h, l, c = bars(*[(100, 101, 99, 100 + i * 0.1) for i in range(10)])
+        # Drifting DOWN: never arms, never in profit late, so the hold runs to
+        # the time exit. (A fixture that drifts up now books a "late" exit --
+        # see LateProfit below, which is the rule working, not a regression.)
+        o, h, l, c = bars(*[(100, 101, 99, 100 - i * 0.1) for i in range(10)])
         entry, ret, reason = simulate_exit(o, h, l, c)
         self.assertEqual(reason, "time")
         self.assertAlmostEqual(ret, (c[9] / 100.0 - 1) * 100)
+
+
+class LateProfit(unittest.TestCase):
+    """From DEFAULT_RULE['late_from'] onward, a close at or above the fill
+    sells at the NEXT open instead of carrying the profit into the last day.
+    Adopted 2026-09-21: the time exit was closing 28% of trades at -6.9%."""
+
+    LATE = DEFAULT_RULE["late_from"]
+    # a close that counts as a real profit after costs
+    IN_PROFIT = round(100.0 * (1 + DEFAULT_RULE["late_gain"]) + 0.5, 2)
+
+    def test_in_profit_late_sells_at_the_next_open(self):
+        # flat at the fill until day 8 closes a shade above it
+        rows = [(100, 101, 99, 99.5)] * (self.LATE - 1) +                [(100, 102, 99, self.IN_PROFIT), (101, 102, 100, 101)]
+        o, h, l, c = bars(*rows)
+        p = replay_exit(o, h, l, c, hold_bars=DEFAULT_RULE["hold_bars"])
+        self.assertEqual(p["reason"], "late")
+        self.assertEqual(p["bar"], self.LATE)          # the NEXT bar
+        self.assertAlmostEqual(p["exit_price"], 101.0)  # its OPEN
+
+    def test_a_losing_position_is_left_alone(self):
+        rows = [(100, 101, 99, 99.0)] * 10
+        o, h, l, c = bars(*rows)
+        p = replay_exit(o, h, l, c, hold_bars=DEFAULT_RULE["hold_bars"])
+        self.assertEqual(p["reason"], "time")
+
+    def test_an_early_profit_does_not_trigger_it(self):
+        rows = [(100, 102, 99, self.IN_PROFIT)] * 3 + [(100, 101, 99, 99.0)] * 7
+        o, h, l, c = bars(*rows)
+        p = replay_exit(o, h, l, c, hold_bars=DEFAULT_RULE["hold_bars"])
+        self.assertNotEqual(p["reason"], "late")
+
+    def test_an_open_position_reports_that_it_is_due(self):
+        rows = [(100, 101, 99, 99.5)] * (self.LATE - 1) +                [(100, 102, 99, self.IN_PROFIT)]
+        o, h, l, c = bars(*rows)
+        p = replay_exit(o, h, l, c, hold_bars=None)
+        self.assertFalse(p["exited"])
+        self.assertTrue(p["late_due"])
+
+    def test_the_stop_still_wins_on_the_same_bar(self):
+        """The overnight late order is a market sell at the open, but a bar
+        that GAPS below the stop is a stop at the open, not a late exit -- the
+        stop is the price you would actually get."""
+        rows = [(100, 101, 99, 99.5)] * (self.LATE - 1) +                [(100, 102, 99, self.IN_PROFIT),
+                (STOP - 2, STOP - 1, STOP - 3, STOP - 2)]
+        o, h, l, c = bars(*rows)
+        p = replay_exit(o, h, l, c, hold_bars=DEFAULT_RULE["hold_bars"])
+        self.assertEqual(p["reason"], "late")
+        self.assertAlmostEqual(p["exit_price"], STOP - 2)
 
 
 class TrackerColumns(unittest.TestCase):
@@ -193,9 +245,14 @@ class TrackerColumns(unittest.TestCase):
         self.assertIn("sell if it trades below %s" % STOP, by.loc["1111", "Exit_Note"])
 
     def test_armed_row_shows_raised_stop(self):
-        rows = [(100, 101, 99, 100), (100, 101, 99, 100),
-                (103, ARM + 2, 102.5, ARM)] + [(ARM, ARM + 1, LOCK + 0.5, ARM)] * 7
-        out = self._run({"3333": rows}, {"3333": ["2026-09-01"]})
+        # anchored late in the calendar so the position is only a few days old:
+        # past day 8 an armed position is in profit, and the late profit-take
+        # (correctly) sells it at the next open instead.
+        # Anchored at CAL[5] so the fill is CAL[6] and today is only day 4:
+        # past day 8 an armed position is in profit and the late profit-take
+        # (correctly) sells it at the next open instead of just showing a stop.
+        rows = [(100, 101, 99, 100)] * 6 +                [(100, ARM + 2, 99.5, ARM)] + [(ARM, ARM + 1, LOCK + 0.5, ARM)] * 3
+        out = self._run({"3333": rows}, {"3333": [self.CAL[5]]})
         r = out.iloc[0]
         self.assertTrue(r["Plan_Armed"])
         self.assertAlmostEqual(r["Plan_Stop"], LOCK)

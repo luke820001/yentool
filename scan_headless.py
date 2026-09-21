@@ -123,8 +123,35 @@ def build_market_reports(df):
 def run_scan(scan_mode="mode_prelaunch"):
     print("=== headless scan: {} ===".format(scan_mode))
 
+    # Keep the WHOLE market's daily bar current, not just the shortlist. One
+    # extra request per exchange; without it, any stock outside the turnover
+    # pool slowly goes stale and nothing can be computed for a position in it.
+    try:
+        from config.settings import PRICE_VOLUME_FILE as _PV
+        from scanner.market_snapshot import refresh_market
+        refresh_market(_PV)
+    except Exception as e:
+        print("  [snapshot] skipped: {}".format(str(e)[:100]))
+
     prior_ids = load_held_ids(scan_mode)
-    candidates = get_candidate_list(scan_mode=scan_mode, include_ids=prior_ids)
+    # Force-include everything the ledger picked recently, not just the names
+    # hysteresis is still holding. A stock the owner bought four days ago can
+    # have left the top 80 AND the top-300 turnover pool, and then nothing --
+    # not its chips, not its moving averages, not its exit plan -- would be
+    # computed for it. See scanner/tracked_rows.py.
+    tracked_ids = set()
+    try:
+        from scanner.tracked_rows import recent_pick_ids
+        from config.settings import PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE
+        tracked_ids = recent_pick_ids(PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE,
+                                      scan_mode)
+        if tracked_ids:
+            print("  [tracked] carrying {} recently recommended name(s) "
+                  "through the scan".format(len(tracked_ids)))
+    except Exception as e:
+        print("  [tracked] id lookup skipped: {}".format(e))
+    candidates = get_candidate_list(
+        scan_mode=scan_mode, include_ids=set(prior_ids) | tracked_ids)
     if candidates is None or candidates.empty:
         print("ERROR: could not fetch market data (empty candidate list).")
         return None
@@ -143,8 +170,8 @@ def run_scan(scan_mode="mode_prelaunch"):
             health.get("tse_rows"), health.get("otc_rows"))
         print("  [guard] {} -> held_ids/ledger NOT updated".format(degraded))
 
-    result_df = verify_candidates(candidates, progress_callback=_progress)
-    result_df = apply_scan_mode(result_df, scan_mode)
+    verified = verify_candidates(candidates, progress_callback=_progress)
+    result_df = apply_scan_mode(verified, scan_mode)
     result_df = sort_for_mode(result_df, scan_mode)
     result_df, held_ids = select_with_hysteresis(result_df, prior_ids)
     if degraded is None:
@@ -191,6 +218,19 @@ def run_scan(scan_mode="mode_prelaunch"):
                 {k: int(v) for k, v in acts.items() if k}))
     except Exception as e:
         print("  [chips] skipped: {}".format(e))
+
+    # Full rows for names that dropped off the list but could still be held.
+    tracked_df = None
+    try:
+        from scanner.tracked_rows import annotate_tracked, split_tracked
+        tracked_df = split_tracked(verified, result_df, tracked_ids)
+        if tracked_df is not None and not tracked_df.empty:
+            tracked_df = annotate_tracked(tracked_df, scan_mode,
+                                          session_date=session_date)
+            print("  [tracked] published full data for {} dropped-out "
+                  "name(s)".format(len(tracked_df)))
+    except Exception as e:
+        print("  [tracked] skipped: {}".format(e))
 
     # Freeze the first-day recommendation for anything that qualified today,
     # and hang the frozen price off every row we already have one for. After
@@ -273,6 +313,27 @@ def run_scan(scan_mode="mode_prelaunch"):
     except Exception as e:
         print("  [data] post-top-up purge skipped: {}".format(str(e)[:80]))
 
+    # Compact data for the WHOLE market, so a holding the scanner never
+    # recommended still has moving averages, levels and chips to show. Its own
+    # file: the phone fetches it only when one of its positions is missing
+    # from the list. See scanner/universe_export.py.
+    try:
+        import json as _json
+        from config.settings import (MOBILE_UNIVERSE_FILE, PRICE_VOLUME_FILE,
+                                     STOCK_NAMES_FILE)
+        from scanner.universe_export import export as export_universe
+        from ingestion.inst_trades import get_inst_features
+        try:
+            _names = _json.load(open(STOCK_NAMES_FILE, encoding="utf-8"))
+        except Exception:
+            _names = {}
+        _built = export_universe(MOBILE_UNIVERSE_FILE, PRICE_VOLUME_FILE,
+                                 names=_names, inst=None,
+                                 session_date=session_date, scan_mode=scan_mode)
+        print("  [universe] {} stock(s) published for holdings lookup".format(_built))
+    except Exception as e:
+        print("  [universe] skipped: {}".format(e))
+
     # Publish FIRST, summarise second (F24). The AI call used to run before the
     # export, so a hung Gemini request delayed -- and an unconverted
     # requests.Timeout could skip past -- the market data and the user's own
@@ -287,7 +348,8 @@ def run_scan(scan_mode="mode_prelaunch"):
         path = export_scan_result(result_df, scan_mode, degraded=degraded,
                                   session_date=session_date,
                                   strategy_version=STRATEGY_VERSION,
-                                  quality=data_health, quotes_meta=quotes_meta)
+                                  quality=data_health, quotes_meta=quotes_meta,
+                                  tracked=tracked_df)
         print("  [export] scan result -> {}".format(path))
     except Exception as e:
         print("  [export] failed: {}".format(e))
@@ -302,7 +364,8 @@ def run_scan(scan_mode="mode_prelaunch"):
             export_scan_result(result_df, scan_mode, reports=reports,
                                degraded=degraded, session_date=session_date,
                                strategy_version=STRATEGY_VERSION,
-                               quality=data_health, quotes_meta=quotes_meta)
+                               quality=data_health, quotes_meta=quotes_meta,
+                               tracked=tracked_df)
             print("  [ai] {} report(s) attached".format(len(reports)))
         except Exception as e:
             print("  [ai] attach failed, prices already published: {}".format(e))

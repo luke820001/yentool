@@ -32,3 +32,4 @@ archive/legacy/*.xlsx
 # published to the phone. Fetch a real one for local work -- see mobile/README.
 mobile/scan_result.json
 mobile/quotes.json
+mobile/universe.json

@@ -31,7 +31,7 @@ from config.settings import (
 
 def export_scan_result(df, scan_mode="", reports=None, degraded=None,
                        session_date=None, strategy_version="",
-                       quality=None, quotes_meta=None):
+                       quality=None, quotes_meta=None, tracked=None):
     """
     Write the full result DataFrame (all computed columns) to SCAN_RESULT_FILE,
     overwriting any previous version. Two context columns (mode + timestamp) are
@@ -62,7 +62,8 @@ def export_scan_result(df, scan_mode="", reports=None, degraded=None,
         export_scan_result_json(df, scan_mode, scan_time, reports=reports,
                                 degraded=degraded, session_date=session_date,
                                 strategy_version=strategy_version,
-                                quality=quality, quotes_meta=quotes_meta)
+                                quality=quality, quotes_meta=quotes_meta,
+                                tracked=tracked)
     except Exception as e:
         # A mobile-feed hiccup must never break the primary CSV export.
         print("  [export] mobile json failed: {}".format(e))
@@ -128,7 +129,7 @@ def _publish_quotes(df, names=None):
 def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
                             degraded=None, session_date=None,
                             strategy_version="", quality=None,
-                            quotes_meta=None):
+                            quotes_meta=None, tracked=None):
     """
     Write the scan result as JSON for the mobile PWA. Structure:
         {"meta": {...}, "rows": [...]}
@@ -140,6 +141,12 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
     `quotes_meta` is an optional dict merged into meta.quotes -- e.g.
     {"source_ended": {stock_id: last_bar_date}} from the pre-export top-up, so
     the column check can tell a halted name from an un-refreshed one.
+    `tracked` is an optional DataFrame of FULL rows for names that dropped off
+    the list but were picked recently, published under "tracked" so a holder
+    of one keeps its chips, moving averages and exit plan (owner, 2026-09-21:
+    "if I already hold something, it should still give me advice on it"). The
+    scanner never learns what is actually held -- it publishes the superset and
+    the phone matches its own private holdings against it.
     NaN/inf are coerced to null so the JSON is valid. Returns the written path.
     """
     MOBILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -209,6 +216,15 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
         },
         "rows": rows,
     }
+    if tracked is not None and not tracked.empty:
+        t = tracked.replace([float("inf"), float("-inf")], pd.NA)
+        payload["tracked"] = json.loads(
+            t.to_json(orient="records", force_ascii=False))
+        payload["meta"]["tracked"] = {
+            "count": int(len(tracked)),
+            "note": "recently recommended names no longer on the list; "
+                    "full data so a holder keeps its chips and exit plan",
+        }
     if quotes_meta:
         payload["meta"]["quotes"].update(quotes_meta)
     with open(MOBILE_DATA_FILE, "w", encoding="utf-8") as f:

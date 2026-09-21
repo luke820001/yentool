@@ -44,10 +44,10 @@ HISTORY_KEEP = 60
 MARKETS = ("TSE", "OTC")
 HOLD_STATUSES = ("", "pending", "holding", "exit_today", "overdue", "delay")
 BUY_BLOCKS = ("", "regime", "held", "unknown", "quality", "market", "rank",
-              "integrity", "stale", "no_rule")
+              "integrity", "stale", "no_rule", "dropped")
 REC_STATUSES = ("active", "expired", "converted", "cancelled", "closed")
-EXIT_SIGNALS = ("", "stop", "lock", "tp", "time")
-CHIP_BASES = ("", "current", "lag")
+EXIT_SIGNALS = ("", "stop", "lock", "tp", "late", "time")
+CHIP_BASES = ("", "current", "lag", "ahead")
 CHIP_ACTIONS = ("", "sell", "add", "hold")
 
 # Columns whose value is a price the owner is meant to place as an order, so

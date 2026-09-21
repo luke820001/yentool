@@ -61,7 +61,41 @@ DEFAULT_RULE = {
     "arm_pct": 0.025,     # CLOSE at or above this arms the trailing lock
     "lock_pct": 0.02,     # where the stop moves once armed (from the next bar)
     "hold_bars": 10,      # time exit
+    # Late profit-taking (2026-09-21, archive/research/sandbox_stability.py).
+    # From this trading day onward, a CLOSE at or above entry * (1 + late_gain)
+    # sells at the NEXT open instead of waiting for the time exit.
+    "late_from": 8,
+    "late_gain": 0.01,
 }
+
+# WHY LATE PROFIT-TAKING EXISTS. Breaking the adopted rule down by exit reason
+# showed where the money actually goes: on the recent three years the lock
+# closed 45% of trades at +1.2% on average, the target 22% at +20.6%, the
+# disaster stop 6% at -20.5% -- and the TIME EXIT closed 28% at -6.9%. Nearly
+# all of the loss sat in positions that reached day 10 without ever closing
+# 2.5% above the fill.
+#
+# Taking any profit that still exists late in the hold, rather than carrying it
+# into the last day, lifts the recent win rate 69.1 -> 71.7% and the older
+# window 67.6 -> 69.5%, with the mean unchanged (+2.00 -> +1.95 recent, +1.91
+# -> +2.04 older), both halves of both windows up, 25 of 25 quarters at least
+# as good, and it survives a 0.5% worse fill on every exit (70.8 / 68.6).
+#
+# The surface is flat rather than peaked: every day from 4 to 9 and every
+# threshold from 0 to +1% improves both windows. The CONTROL is what makes the
+# mechanism clear -- cutting late trades that are NOT in profit, which shortens
+# the hold by the same amount, destroys the win rate (-13.6pp). It is the
+# taking of profit that works, not the shorter hold.
+#
+# WHY THE THRESHOLD IS +1% AND NOT ZERO. A threshold of 0 scored 0.9pp higher
+# on the recent window, and that 0.9pp is nine trades: exactly nine of 556
+# differ between the two settings, and 0 happened to win six of them. Nine
+# trades is a coin flip, the same shape as the ATR threshold that was rejected
+# the same day. So the choice was made on meaning instead: a position closing
+# AT the fill is not in profit -- the 0.585% round trip makes it a small loss --
+# so there is nothing to take. +1% is the nearest level that is a real gain
+# after costs, and it sits inside the tested plateau (25 of 25 quarters, and
+# 70.2% / 69.0% under a 0.5% worse fill).
 
 
 def simulate_exit(opens, highs, lows, closes, hold_bars=..., stop_pct=...,
@@ -93,7 +127,8 @@ def simulate_exit(opens, highs, lows, closes, hold_bars=..., stop_pct=...,
 
 
 def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
-                stop_pct=..., tp_pct=..., arm_pct=..., lock_pct=...):
+                stop_pct=..., tp_pct=..., arm_pct=..., lock_pct=...,
+                late_from=..., late_gain=...):
     """Replay the exit stack bar by bar and report WHERE the trade stands.
 
     This is simulate_exit with the outcome kept, so the live scan can tell a
@@ -106,7 +141,9 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
 
     Returns a dict:
       entry       fill (first open) or None
-      reason      '' still open | 'stop' | 'lock' | 'tp' | 'time' | 'na'
+      reason      '' still open | 'stop' | 'lock' | 'tp' | 'late' | 'time'
+                  | 'na'  ('late' = a profit taken at the open after a late
+                  in-profit close; see the block comment on DEFAULT_RULE)
       exited      reason is a booked exit
       bar         index of the exit bar (None while open)
       date        dates[bar] when `dates` is given
@@ -116,18 +153,23 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
       stop        the stop carried out of the last bar (lock when armed) --
                   i.e. the level to place for the NEXT session
       arm_px, lock_px, target   the rule's levels off the fill
+      late_due    True when the last close triggered the late profit-take, so
+                  the caller can say "sell at tomorrow's open"
     """
     rule = DEFAULT_RULE
     stop_pct = rule["stop_pct"] if stop_pct is ... else stop_pct
     tp_pct = rule["tp_pct"] if tp_pct is ... else tp_pct
     arm_pct = rule["arm_pct"] if arm_pct is ... else arm_pct
     lock_pct = rule["lock_pct"] if lock_pct is ... else lock_pct
+    late_from = rule["late_from"] if late_from is ... else late_from
+    late_gain = rule["late_gain"] if late_gain is ... else late_gain
     if lock_pct is None:
         lock_pct = rule["lock_pct"]
 
     out = {"entry": None, "reason": "na", "exited": False, "bar": None,
            "date": None, "exit_price": None, "ret_pct": None, "armed": False,
-           "stop": None, "arm_px": None, "lock_px": None, "target": None}
+           "stop": None, "arm_px": None, "lock_px": None, "target": None,
+           "late_due": False, "late_px": None}
     n = len(opens) if hold_bars is None else min(hold_bars, len(opens))
     if n <= 0:
         return out
@@ -143,14 +185,16 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
     arm_px = entry * (1 + arm_pct) if arm_pct is not None else None
     lock_px = entry * (1 + lock_pct)
     armed = False
+    late_px = entry * (1 + late_gain) if late_from else None
+    late_due = False
     out.update(entry=entry, reason="", arm_px=arm_px, lock_px=lock_px,
-               target=target, stop=stop_px)
+               target=target, stop=stop_px, late_px=late_px)
 
     def booked(i, price, reason):
         out.update(reason=reason, exited=True, bar=i,
                    date=(dates[i] if dates is not None and i < len(dates) else None),
                    exit_price=price, ret_pct=(price / entry - 1.0) * 100,
-                   armed=armed, stop=stop_px)
+                   armed=armed, stop=stop_px, late_due=False)
         return out
 
     for i in range(n):
@@ -164,6 +208,11 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
         # rather than silently pretending the position could not be closed.
         if op != op or hi != hi or lo != lo:
             continue
+
+        # 0. an order left overnight by last night's late profit-take. It
+        # is a market sell at the open, so it fills before anything else.
+        if late_due:
+            return booked(i, op, "late")
 
         # 1. the open, against the stop carried IN to this bar
         if target is not None and op >= target:
@@ -185,7 +234,13 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
             armed = True
             stop_px = lock_px if stop_px is None else max(stop_px, lock_px)
 
-    out.update(armed=armed, stop=stop_px)
+        # 4. late profit-taking, also decided at the close and acted on at the
+        # next open. i is 0-based, so bar i is trading day i + 1.
+        if (late_from and late_px is not None and cl == cl
+                and (i + 1) >= late_from and cl >= late_px):
+            late_due = True
+
+    out.update(armed=armed, stop=stop_px, late_due=late_due)
     if hold_bars is not None:
         try:
             final = float(closes[hold_bars - 1])

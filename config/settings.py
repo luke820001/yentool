@@ -51,6 +51,15 @@ MOBILE_DATA_FILE = MOBILE_DIR / "scan_result.json"
 # scan result so a holding that drops off the shortlist keeps being priced
 # (F04). See scanner/quote_feed.py.
 MOBILE_QUOTES_FILE = MOBILE_DIR / "quotes.json"
+# Compact per-stock data for EVERY name the scan looked at, not just the ones
+# it selected. A separate file because most sessions never need it: the phone
+# fetches it only when a registered holding is not in the list (owner,
+# 2026-09-21: "even for a stock the system never recommended, give me advice
+# on what I bought"). ~210 KB for ~300 names.
+MOBILE_UNIVERSE_FILE = MOBILE_DIR / "universe.json"
+# Stock id -> [name, market], maintained by the scan and committed back so a
+# cold cloud run still has names.
+STOCK_NAMES_FILE = DATA_DIR / "stock_names.json"
 
 # --- Rolling Window ---
 # ~400 calendar days => ~270 trading bars. Required so the 52-week-high

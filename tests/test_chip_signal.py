@@ -98,3 +98,29 @@ class Verdict(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BasisDirection(unittest.TestCase):
+    """Which feed is behind matters, and both directions happen: the
+    institutional table can lag the prices, and TWSE's whole-market endpoint
+    can publish a session later than the institutional table."""
+
+    def test_chips_behind_prices(self):
+        self.assertEqual(cs.chip_basis("2026-09-18", "2026-09-21"), "lag")
+
+    def test_prices_behind_chips(self):
+        self.assertEqual(cs.chip_basis("2026-09-21", "2026-09-18"), "ahead")
+
+    def test_matched(self):
+        self.assertEqual(cs.chip_basis("2026-09-21", "2026-09-21"), "current")
+
+    def test_unknown(self):
+        self.assertEqual(cs.chip_basis(None, "2026-09-21"), "")
+        self.assertEqual(cs.chip_basis("2026-09-21", None), "")
+
+    def test_neither_direction_produces_a_verdict(self):
+        for inst, data in (("2026-09-18", "2026-09-21"), ("2026-09-21", "2026-09-18")):
+            with mock.patch.object(cs, "CHIP_RULES", ENABLED):
+                out = cs.annotate_chip_action(frame(Inst_Date=inst, Data_Date=data),
+                                              "mode_prelaunch")
+            self.assertEqual(out["Chip_Action"].iloc[0], "", "%s/%s" % (inst, data))

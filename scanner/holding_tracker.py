@@ -47,6 +47,7 @@ import sqlite3
 import pandas as pd
 
 from config.settings import PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE
+from scanner.exit_rules import DEFAULT_RULE as _RULE
 from scanner.scan_mode import (
     PRELAUNCH_ADD_PCT as ADD_PCT,
     PRELAUNCH_SCALE_OUT_PCT as SCALE_OUT_PCT,
@@ -56,6 +57,10 @@ from scanner.scan_mode import (
     PRELAUNCH_TRAIL_LOCK as TRAIL_LOCK,
 )
 from scanner.tick import round_to_tick
+
+# Late profit-taking, shared with the shared exit stack (see exit_rules).
+LATE_FROM = _RULE["late_from"]
+LATE_GAIN = _RULE["late_gain"]
 
 
 def _num(v):
@@ -438,7 +443,8 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
         plan = replay_exit([b[1] for b in bars], [b[2] for b in bars],
                            [b[3] for b in bars], [b[4] for b in bars],
                            dates=dates, hold_bars=None, stop_pct=STOP_PCT,
-                           tp_pct=TP_PCT, arm_pct=TRAIL_ARM, lock_pct=TRAIL_LOCK)
+                           tp_pct=TP_PCT, arm_pct=TRAIL_ARM, lock_pct=TRAIL_LOCK,
+                           late_from=LATE_FROM, late_gain=LATE_GAIN)
         add_hit.append(_add_hit_date(bars, add_px, plan, tdate
                                      if status in ("exit_today", "overdue") else None))
         armed = bool(plan.get("armed"))
@@ -472,6 +478,12 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
             continue
 
         sig.append(""); sig_date.append(""); sig_price.append(None)
+        if plan.get("late_due"):
+            # Decided by tonight's close, acted on at tomorrow's open.
+            note.append("in profit on day {}+: sell at the next open "
+                        "(close {} at or above the fill {:.2f})".format(
+                            LATE_FROM, bars[-1][4], fill))
+            continue
         if armed:
             note.append("lock armed: sell if it trades below {} "
                         "(fill {:.2f} x {:.2f})".format(stop, fill, 1 + TRAIL_LOCK))
