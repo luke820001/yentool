@@ -211,3 +211,119 @@ def refresh_market(price_db, log=print):
     log("  [snapshot] stored {} whole-market bars (TSE {} / OTC {})".format(
         n, health["TSE"], health["OTC"]))
     return n, health
+
+
+# ---------------------------------------------------------------- backfill
+# Storing the whole market gives every instrument TODAY's bar, and nothing
+# else. A holding card needs averages, so a stock with one bar is a stock the
+# owner still gets no advice on -- and waiting for three months of snapshots to
+# accumulate is not an answer.
+#
+# So each scan also fetches history for a slice of the names that lack it,
+# liquid ones first, because those are the ones somebody might actually hold.
+# At this size the whole market is covered within a few days without ever
+# asking the feed for thousands of stocks at once.
+BACKFILL_PER_SCAN = 150
+BACKFILL_MIN_BARS = 60
+
+
+# Some instruments simply cannot be filled -- bond ETFs and A-suffix codes the
+# batch feed does not carry. Without a memory of that, every scan would spend
+# its whole backfill budget retrying the same names forever, and the ones that
+# CAN be filled would never come up. Three failures buys a month off.
+BACKFILL_MAX_TRIES = 3
+BACKFILL_RETRY_DAYS = 30
+
+
+def _ensure_attempts(conn):
+    conn.execute("CREATE TABLE IF NOT EXISTS backfill_attempts ("
+                 "stock_id TEXT PRIMARY KEY, tries INTEGER, last TEXT)")
+
+
+def _give_up_ids(conn):
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=BACKFILL_RETRY_DAYS)).isoformat()
+    _ensure_attempts(conn)
+    return {str(r[0]) for r in conn.execute(
+        "SELECT stock_id FROM backfill_attempts WHERE tries >= ? AND last >= ?",
+        (BACKFILL_MAX_TRIES, cutoff))}
+
+
+def _record_attempts(price_db, asked, filled):
+    from datetime import date
+    today = date.today().isoformat()
+    conn = sqlite3.connect(str(price_db), timeout=60)
+    try:
+        _ensure_attempts(conn)
+        for sid in asked:
+            if sid in filled:
+                conn.execute("DELETE FROM backfill_attempts WHERE stock_id = ?",
+                             (sid,))
+            else:
+                conn.execute(
+                    "INSERT INTO backfill_attempts (stock_id, tries, last) "
+                    "VALUES (?, 1, ?) ON CONFLICT(stock_id) DO UPDATE SET "
+                    "tries = tries + 1, last = excluded.last", (sid, today))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
+def stocks_needing_history(price_db, min_bars=BACKFILL_MIN_BARS,
+                           limit=BACKFILL_PER_SCAN):
+    """{stock_id: market} for the most liquid names with too little history,
+    skipping the ones repeated attempts have shown cannot be filled."""
+    conn = sqlite3.connect(str(price_db), timeout=60)
+    try:
+        skip = _give_up_ids(conn)
+        latest = conn.execute("SELECT MAX(date) FROM data").fetchone()[0]
+        if not latest:
+            return {}
+        rows = conn.execute(
+            "SELECT d.stock_id, COUNT(*) AS n, "
+            "  MAX(CASE WHEN d.date = ? THEN d.close * d.Volume_Lot END) AS turn "
+            "FROM data d GROUP BY d.stock_id HAVING n < ? "
+            "ORDER BY turn DESC NULLS LAST LIMIT ?",
+            (latest, int(min_bars), int(limit) * 4)).fetchall()
+    except sqlite3.OperationalError:
+        # Older SQLite without NULLS LAST
+        rows = conn.execute(
+            "SELECT stock_id, COUNT(*) AS n FROM data GROUP BY stock_id "
+            "HAVING n < ? LIMIT ?", (int(min_bars), int(limit) * 4)).fetchall()
+        rows = [(r[0], r[1], None) for r in rows]
+    finally:
+        conn.close()
+    out = {}
+    for r in rows:
+        sid = str(r[0])
+        if sid in skip:
+            continue
+        # 00-prefixed instruments list on the TSE side of the fetchers.
+        out[sid] = "TSE" if sid.startswith("00") else None
+        if len(out) >= limit:
+            break
+    return out
+
+
+def backfill_history(price_db, limit=BACKFILL_PER_SCAN, log=print):
+    """Fetch history for a slice of the under-covered names. Returns how many
+    were filled. Never raises: this is a completeness improvement, not a
+    precondition for the scan."""
+    try:
+        want = stocks_needing_history(price_db, limit=limit)
+        if not want:
+            return 0
+        from ingestion.price_volume_multi import (multi_fetch_and_save_batch,
+                                                  resolve_market)
+        id_to_market = {sid: (mkt or resolve_market(sid) or "TSE")
+                        for sid, mkt in want.items()}
+        got = multi_fetch_and_save_batch(list(want), id_to_market)
+        _record_attempts(price_db, list(want), set(got))
+        log("  [backfill] filled history for {} of {} under-covered name(s)"
+            .format(len(got), len(want)))
+        return len(got)
+    except Exception as e:
+        log("  [backfill] skipped: {}".format(str(e)[:100]))
+        return 0

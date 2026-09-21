@@ -224,3 +224,69 @@ class MarketSnapshotParsing(unittest.TestCase):
         self.assertAlmostEqual(r["open"], 121.0)
         self.assertAlmostEqual(r["high"], 121.0)
         self.assertAlmostEqual(r["low"], 121.0)
+
+
+class BackfillBudget(unittest.TestCase):
+    """The whole-market snapshot gives every instrument one bar. History for
+    the rest is filled a slice at a time, and names that cannot be fetched at
+    all must not eat the budget on every scan forever."""
+
+    def _db(self, path, rows):
+        import sqlite3
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("CREATE TABLE data (date TEXT, stock_id TEXT, "
+                         "close REAL, Volume_Lot REAL)")
+            # Dates must be REAL and must END on the same day for every
+            # stock, because the ranking reads turnover on the newest date.
+            import datetime
+            end = datetime.date(2026, 9, 21)
+            for sid, n, turn in rows:
+                for i in range(n):
+                    d = end - datetime.timedelta(days=n - 1 - i)
+                    conn.execute("INSERT INTO data VALUES (?,?,?,?)",
+                                 (d.isoformat(), sid, turn, 1.0))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_picks_the_most_liquid_under_covered_names(self):
+        import tempfile
+        from pathlib import Path
+        from scanner.market_snapshot import stocks_needing_history
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "pv.db")
+            self._db(db, [("1111", 1, 500.0), ("2222", 1, 10.0),
+                          ("3333", 70, 100.0)])
+            got = stocks_needing_history(db, min_bars=60, limit=1)
+            self.assertEqual(list(got), ["1111"])   # liquid one first
+            got = stocks_needing_history(db, min_bars=60, limit=5)
+            self.assertNotIn("3333", got)          # already has history
+
+    def test_a_name_that_keeps_failing_is_skipped(self):
+        import tempfile
+        from pathlib import Path
+        from scanner.market_snapshot import (_record_attempts,
+                                             stocks_needing_history)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "pv.db")
+            self._db(db, [("1111", 1, 500.0), ("2222", 1, 10.0)])
+            for _ in range(3):
+                _record_attempts(db, ["1111"], set())
+            got = stocks_needing_history(db, min_bars=60, limit=5)
+            self.assertNotIn("1111", got)
+            self.assertIn("2222", got)
+
+    def test_a_success_clears_the_record(self):
+        import tempfile
+        from pathlib import Path
+        from scanner.market_snapshot import (_record_attempts,
+                                             stocks_needing_history)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "pv.db")
+            self._db(db, [("1111", 1, 500.0)])
+            for _ in range(3):
+                _record_attempts(db, ["1111"], set())
+            self.assertNotIn("1111", stocks_needing_history(db, min_bars=60))
+            _record_attempts(db, ["1111"], {"1111"})
+            self.assertIn("1111", stocks_needing_history(db, min_bars=60))

@@ -128,8 +128,15 @@ def run_scan(scan_mode="mode_prelaunch"):
     # pool slowly goes stale and nothing can be computed for a position in it.
     try:
         from config.settings import PRICE_VOLUME_FILE as _PV
-        from scanner.market_snapshot import refresh_market
+        from scanner.market_snapshot import backfill_history, refresh_market
         refresh_market(_PV)
+        # The snapshot gives every instrument TODAY's bar and nothing else, so
+        # a holding in one still has no averages. Fill history for a slice of
+        # the under-covered names each scan, liquid ones first; the whole
+        # market is covered within days rather than after three months of
+        # snapshots. Names that repeatedly cannot be fetched are remembered
+        # and skipped so the budget goes to the ones that can.
+        backfill_history(_PV)
     except Exception as e:
         print("  [snapshot] skipped: {}".format(str(e)[:100]))
 
