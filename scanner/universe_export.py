@@ -34,6 +34,22 @@ import pandas as pd
 MIN_BARS = 1
 RECENT_BARS = 70       # how much history to read per stock
 
+# An average is only published when the rows behind it are CONSECUTIVE market
+# sessions. Found 2026-09-21 by audit, and it was live: price_volume.db held
+# ~2,160 stocks a day through 09-09, then only the ~320-name shortlist for
+# 09-10..09-17, then the whole market again from 09-18 when snapshot storage
+# began. For 2330 the stored series reads 09-18, 09-09, 09-08, 09-07, 09-04 --
+# so a "5-day mean" was a 5-ROW mean spanning 15 calendar days across an
+# 8-session hole, and Ret_5D_Pct compared today against 09-03. The phone
+# renders that straight into "above / below the 5-day mean (keep riding or
+# exit at expiry)", which is a trading decision.
+#
+# `Bars` counts rows and cannot reveal the hole, so each record now also
+# carries `Sessions_Span` and `Gap_Sessions`, and any figure that would cross
+# a gap publishes as null instead of as a wrong number. The incremental
+# backfill (market_snapshot.backfill_history) closes the holes over the
+# following scans, and each figure reappears as soon as it is honest.
+
 
 def _load(price_db, min_bars=MIN_BARS, limit_bars=RECENT_BARS):
     """The last `limit_bars` bars of every stock with at least `min_bars`."""
@@ -70,32 +86,55 @@ def build(price_db, names=None, inst=None, min_bars=MIN_BARS):
         return {}
     names = names or {}
     inst = inst or {}
+    # The market's session calendar over the window, so a per-stock gap can be
+    # told apart from a day the market did not open.
+    sessions = sorted({str(d) for d in df["date"]})
+    slot = {d: i for i, d in enumerate(sessions)}
     out = {}
     for sid, g in df.groupby("stock_id", sort=False):
-        c = g["close"].dropna()
+        # Rows without a close cannot take part in any figure here, so they
+        # leave before anything is indexed -- otherwise `c` and the session
+        # positions below would line up differently and `unbroken` would be
+        # answering about the wrong rows.
+        g = g[g["close"].notna()].reset_index(drop=True)
+        c = g["close"]
         if len(c) < min_bars:
             continue
         # Below this there is a price and a date and nothing else; the record
         # says so via "Bars" and every average stays null.
-        g = g.reset_index(drop=True)
         close = float(c.iloc[-1])
         if not close > 0:
             continue
+        # Where this stock's rows sit on the market calendar. `unbroken(n)` is
+        # true when the last n rows are n consecutive sessions, which is the
+        # only case in which an n-session figure is the figure it claims to be.
+        at = [slot.get(str(d)) for d in g["date"]]
+        at = [i for i in at if i is not None]
+
+        def unbroken(n):
+            return len(at) >= n and (at[-1] - at[-n]) == (n - 1)
         nm = names.get(sid)
         name = (nm[0] if isinstance(nm, list) and nm else
                 (nm if isinstance(nm, str) else sid))
         market = (nm[1] if isinstance(nm, list) and len(nm) > 1 else "")
 
         def ma(n):
-            if len(c) < n:
+            if len(c) < n or not unbroken(n):
                 return None
             return round(float(c.rolling(n).mean().iloc[-1]), 2)
 
-        hi20 = g["high"].tail(20).max()
-        lo20 = g["low"].tail(20).min()
-        rng = ((g["high"] - g["low"]) / g["close"]).tail(20).mean()
+        full20 = unbroken(20)
+        hi20 = g["high"].tail(20).max() if full20 else float("nan")
+        lo20 = g["low"].tail(20).min() if full20 else float("nan")
+        rng = (((g["high"] - g["low"]) / g["close"]).tail(20).mean()
+               if full20 else float("nan"))
+        span = (at[-1] - at[0] + 1) if at else len(c)
         rec = {
             "Bars": len(c),        # so the phone can say what it is working from
+            # How many sessions those rows cover, and how many are missing
+            # inside that span. Gap_Sessions > 0 is why an average is null.
+            "Sessions_Span": span,
+            "Gap_Sessions": max(0, span - len(at)),
             "Stock_ID": sid,
             "Stock_Name": name,
             "Market": market,
@@ -107,14 +146,15 @@ def build(price_db, names=None, inst=None, min_bars=MIN_BARS):
             "High_20": round(float(hi20), 2) if hi20 == hi20 else None,
             "Support_20L": round(float(lo20), 2) if lo20 == lo20 else None,
             "ATR_Pct": round(float(rng * 100), 2) if rng == rng else None,
-            "Vol_MA20": round(float(g["Volume_Lot"].tail(20).mean()), 1),
+            "Vol_MA20": (round(float(g["Volume_Lot"].tail(20).mean()), 1)
+                         if full20 else None),
             "Vol_Today": round(float(g["Volume_Lot"].iloc[-1]), 1),
         }
-        if len(c) >= 2:
+        if len(c) >= 2 and unbroken(2):
             rec["Close_Prev"] = round(float(c.iloc[-2]), 2)
-        if len(c) >= 6:
+        if len(c) >= 6 and unbroken(6):
             rec["Ret_5D_Pct"] = round((close / float(c.iloc[-6]) - 1) * 100, 2)
-        if len(c) >= 64:
+        if len(c) >= 64 and unbroken(64):
             rec["Gain_3M_Pct"] = round((close / float(c.iloc[-64]) - 1) * 100, 1)
         f = inst.get(sid)
         if f:
@@ -124,7 +164,8 @@ def build(price_db, names=None, inst=None, min_bars=MIN_BARS):
                 rec[k] = f.get(k)
             try:
                 from scanner.chip_signal import inst_pct, chip_basis
-                rec["Inst_Pct"] = inst_pct(f.get("Inst_Net"), rec["Vol_MA20"])
+                rec["Inst_Pct"] = (inst_pct(f.get("Inst_Net"), rec["Vol_MA20"])
+                                   if rec["Vol_MA20"] else None)
                 rec["Chip_Basis"] = chip_basis(f.get("Inst_Date"),
                                                rec["Data_Date"])
             except Exception:
@@ -148,7 +189,8 @@ def export(path, price_db, names=None, inst=None, session_date="",
         "note": "every listed instrument with enough history, not only the "
                 "scanned shortlist; each record carries its OWN Data_Date "
                 "because a stock outside the daily analysis can be a session "
-                "or two behind",
+                "or two behind; an average is null whenever the rows behind "
+                "it would cross a gap (see Gap_Sessions)",
         "stocks": stocks,
     }
     from pathlib import Path

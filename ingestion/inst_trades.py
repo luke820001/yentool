@@ -116,11 +116,18 @@ def fetch_tpex_inst() -> pd.DataFrame:
 def _read_existing() -> pd.DataFrame:
     if not INST_DB.exists():
         return pd.DataFrame()
+    conn = None
     try:
-        with sqlite3.connect(INST_DB) as conn:
-            df = pd.read_sql_query("SELECT * FROM data", conn)
+        # `with sqlite3.connect(...)` commits the transaction but does NOT
+        # close the handle, and on Windows an unclosed handle keeps the file
+        # locked until GC. Same fix as scanner/tracked_rows.py.
+        conn = sqlite3.connect(INST_DB)
+        df = pd.read_sql_query("SELECT * FROM data", conn)
     except Exception:
         return pd.DataFrame()
+    finally:
+        if conn is not None:
+            conn.close()
     if df.empty:
         return df
     df["date"] = df["date"].astype(str).str[:10]
@@ -136,9 +143,13 @@ def _read_existing() -> pd.DataFrame:
 
 def _write(df: pd.DataFrame):
     INST_DB.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(INST_DB) as conn:
+    conn = sqlite3.connect(INST_DB)
+    try:
         df.to_sql("data", conn, if_exists="replace", index=False)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_inst ON data(stock_id, date)")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _recent_sessions(n: int, upto: str) -> list:
@@ -331,8 +342,16 @@ def get_inst_features(stock_ids, days: int = 5, existing: pd.DataFrame = None) -
     for sid, g in sub.groupby("stock_id"):
         g = g.sort_values("date")
         board = g["board"].dropna().iloc[-1] if g["board"].notna().any() else None
-        cal = sessions.get(board) or all_dates
-        cal = [d for d in cal if d <= g["date"].max()] or list(g["date"])
+        cal = sessions.get(board) or all_dates or list(g["date"])
+        # DO NOT clamp `cal` to the stock's own last row. The exchange tables
+        # are whole-board per date, so a stock absent from a date simply had
+        # no institutional trade -- which is a 0, not a missing session. The
+        # clamp was there and it defeated the reindex below at the right edge:
+        # a stock with no trade on the newest published session reported
+        # Inst_Date as the session BEFORE, chip_basis read that as "the flow
+        # data lags the prices", and the phone suppressed the verdict while
+        # the feed was in fact current. It also slid the 5-day sums back a
+        # day. Found 2026-09-21 by audit.
         window = cal[-days:]
         by_date = g.drop_duplicates("date", keep="last").set_index("date")
         w = by_date.reindex(window)[_VALUE_COLS].fillna(0.0)

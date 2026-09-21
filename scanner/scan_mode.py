@@ -10,18 +10,25 @@ def _safe_num(df, col, fill):
     return pd.Series([fill] * len(df), index=df.index, dtype=float)
 
 
-def _levels(base, pct, direction):
+def _levels(base, pct, direction, ids=None):
     """base * (1 + pct), snapped onto the exchange's quote ladder.
 
     `direction` is "down" for anything the owner sells INTO weakness or buys
     on a dip, "up" for a profit target -- the rounding must never flatter the
     level (see scanner/tick.py). A base that is missing or non-positive keeps
     a null instead of inventing a price.
+
+    `ids` carries the stock codes so an ETF is snapped onto the ETF ladder
+    (0.05 above 50, not 0.50). Without it every instrument would be priced as
+    an ordinary share, which for 0050 moved the trailing lock the wrong way.
     """
     from scanner.tick import round_to_tick
+    sids = (list(ids.astype(str)) if ids is not None
+            else [None] * len(base))
     return pd.Series(
-        [round_to_tick(float(b) * (1 + pct), direction)
-         if b == b and float(b) > 0 else None for b in base],
+        [round_to_tick(float(b) * (1 + pct), direction, sid)
+         if b == b and float(b) > 0 else None
+         for b, sid in zip(base, sids)],
         index=base.index, dtype="float64")
 
 
@@ -454,13 +461,14 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
         # round UP, so a rounded level never claims a better price than the
         # ladder can actually give.
         buy  = close
+        sids = (df["Stock_ID"] if "Stock_ID" in df.columns else None)
         df["Suggested_Buy_Price"] = buy.round(2)
-        df["Strict_Stop_Loss"]    = _levels(close, -PRELAUNCH_STOP_PCT, "down")
-        df["Target_Price"]        = _levels(close, PRELAUNCH_TP_PCT, "up")
-        df["Trail_Arm_Price"]     = _levels(close, PRELAUNCH_TRAIL_ARM, "up")
-        df["Trail_Lock_Price"]    = _levels(close, PRELAUNCH_TRAIL_LOCK, "down")
-        df["Add_Price"]           = _levels(close, -PRELAUNCH_ADD_PCT, "down")
-        df["Scale_Out_Price"]     = _levels(close, PRELAUNCH_SCALE_OUT_PCT, "up")
+        df["Strict_Stop_Loss"]    = _levels(close, -PRELAUNCH_STOP_PCT, "down", sids)
+        df["Target_Price"]        = _levels(close, PRELAUNCH_TP_PCT, "up", sids)
+        df["Trail_Arm_Price"]     = _levels(close, PRELAUNCH_TRAIL_ARM, "up", sids)
+        df["Trail_Lock_Price"]    = _levels(close, PRELAUNCH_TRAIL_LOCK, "down", sids)
+        df["Add_Price"]           = _levels(close, -PRELAUNCH_ADD_PCT, "down", sids)
+        df["Scale_Out_Price"]     = _levels(close, PRELAUNCH_SCALE_OUT_PCT, "up", sids)
         # Risk_Pct is the distance to the stop the owner can actually place,
         # not the nominal one: with the rounding it is never quite 20.0%.
         df["Risk_Pct"] = ((close - df["Strict_Stop_Loss"])

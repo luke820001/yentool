@@ -78,6 +78,7 @@ const MODE_CARDS = {
       "出場計畫：災難停損 -20% · 收盤站上 +2.5% 後隔一個交易日起停損上調到 +2% · 目標 +20% · 第 8 天起收盤仍有實質獲利（+1% 以上）就隔日開盤收下 · 基本抱 10 個交易日，第 10 天收盤若仍站上自己的 5 日均價就續抱，最晚第 20 天。\n" +
       "回測（2017-2026，556 筆，近 3 年，含手續費與證交稅）：71.7% 勝、每筆平均 +1.95%；更早的資料 69.5%。19 個有效季度裡沒有一季低於 60%。歷史統計，不是未來勝率。\n" +
       "「勝」在這裡指「有賺錢」。若改用「至少賺 25% 才算贏」，這套規則只有 2.3%，因為 +20% 就停利了。那個目標有另一套規則（見回測登錄簿 G 節）可達 37.6%，但只有 54.9% 的交易賺錢、資金要卡 16 天。兩者已完整比較過，你選擇維持這一套。\n" +
+      "2026-09-21 程式碼稽核修正（與規則無關，但會改變畫面上的數字）：① ETF 的升降單位跟個股不同（50 元以上跳 0.05 而不是 0.50），舊版把 0050 的鎖利價算成 108.50、比規則更寬，已修。②「後段獲利了結」這一行早了一天，正確是第 8 天，不是第 7 天。③價格出場之後不再繼續數持有天數。\n" +
       "2026-09-21 修正：鎖利原本「當天盤中觸及 +6%」就算數，但你是收盤後才看到、隔天才下得了單。改成收盤判定、隔日生效後重算同一批交易，舊規則真實勝率 63.0%、新規則 67.1%——先前畫面上的約 70% 有一大半是模擬器產生的。\n" +
       "2026-09-20 起停損由 -15% 放寬到 -20%，既有持倉一併套用，所以舊部位畫面上的停損價會往下移。\n" +
       "名單上其餘的列是觀察與持倉追蹤，不是買點。",
@@ -373,20 +374,35 @@ const EQUITY_TICKS = [
   [1000, 1], [5000, 5], [10000, 10], [50000, 50], [100000, 100], [null, 500],
 ];
 
-function tickSize(priceCents) {
-  for (const [upper, tick] of EQUITY_TICKS) {
+// ETFs and ETNs quote on their OWN ladder: 0.01 below 50, 0.05 at or above.
+// Found 2026-09-21, the day this app started advising on held ETFs. On the
+// equity table 0050 at 106.75 would have had its trailing lock snapped from
+// 108.85 down to 108.50 -- a stop WIDER than the rule, in the one direction
+// that costs money. Taiwan ETF/ETN codes are the 00-prefixed ones, 4 to 7
+// characters (0050, 00878, 00663L, 00400A).
+const ETF_TICKS = [[5000, 1], [null, 5]];
+
+function isEtfCode(stockId) {
+  const sid = String(stockId || "").trim().toUpperCase();
+  return sid.length >= 4 && sid.length <= 7 && sid.startsWith("00")
+    && /^[0-9]{4}$/.test(sid.slice(0, 4));
+}
+
+function tickSize(priceCents, stockId) {
+  const ladder = isEtfCode(stockId) ? ETF_TICKS : EQUITY_TICKS;
+  for (const [upper, tick] of ladder) {
     if (upper === null || priceCents < upper) return tick;
   }
-  return 500;
+  return ladder[ladder.length - 1][1];
 }
 
 // Snap a PLAN price onto the exchange ladder. Direction matters: a stop rounds
 // DOWN and a target UP, because doing it the other way quietly tightens the
 // claim. Never push an average cost through here -- an average legitimately
 // falls between ticks (money.round_to_tick's caveat).
-function tickRound(priceCents, dir) {
+function tickRound(priceCents, dir, stockId) {
   if (priceCents === null || priceCents <= 0) return null;
-  const t = tickSize(priceCents);
+  const t = tickSize(priceCents, stockId);
   const steps = dir === "down" ? Math.floor(priceCents / t)
               : dir === "up" ? Math.ceil(priceCents / t)
               : divRound(priceCents, t);
@@ -1335,20 +1351,31 @@ function activePlan(pos) {
   const add = divRound(base * (100 + STRATEGY.addPct), 100);
   const scaleOut = divRound(base * (100 + STRATEGY.scaleOutPct), 100);
   const staged = (pos.cycle_buys || 0) <= 1;
-  // The stock's own 5-bar mean, from the sessions actually priced. The time
-  // exit is extended while the close is above it (2026-09-21).
-  const closes = marks.filter((m) => m.close_price !== null).map((m) => m.close_price);
-  const last5 = closes.slice(-5);
-  const ma5 = last5.length === 5 ? divRound(last5.reduce((a, b) => a + b, 0), 5) : null;
-  const lastClose = closes.length ? closes[closes.length - 1] : null;
+  // The stock's own 5-bar mean. The time exit is extended while the close is
+  // above it (2026-09-21), so this has to be the SAME five sessions the
+  // backend used, not merely the last five numbers available.
+  //
+  // It used to drop the unpriced sessions first and then take five, so one
+  // quote gap silently stretched the "5-day mean" across six or more
+  // sessions while the backend's spanned exactly five -- two screens, two
+  // verdicts, same position. Now the last five SESSIONS are taken first, and
+  // if any of them is unpriced there is no mean to show.
+  const last5marks = marks.slice(-5);
+  const last5 = last5marks.map((m) => m.close_price);
+  const ma5 = (last5.length === 5 && last5.every((v) => v !== null))
+    ? divRound(last5.reduce((a, b) => a + b, 0), 5) : null;
+  const priced = marks.filter((m) => m.close_price !== null);
+  const lastClose = priced.length ? priced[priced.length - 1].close_price : null;
+  const sid = pos.stock_id;
   return {
+    stock_id: sid,
     stop: armed ? Math.max(stop0, lock) : stop0,
-    stop_orderable: tickRound(armed ? Math.max(stop0, lock) : stop0, "down"),
+    stop_orderable: tickRound(armed ? Math.max(stop0, lock) : stop0, "down", sid),
     initial_stop: stop0,
     arm, lock, target,
-    target_orderable: tickRound(target, "up"),
-    add, add_orderable: tickRound(add, "down"), add_open: staged,
-    scale_out: scaleOut, scale_out_orderable: tickRound(scaleOut, "up"),
+    target_orderable: tickRound(target, "up", sid),
+    add, add_orderable: tickRound(add, "down", sid), add_open: staged,
+    scale_out: scaleOut, scale_out_orderable: tickRound(scaleOut, "up", sid),
     base,
     armed, armed_on: armed ? highOn : "",
     highest_close: high,
@@ -1389,15 +1416,21 @@ function tomorrowOrders(pos, plan, dayIdx, horizon) {
   if (!plan.armed) {
     rows.push({
       side: "watch", must: false,
-      price: tickRound(plan.arm, "up"),
+      price: tickRound(plan.arm, "up", plan.stock_id),
       label: "收盤站上這裡 → 隔日起停損上調",
-      note: `收盤 ≥ 成交價 +${STRATEGY.armPct}%，隔一個交易日起停損改掛 ${fmtPrice(tickRound(plan.lock, "down"))}`,
+      note: `收盤 ≥ 成交價 +${STRATEGY.armPct}%，隔一個交易日起停損改掛 ${fmtPrice(tickRound(plan.lock, "down", plan.stock_id))}`,
     });
   }
   // The late profit-take only exists once the hold is far enough along, so it
   // appears on the card exactly when it becomes actionable.
-  if (dayIdx !== null && dayIdx >= STRATEGY.lateFrom - 1) {
-    const lateAt = tickRound(divRound(plan.base * (100 + STRATEGY.lateGainPct), 100), "up");
+  //
+  // `dayIdx` is 1-BASED ("day 8 of 10"), and so is the backend: exit_rules
+  // fires when (bar index + 1) >= late_from, i.e. on day 8. This used to read
+  // `lateFrom - 1` and put the rung on the card a day early -- on a rung
+  // labelled MUST, so the owner would have sold at day 8's open while the
+  // backend was still waiting for day 9's. Found 2026-09-21 by audit.
+  if (dayIdx !== null && dayIdx >= STRATEGY.lateFrom) {
+    const lateAt = tickRound(divRound(plan.base * (100 + STRATEGY.lateGainPct), 100), "up", plan.stock_id);
     rows.push({
       side: "watch", must: true,
       price: lateAt,
@@ -1924,6 +1957,19 @@ function chipKv(r) {
 }
 
 // For a position card: the verdict sentence, or an honest "no data" line.
+// The tracked block can be CARRIED FORWARD: a publisher that does not rebuild
+// it (the desktop app) keeps the previous one rather than deleting the rows a
+// holder depends on. When that happens the block is older than the list, and
+// the card has to say so rather than presenting stale chips as today's.
+// Returns the session it was built for, or "" when it is current.
+function trackedStale() {
+  const t = (STATE.meta && STATE.meta.tracked) || null;
+  if (!t || !t.carried_forward) return "";
+  const built = String(t.built_for || "").slice(0, 10);
+  const today = String((STATE.meta && STATE.meta.session_date) || "").slice(0, 10);
+  return built && built !== today ? built : "";
+}
+
 // A holding is looked up in the list FIRST and in the tracked set second, so
 // a name that left the list still has every column it had while it was on it.
 // The name of a stock, wherever it is known from: today's list, the recent
@@ -2193,7 +2239,7 @@ function positionCard(pos, pinned) {
   const trail = plan
     ? (plan.armed
         ? `<div class="plan armed">鎖利：已啟動（收盤曾達 ${esc(fmtPrice(plan.highest_close))}，${esc(plan.armed_on)}）· 有效停損已上調至 ${esc(fmtPrice(plan.stop_orderable))}，只升不降</div>`
-        : `<div class="plan">鎖利：尚未啟動；需要<b>收盤</b>站上 ${esc(fmtPrice(tickRound(plan.arm, "up")))}（條件，非已達成），隔一個交易日起生效 · 未啟動前停損維持 ${esc(fmtPrice(tickRound(plan.initial_stop, "down")))}</div>`)
+        : `<div class="plan">鎖利：尚未啟動；需要<b>收盤</b>站上 ${esc(fmtPrice(tickRound(plan.arm, "up", plan.stock_id)))}（條件，非已達成），隔一個交易日起生效 · 未啟動前停損維持 ${esc(fmtPrice(tickRound(plan.initial_stop, "down", plan.stock_id)))}</div>`)
     : "";
 
   // "續抱" on its own is what the 2026-09-17 complaint was about: a position
@@ -2202,7 +2248,7 @@ function positionCard(pos, pinned) {
   const holdLine = plan
     ? `建議（以你登錄的成交價 ${fmtPrice(plan.base)} 計算）：續抱。跌破 ${fmtPrice(plan.stop_orderable)} 先出場${
         plan.add_open ? `；分批買法可在 ${fmtPrice(plan.add_orderable)} 補另一半` : ""
-      }；${plan.armed ? "鎖利已啟動" : `收盤站上 ${fmtPrice(tickRound(plan.arm, "up"))} 後，隔一個交易日起停損上調到 ${fmtPrice(tickRound(plan.lock, "down"))}`}。`
+      }；${plan.armed ? "鎖利已啟動" : `收盤站上 ${fmtPrice(tickRound(plan.arm, "up", plan.stock_id))} 後，隔一個交易日起停損上調到 ${fmtPrice(tickRound(plan.lock, "down", plan.stock_id))}`}。`
     : "建議：續抱，下一個交易日重新評估（收盤後更新）。";
   // Everything above is computed from what YOU registered -- your fill price,
   // your fill date -- and the market data is only used to say where the stock
@@ -2240,7 +2286,9 @@ function positionCard(pos, pinned) {
       <span class="state-chip ${stateCls}">${esc(stateText)}</span>
     </div>
     ${listed ? "" : (tracked
-        ? `<div class="hint">已不在今日名單，但仍在近期推薦追蹤中 · 法人、均線、出場計畫照常更新</div>`
+        ? (trackedStale()
+            ? `<div class="hint warn">已不在今日名單 · 這份追蹤資料是 ${esc(trackedStale())} 那一次掃描留下的，尚未跟著今天更新</div>`
+            : `<div class="hint">已不在今日名單，但仍在近期推薦追蹤中 · 法人、均線、出場計畫照常更新</div>`)
         : mkt
           ? `<div class="hint">系統沒有推薦過這檔 · 仍從當日全市場掃描結果取得法人與均線資料</div>`
           : STATE.universeState === "loading"

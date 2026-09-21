@@ -96,12 +96,13 @@ def _still_strong(row):
     return close > ma5
 
 
-def _lvl(fill, pct, direction):
+def _lvl(fill, pct, direction, stock_id=None):
     """A level off the fill, on the exchange's quote ladder. See
-    scanner/tick.py for why an un-snapped price is not a plan."""
+    scanner/tick.py for why an un-snapped price is not a plan, and why the
+    stock id matters (an ETF steps 0.05 above 50, an ordinary share 0.50)."""
     if not fill:
         return None
-    return round_to_tick(fill * (1 + pct), direction)
+    return round_to_tick(fill * (1 + pct), direction, stock_id)
 
 # Time-exit horizon per mode (trading bars). Modes without a validated time
 # exit are left out and simply get no holding annotation.
@@ -345,11 +346,17 @@ def annotate_holding(df, scan_mode):
     fills = [opens.get((str(sid), ed)) for sid, ed
              in zip(df["Stock_ID"].astype(str), entry_dates)]
     df["Entry_Open"] = fills
-    df["Fill_Stop_Loss"] = [_lvl(f, -STOP_PCT, "down") for f in fills]
-    df["Fill_Trail_Arm_Price"] = [_lvl(f, TRAIL_ARM, "up") for f in fills]
-    df["Fill_Trail_Lock_Price"] = [_lvl(f, TRAIL_LOCK, "down") for f in fills]
-    df["Fill_Target_Price"] = [_lvl(f, TP_PCT, "up") for f in fills]
-    df["Fill_Scale_Out_Price"] = [_lvl(f, SCALE_OUT_PCT, "up") for f in fills]
+    lvl_ids = list(df["Stock_ID"].astype(str))
+    df["Fill_Stop_Loss"] = [_lvl(f, -STOP_PCT, "down", i)
+                            for f, i in zip(fills, lvl_ids)]
+    df["Fill_Trail_Arm_Price"] = [_lvl(f, TRAIL_ARM, "up", i)
+                                  for f, i in zip(fills, lvl_ids)]
+    df["Fill_Trail_Lock_Price"] = [_lvl(f, TRAIL_LOCK, "down", i)
+                                   for f, i in zip(fills, lvl_ids)]
+    df["Fill_Target_Price"] = [_lvl(f, TP_PCT, "up", i)
+                               for f, i in zip(fills, lvl_ids)]
+    df["Fill_Scale_Out_Price"] = [_lvl(f, SCALE_OUT_PCT, "up", i)
+                                  for f, i in zip(fills, lvl_ids)]
 
     # Exit plan (2026-09-14): one column that says below what price to sell
     # first, and whether the rule has already taken the trade out. The shared
@@ -400,12 +407,14 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
 
     plan_stop, plan_armed, sig, sig_date, sig_price, note = ([] for _ in range(6))
     plan_add, add_hit = [], []
+    booked_out = []          # rows the exit stack has already closed
     ref_stops = (df["Strict_Stop_Loss"] if "Strict_Stop_Loss" in df.columns
                  else [None] * len(df))
     ref_adds = (df["Add_Price"] if "Add_Price" in df.columns
                 else [None] * len(df))
-    for sid, ed, fill, status, tdate, ref, ref_add in zip(
-            ids, entry_dates, fills, statuses, time_exit_dates, ref_stops, ref_adds):
+    for i_row, (sid, ed, fill, status, tdate, ref, ref_add) in enumerate(zip(
+            ids, entry_dates, fills, statuses, time_exit_dates, ref_stops,
+            ref_adds)):
         try:
             ref = float(ref) if ref is not None and ref == ref else None
         except (TypeError, ValueError):
@@ -428,17 +437,17 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
                         if not fill else "no bars since entry yet")
             continue
 
-        add_px = _lvl(fill, -ADD_PCT, "down")
+        add_px = _lvl(fill, -ADD_PCT, "down", sid)
         plan_add.append(add_px)
         bars = [b for b in bars_by.get(sid, []) if b[0] >= ed]
         if not bars:
             add_hit.append("")
-            plan_stop.append(_lvl(fill, -STOP_PCT, "down"))
+            plan_stop.append(_lvl(fill, -STOP_PCT, "down", sid))
             plan_armed.append(False)
             sig.append(""); sig_date.append(""); sig_price.append(None)
             note.append("sell if it trades below {} (fill {:.2f} x {:.2f}, "
                         "on the tick ladder); no bars since entry in the store"
-                        .format(_lvl(fill, -STOP_PCT, "down"), fill, 1 - STOP_PCT))
+                        .format(_lvl(fill, -STOP_PCT, "down", sid), fill, 1 - STOP_PCT))
             continue
 
         dates = [b[0] for b in bars]
@@ -453,8 +462,8 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
         stop = plan.get("stop")
         # The replay works in exact prices; the owner has to place the order,
         # so the published level is the one on the quote ladder.
-        stop = (round_to_tick(float(stop), "down") if stop
-                else _lvl(fill, -STOP_PCT, "down"))
+        stop = (round_to_tick(float(stop), "down", sid) if stop
+                else _lvl(fill, -STOP_PCT, "down", sid))
         plan_armed.append(armed)
         plan_stop.append(stop)
 
@@ -465,6 +474,14 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
             note.append("{} exit booked {} at {:.2f} ({:+.1f}%)".format(
                 plan["reason"], plan.get("date") or "?", price,
                 plan.get("ret_pct") or 0.0))
+            # The calendar half of this module was still counting the hold
+            # forward, so the same row read "day 12, keep riding" next to
+            # "the lock closed this trade on day 6" -- 18 of 101 published
+            # rows on 2026-09-21. A price exit ENDS the hold; nothing after
+            # it is a hold day. Found 2026-09-21 by audit.
+            booked_out.append((i_row, plan.get("reason"),
+                               plan.get("date") or "", price,
+                               plan.get("bar")))
             continue
 
         # Not out on price; the calendar may still say the hold is over.
@@ -493,7 +510,30 @@ def _add_exit_plan(df, entry_dates, fills, statuses, time_exit_dates, cal, today
             note.append("sell if it trades below {} (fill {:.2f} x {:.2f}); the "
                         "lock arms on a CLOSE at or above {}".format(
                             stop, fill, 1 - STOP_PCT,
-                            _lvl(fill, TRAIL_ARM, "up")))
+                            _lvl(fill, TRAIL_ARM, "up", sid)))
+
+    # A booked price exit overrides the calendar status for the same row.
+    if booked_out:
+        statuses = list(df["Hold_Status"])
+        hnotes = list(df["Hold_Note"])
+        rem = list(df["Hold_Remaining"])
+        days = list(df["Hold_Day"])
+        for i_row, reason, when, price, bar in booked_out:
+            statuses[i_row] = "exited"
+            rem[i_row] = 0
+            # Hold_Day becomes the day the trade CLOSED, not how long ago the
+            # entry was: `bar` is 0-based from the entry bar, so day = bar + 1.
+            if bar is not None:
+                try:
+                    days[i_row] = int(bar) + 1
+                except (TypeError, ValueError):
+                    pass
+            hnotes[i_row] = "closed by the {} on day {} ({}) at {:.2f}".format(
+                reason, days[i_row], when or "?", price)
+        df["Hold_Status"] = statuses
+        df["Hold_Note"] = hnotes
+        df["Hold_Remaining"] = rem
+        df["Hold_Day"] = days
 
     df["Plan_Stop"] = plan_stop
     df["Plan_Add_Price"] = plan_add

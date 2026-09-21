@@ -100,17 +100,26 @@ DEFAULT_RULE = {
 
 
 def simulate_exit(opens, highs, lows, closes, hold_bars=..., stop_pct=...,
-                  tp_pct=..., arm_pct=..., lock_pct=...):
+                  tp_pct=..., arm_pct=..., lock_pct=..., late_from=...,
+                  late_gain=...):
     """Replay one trade through the exit stack.
 
     Entry is the FIRST bar's open (the live rule is a market order at the next
     open; no limit is posted). Returns (entry, return_pct, reason) where reason
-    is one of 'tp', 'lock', 'stop', 'time', or (None, None, 'na') when the
-    window is too short or the open is unusable.
+    is one of 'tp', 'lock', 'stop', 'late', 'time', or (None, None, 'na') when
+    the window is too short or the open is unusable.
 
-    Set `tp_pct` or `arm_pct` to None to disable that leg -- which is how a
-    parameter search asks "what would this be worth without a take profit at
-    all", rather than approximating it with a very large number.
+    Set any of `tp_pct`, `arm_pct` or `late_from` to None to disable that leg
+    -- which is how a parameter search asks "what would this be worth without
+    a take profit at all", rather than approximating it with a very large
+    number.
+
+    2026-09-21: `late_from` / `late_gain` were missing here after the late
+    profit-take was adopted, so DEFAULT_RULE's values applied no matter what a
+    caller asked for. A sweep pricing "no take profit, no lock" would have
+    been silently measuring a rule that still took late profits -- which is
+    the whole class of error this module exists to prevent, and the reason it
+    takes the rule's numbers as arguments instead of reading constants.
     """
     # `...` means "use the adopted value"; None means "disable this leg" -- so a
     # search can ask what the rule is worth with no take profit at all, instead
@@ -121,7 +130,8 @@ def simulate_exit(opens, highs, lows, closes, hold_bars=..., stop_pct=...,
         return None, None, "na"
     plan = replay_exit(opens, highs, lows, closes, hold_bars=hold_bars,
                        stop_pct=stop_pct, tp_pct=tp_pct, arm_pct=arm_pct,
-                       lock_pct=lock_pct)
+                       lock_pct=lock_pct, late_from=late_from,
+                       late_gain=late_gain)
     if plan["reason"] == "na":
         return None, None, "na"
     return plan["entry"], plan["ret_pct"], plan["reason"]

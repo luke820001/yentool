@@ -126,10 +126,12 @@ def run_scan(scan_mode="mode_prelaunch"):
     # Keep the WHOLE market's daily bar current, not just the shortlist. One
     # extra request per exchange; without it, any stock outside the turnover
     # pool slowly goes stale and nothing can be computed for a position in it.
+    snapshot_frame = None
     try:
         from config.settings import PRICE_VOLUME_FILE as _PV
         from scanner.market_snapshot import backfill_history, refresh_market
-        refresh_market(_PV)
+        _rows, _snap_health = refresh_market(_PV)
+        snapshot_frame = _snap_health.get("frame")
         # The snapshot gives every instrument TODAY's bar and nothing else, so
         # a holding in one still has no averages. Fill history for a slice of
         # the under-covered names each scan, liquid ones first; the whole
@@ -147,11 +149,15 @@ def run_scan(scan_mode="mode_prelaunch"):
     # not its chips, not its moving averages, not its exit plan -- would be
     # computed for it. See scanner/tracked_rows.py.
     tracked_ids = set()
+    tracked_picks = {}
     try:
         from scanner.tracked_rows import recent_pick_ids
         from config.settings import PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE
-        tracked_ids = recent_pick_ids(PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE,
-                                      scan_mode)
+        # {stock_id: last pick date} -- the dates are what lets the per-scan
+        # cap drop the OLDEST names rather than the least heavily traded.
+        tracked_picks = recent_pick_ids(PRICE_VOLUME_FILE, SIGNAL_LEDGER_FILE,
+                                        scan_mode, with_dates=True)
+        tracked_ids = set(tracked_picks)
         if tracked_ids:
             print("  [tracked] carrying {} recently recommended name(s) "
                   "through the scan".format(len(tracked_ids)))
@@ -178,6 +184,21 @@ def run_scan(scan_mode="mode_prelaunch"):
         print("  [guard] {} -> held_ids/ledger NOT updated".format(degraded))
 
     verified = verify_candidates(candidates, progress_callback=_progress)
+
+    # The candidate and backfill fetchers have now run, and they store a
+    # DIVIDEND-ADJUSTED series while the whole-market snapshot stores the
+    # price the exchange published. They write the same table and they run
+    # last, so without this the adjusted value wins for dates the exchange has
+    # also published -- a step in the stored series the size of the dividend,
+    # which every moving average reads as a move. See
+    # scanner/market_snapshot.reassert_exchange_prices.
+    try:
+        if snapshot_frame is not None and not snapshot_frame.empty:
+            from scanner.market_snapshot import reassert_exchange_prices
+            from config.settings import PRICE_VOLUME_FILE as _PV2
+            reassert_exchange_prices(_PV2, snapshot_frame)
+    except Exception as e:
+        print("  [snapshot] price reassertion skipped: {}".format(str(e)[:80]))
     result_df = apply_scan_mode(verified, scan_mode)
     result_df = sort_for_mode(result_df, scan_mode)
     result_df, held_ids = select_with_hysteresis(result_df, prior_ids)
@@ -230,7 +251,8 @@ def run_scan(scan_mode="mode_prelaunch"):
     tracked_df = None
     try:
         from scanner.tracked_rows import annotate_tracked, split_tracked
-        tracked_df = split_tracked(verified, result_df, tracked_ids)
+        tracked_df = split_tracked(verified, result_df, tracked_ids,
+                                   picked_on=tracked_picks)
         if tracked_df is not None and not tracked_df.empty:
             tracked_df = annotate_tracked(tracked_df, scan_mode,
                                           session_date=session_date)
@@ -260,6 +282,21 @@ def run_scan(scan_mode="mode_prelaunch"):
         print("  [rec] {}".format(summarize(rec_stats)))
     except Exception as e:
         print("  [rec] skipped: {}".format(e))
+
+    # The same frozen columns belong on the dropped-out rows: they are the
+    # ones a HOLDER reads, and "what the system originally said" is exactly
+    # the question a holder asks. This ran on result_df only, so every tracked
+    # row shipped without Recommendation_ID / Recommended_On / Rec_Status /
+    # Rec_Valid_Until / Initial_Buy_Price. Nothing is created here --
+    # annotate_tracked forces Buy_Ready False and attach_recommendations only
+    # creates on a Buy_Ready row -- so this attaches and never backdates.
+    try:
+        if tracked_df is not None and not tracked_df.empty:
+            tracked_df, _tstats = attach_recommendations(
+                tracked_df, scan_mode, STRATEGY_VERSION, PORTFOLIO_LEDGER_FILE,
+                session_date=session_date)
+    except Exception as e:
+        print("  [rec] tracked attach skipped: {}".format(e))
 
     # Re-publish the recommendations-only view. This -- not the database -- is
     # what gets committed to the public repo.
@@ -334,10 +371,24 @@ def run_scan(scan_mode="mode_prelaunch"):
             _names = _json.load(open(STOCK_NAMES_FILE, encoding="utf-8"))
         except Exception:
             _names = {}
+        # Institutional flow for the WHOLE published set, not just the
+        # shortlist. The call was passing a hard-coded null here -- with
+        # get_inst_features imported and never used -- so every chip field in
+        # universe_export.build was dead code and a holding the scanner never
+        # picked was told, forever, that the scan had no institutional data
+        # for it. That is half of what the module exists for. Found
+        # 2026-09-21 by audit.
+        try:
+            _inst = get_inst_features(sorted(_names.keys())) if _names else {}
+        except Exception as _e:
+            _inst = {}
+            print("  [universe] institutional flow unavailable: {}"
+                  .format(str(_e)[:80]))
         _built = export_universe(MOBILE_UNIVERSE_FILE, PRICE_VOLUME_FILE,
-                                 names=_names, inst=None,
+                                 names=_names, inst=_inst,
                                  session_date=session_date, scan_mode=scan_mode)
-        print("  [universe] {} stock(s) published for holdings lookup".format(_built))
+        print("  [universe] {} stock(s) published for holdings lookup"
+              " ({} with institutional flow)".format(_built, len(_inst)))
     except Exception as e:
         print("  [universe] skipped: {}".format(e))
 

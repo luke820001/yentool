@@ -232,7 +232,13 @@ class TrackerColumns(unittest.TestCase):
         out = self._run({"1111": flat, "2222": crash},
                         {"1111": ["2026-09-01"], "2222": ["2026-09-01"]})
         by = out.set_index("Stock_ID")
-        self.assertEqual(by.loc["2222", "Hold_Status"], "holding")
+        # A booked price exit ENDS the hold. Until 2026-09-21 the calendar
+        # kept counting alongside it, so the same row said "held 6/10, exit in
+        # 4 trading day(s)" next to "stop exit booked 2026-09-08" -- 18 of the
+        # 101 published rows that day carried the contradiction.
+        self.assertEqual(by.loc["2222", "Hold_Status"], "exited")
+        self.assertEqual(by.loc["2222", "Hold_Remaining"], 0)
+        self.assertIn("closed by the stop", by.loc["2222", "Hold_Note"])
         self.assertEqual(by.loc["2222", "Exit_Signal"], "stop")
         self.assertEqual(by.loc["2222", "Exit_Signal_Date"], "2026-09-08")
         self.assertAlmostEqual(by.loc["2222", "Exit_Signal_Price"], STOP)

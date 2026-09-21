@@ -42,16 +42,21 @@ def _sessions(conn, limit):
     return dates[-limit:]
 
 
-def recent_pick_ids(price_db, ledger_db, scan_mode, sessions=TRACKED_SESSIONS):
+def recent_pick_ids(price_db, ledger_db, scan_mode, sessions=TRACKED_SESSIONS,
+                    with_dates=False):
     """Stock ids this mode picked within the last `sessions` trading days.
 
     These are the names a live position could still be open in, so they are
     the ones worth carrying full data for.
+
+    With `with_dates`, returns {stock_id: last pick date} instead of a set, so
+    a caller that has to drop some of them can drop the OLDEST.
     """
     import os
     import sqlite3
+    empty = {} if with_dates else set()
     if not os.path.exists(str(price_db)) or not os.path.exists(str(ledger_db)):
-        return set()
+        return empty
     # `with sqlite3.connect(...)` manages the TRANSACTION, not the connection:
     # it leaves the handle open, which on Windows keeps the file locked. Close
     # it explicitly.
@@ -60,32 +65,42 @@ def recent_pick_ids(price_db, ledger_db, scan_mode, sessions=TRACKED_SESSIONS):
         conn = sqlite3.connect(str(price_db), timeout=30)
         window = _sessions(conn, sessions)
     except Exception:
-        return set()
+        return empty
     finally:
         if conn is not None:
             conn.close()
     if not window:
-        return set()
+        return empty
     conn = None
     try:
         conn = sqlite3.connect(str(ledger_db), timeout=30)
         rows = conn.execute(
-            "SELECT DISTINCT stock_id FROM picks WHERE scan_mode = ? "
-            "AND bar_date >= ?", (scan_mode, window[0])).fetchall()
+            "SELECT stock_id, MAX(bar_date) FROM picks WHERE scan_mode = ? "
+            "AND bar_date >= ? GROUP BY stock_id", (scan_mode, window[0])
+        ).fetchall()
     except Exception:
-        return set()
+        return empty
     finally:
         if conn is not None:
             conn.close()
+    if with_dates:
+        return {str(r[0]): str(r[1] or "")[:10] for r in rows if r and r[0]}
     return {str(r[0]) for r in rows if r and r[0]}
 
 
-def split_tracked(verified, published, tracked_ids, limit=MAX_TRACKED):
+def split_tracked(verified, published, tracked_ids, limit=MAX_TRACKED,
+                  picked_on=None):
     """Rows for names we verified this scan that are NOT on the published list
     but were picked recently. Returns a DataFrame (possibly empty).
 
     `verified` is the full verify_candidates output, before the mode filter and
     hysteresis removed anything.
+
+    `picked_on` is {stock_id: last pick date}; with it, the cap keeps the most
+    recently picked names. Without it the cap keeps whatever order `verified`
+    arrived in, which is turnover rank -- the comment used to claim "the most
+    recently relevant ones" while doing exactly that, so on a heavy-pick day a
+    name the owner actually holds could be dropped for a busier one.
     """
     if verified is None or verified.empty or not tracked_ids:
         return verified.iloc[0:0] if verified is not None else None
@@ -97,8 +112,10 @@ def split_tracked(verified, published, tracked_ids, limit=MAX_TRACKED):
         return verified.iloc[0:0]
     out = verified[verified["Stock_ID"].astype(str).isin(want)].copy()
     if len(out) > limit:
-        # Keep the most recently relevant ones; the cap only ever bites if the
-        # ledger has an unusual burst of picks.
+        # The cap only ever bites if the ledger has an unusual burst of picks.
+        if picked_on:
+            out["_picked"] = [str(picked_on.get(str(s), "")) for s in out["Stock_ID"]]
+            out = out.sort_values("_picked", ascending=False).drop(columns="_picked")
         out = out.head(limit)
     return out.reset_index(drop=True)
 

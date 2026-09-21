@@ -222,9 +222,31 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
             t.to_json(orient="records", force_ascii=False))
         payload["meta"]["tracked"] = {
             "count": int(len(tracked)),
+            "built_for": str(session_date or "")[:10],
             "note": "recently recommended names no longer on the list; "
                     "full data so a holder keeps its chips and exit plan",
         }
+    else:
+        # A caller that does not build the tracked block must not DELETE one.
+        # gui/scan_worker.py runs the same export without it, so opening the
+        # desktop app after a cloud scan silently stripped the dropped-out
+        # holdings -- the rows a holder depends on -- from the payload the
+        # phone reads. Carry the previous block forward, and say which session
+        # it was built for so nothing can pass it off as today's.
+        try:
+            with open(MOBILE_DATA_FILE, encoding="utf-8") as f:
+                prev = json.load(f)
+            old = prev.get("tracked")
+            if isinstance(old, list) and old:
+                payload["tracked"] = old
+                meta_old = dict((prev.get("meta") or {}).get("tracked") or {})
+                meta_old["count"] = len(old)
+                meta_old["carried_forward"] = True
+                meta_old.setdefault("built_for", str(
+                    (prev.get("meta") or {}).get("session_date") or "")[:10])
+                payload["meta"]["tracked"] = meta_old
+        except Exception:
+            pass
     if quotes_meta:
         payload["meta"]["quotes"].update(quotes_meta)
     with open(MOBILE_DATA_FILE, "w", encoding="utf-8") as f:

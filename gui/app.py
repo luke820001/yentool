@@ -354,6 +354,14 @@ def _live_hold(row, disturbed=False):
     caller then falls back to the shipped Hold_* snapshot.
     """
     try:
+        # A trade the exit stack has already closed has no live hold to
+        # recompute: the calendar stopped applying on the day it closed. The
+        # backend ships Hold_Status "exited" for those rows, and recomputing
+        # here would put "day 12, keep riding" back on a screen the phone
+        # shows as closed -- the same two-screen disagreement
+        # tests/test_ui_parity.py exists to prevent.
+        if _text(row.get("Exit_Signal")):
+            return None
         entry = _text(row.get("Entry_Date"))[:10]
         cal = _calendar()
         if not entry or not cal:
@@ -449,6 +457,17 @@ def _hold_banner(row, disturbed=False):
             entry_d = _text(row.get("Entry_Date"))[:10]
             entry_is_today = after_close = False
 
+        if status == "exited":
+            # The exit stack already closed this trade; the calendar stopped
+            # applying on that day (scanner/holding_tracker.py).
+            sig = _text(row.get("Exit_Signal"))
+            when = _text(row.get("Exit_Signal_Date"))[:10]
+            px = _num(row.get("Exit_Signal_Price"))
+            label = {"stop": "停損", "lock": "鎖利", "tp": "停利",
+                     "late": "後段獲利了結", "time": "到期"}.get(sig, sig or "規則")
+            return ("出場提醒：已依{}出場（{}{}）".format(
+                label, when or "日期未知",
+                "，{:.2f}".format(px) if px else ""), YELLOW)
         if status == "pending":
             if entry_is_today:
                 when = "今日開盤"

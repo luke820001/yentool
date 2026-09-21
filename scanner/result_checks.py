@@ -42,7 +42,8 @@ CHECKS_VERSION = 1
 HISTORY_KEEP = 60
 
 MARKETS = ("TSE", "OTC")
-HOLD_STATUSES = ("", "pending", "holding", "exit_today", "overdue", "delay")
+HOLD_STATUSES = ("", "pending", "holding", "exit_today", "overdue",
+                 "delay", "exited")
 BUY_BLOCKS = ("", "regime", "held", "unknown", "quality", "market", "rank",
               "integrity", "stale", "no_rule", "dropped")
 REC_STATUSES = ("active", "expired", "converted", "cancelled", "closed")
@@ -62,12 +63,12 @@ ORDER_LEVEL_COLUMNS = (
 )
 
 
-def _on_tick(price):
+def _on_tick(price, stock_id=None):
     try:
         from scanner.tick import is_on_tick
     except Exception:
         return True
-    return is_on_tick(price)
+    return is_on_tick(price, stock_id)
 
 
 _ID_RE = re.compile(r"^[0-9]{4,6}[A-Z]?$")
@@ -95,9 +96,17 @@ COLUMNS = {
     "Launch_Score":        _c("num", lo=0, hi=100, phone=True),
     "Ret_5D_Pct":          _c("num", lo=-60, hi=100, phone=True),
     "ATR_Pct":             _c("num", lo=0, hi=50, phone=True),
-    "RS_Score":            _c("num", lo=0, hi=2000, phone=True),
+    # Excess return against the index: positive is outperforming, and a name
+    # that dropped off the list is routinely NEGATIVE (12 of 56 tracked rows
+    # on 2026-09-21). The old floor of 0 described the daily list, not the
+    # measure.
+    "RS_Score":            _c("num", lo=-2000, hi=2000, phone=True),
     "Gain_3M_Pct":         _c("num", lo=-95, hi=2000, phone=True),
     "Gain_1M_Pct":         _c("num", lo=-95, hi=1000),
+    # NOT nullable: it is an entry-gate input, and a null on the daily list
+    # means a row was scored on data that does not exist. A tracked row with
+    # less than a year of history legitimately has none, and that surfaces as
+    # a tracked_null WARNING rather than being waved through here.
     "Dist_52W_High_Pct":   _c("num", lo=0, hi=100, phone=True),
     "Sup_Gap_Pct":         _c("num", nullable=True, lo=-5, hi=100, phone=True),
     "Res_Gap_Pct":         _c("num", nullable=True, lo=-50, hi=300, phone=True),
@@ -132,7 +141,10 @@ COLUMNS = {
     "Inst_Sessions":       _c("int", nullable=True, lo=0, hi=5, phone=True),
     "Inst_Date":           _c("date", nullable=True, phone=True),
     # chip verdict for the next open (scanner/chip_signal.py)
-    "Inst_Pct":            _c("num", nullable=True, lo=-100, hi=100, phone=True),
+    # net institutional lots as a share of the 20-day average volume. A block
+    # trade in a thin name legitimately exceeds one average day, so +-100 was
+    # a bound that would fail the whole payload on an ordinary market event.
+    "Inst_Pct":            _c("num", nullable=True, lo=-500, hi=500, phone=True),
     "Chip_Basis":          _c("choice", nullable=True, choices=CHIP_BASES, phone=True),
     "Chip_Action":         _c("choice", nullable=True, choices=CHIP_ACTIONS, phone=True),
     "Chip_Note":           _c("str", nullable=True, phone=True),
@@ -167,7 +179,9 @@ COLUMNS = {
     "Recent_Jump":         _c("bool"),
     "Suggested_Buy_Price": _c("num", lo=0.01, phone=True),
     "Strict_Stop_Loss":    _c("num", lo=0.01, phone=True),
-    "Risk_Pct":            _c("num", lo=0, hi=50, phone=True),
+    # Derived from Strict_Stop_Loss, which is null when the close is missing
+    # or zero; it used to be the constant 20.0 and could not be null at all.
+    "Risk_Pct":            _c("num", nullable=True, lo=0, hi=50, phone=True),
     "Target_Price":        _c("num", lo=0.01, phone=True),
     "Trail_Arm_Price":     _c("num", lo=0.01),
     "Trail_Lock_Price":    _c("num", lo=0.01),
@@ -292,12 +306,20 @@ def _garbled(s):
 
 
 class _Report:
+    """Collects findings. `block` names which part of the payload is being
+    audited; anything other than "rows" has its codes prefixed so a problem in
+    the tracked block can never be mistaken for one in the daily list."""
+
     def __init__(self):
         self.items = []
+        self.block = "rows"
 
     def add(self, level, code, column, count=1, detail="", sample=None):
         if count <= 0:
             return
+        if self.block and self.block != "rows":
+            code = "%s_%s" % (self.block, code)
+            detail = "%s [%s]" % (detail, self.block) if detail else                 "[%s]" % self.block
         item = {"level": level, "code": code, "column": column or "",
                 "count": int(count), "detail": str(detail)[:200]}
         if sample:
@@ -454,14 +476,18 @@ def _trade_params():
         return 0.20, 0.20, 0.025, 0.02, 0.10, 0.15, 20
 
 
-def _lvl(base, pct, direction):
+def _lvl(base, pct, direction, stock_id=None):
     """The published level for base * (1 + pct): snapped onto the exchange's
-    quote ladder, the same way scan_mode and holding_tracker compute it."""
+    quote ladder, the same way scan_mode and holding_tracker compute it.
+
+    `stock_id` picks the ladder -- an ETF steps 0.05 above 50 where an
+    ordinary share steps 0.50 -- so this stays identical to the producers.
+    """
     try:
         from scanner.tick import round_to_tick
     except Exception:
         return round(base * (1 + pct), 2)
-    got = round_to_tick(base * (1 + pct), direction)
+    got = round_to_tick(base * (1 + pct), direction, stock_id)
     return got if got is not None else round(base * (1 + pct), 2)
 
 
@@ -538,19 +564,19 @@ def _check_rows(rows, meta, rep, scan_mode):
             # Since 2026-09-21 every level is snapped onto the exchange's
             # quote ladder, so the identity is "the rounded level", not the raw
             # multiplication: 191.50 x 0.80 = 153.20 is not an orderable price.
-            if stop is not None and abs(stop - _lvl(close, -stop_pct, "down")) > _PRICE_TOL:
+            if stop is not None and abs(stop - _lvl(close, -stop_pct, "down", sid)) > _PRICE_TOL:
                 hit("stop_pct_mismatch", sid, "Strict_Stop_Loss")
-            if tgt is not None and abs(tgt - _lvl(close, tp_pct, "up")) > _PRICE_TOL:
+            if tgt is not None and abs(tgt - _lvl(close, tp_pct, "up", sid)) > _PRICE_TOL:
                 hit("target_pct_mismatch", sid, "Target_Price")
             risk = _num(r.get("Risk_Pct"))
             if risk is not None and close and stop is not None:
                 if abs(risk - (close - stop) / close * 100) > 0.11:
                     hit("risk_pct_mismatch", sid, "Risk_Pct")
             add = _num(r.get("Add_Price"))
-            if add is not None and abs(add - _lvl(close, -add_pct, "down")) > _PRICE_TOL:
+            if add is not None and abs(add - _lvl(close, -add_pct, "down", sid)) > _PRICE_TOL:
                 hit("add_pct_mismatch", sid, "Add_Price")
             out = _num(r.get("Scale_Out_Price"))
-            if out is not None and abs(out - _lvl(close, out_pct, "up")) > _PRICE_TOL:
+            if out is not None and abs(out - _lvl(close, out_pct, "up", sid)) > _PRICE_TOL:
                 hit("scale_out_pct_mismatch", sid, "Scale_Out_Price")
 
         # Core_Plus derives from three columns on the same row
@@ -596,6 +622,12 @@ def _check_rows(rows, meta, rep, scan_mode):
                 if status == "pending":
                     if hd != 0 or hr != ht:
                         hit("hold_pending_counts", sid, "Hold_Day")
+                elif status == "exited":
+                    # The exit stack closed this trade, so Hold_Day is the day
+                    # it closed on and nothing remains. "day + remaining ==
+                    # total" describes an OPEN hold and does not apply.
+                    if hr != 0:
+                        hit("exited_row_has_days_left", sid, "Hold_Remaining")
                 elif hd + hr != ht:
                     hit("hold_day_arithmetic", sid, "Hold_Remaining")
             if _is_int(ht) and _is_int(hc) and hc < ht:
@@ -620,7 +652,7 @@ def _check_rows(rows, meta, rep, scan_mode):
                         if col not in r:
                             continue
                         got = _num(r.get(col))
-                        if got is None or abs(got - _lvl(fill, pct, side)) > _PRICE_TOL:
+                        if got is None or abs(got - _lvl(fill, pct, side, sid)) > _PRICE_TOL:
                             hit("fill_level_mismatch", sid, col)
                             break
             if not _is_null(entry) and not _is_null(exit_) and str(exit_)[:10] < str(entry)[:10]:
@@ -640,8 +672,8 @@ def _check_rows(rows, meta, rep, scan_mode):
                             and abs(plan_stop - stop) > _PRICE_TOL:
                         hit("plan_stop_pending_mismatch", sid, "Plan_Stop")
                 elif fill is not None and plan_stop is not None and _is_bool(armed):
-                    want = (_lvl(fill, lock_pct, "down") if armed
-                            else _lvl(fill, -stop_pct, "down"))
+                    want = (_lvl(fill, lock_pct, "down", sid) if armed
+                            else _lvl(fill, -stop_pct, "down", sid))
                     if abs(plan_stop - want) > _PRICE_TOL:
                         hit("plan_stop_level_mismatch", sid, "Plan_Stop")
             # staged entry (2026-09-20): the add level never moves, so it is
@@ -657,7 +689,7 @@ def _check_rows(rows, meta, rep, scan_mode):
                     if not _is_null(hit_on):
                         hit("add_hit_on_pending_row", sid, "Add_Hit_Date")
                 elif fill is not None and plan_add is not None:
-                    if abs(plan_add - _lvl(fill, -add_pct, "down")) > _PRICE_TOL:
+                    if abs(plan_add - _lvl(fill, -add_pct, "down", sid)) > _PRICE_TOL:
                         hit("plan_add_level_mismatch", sid, "Plan_Add_Price")
                 if not _is_null(hit_on) and not _is_null(entry):
                     if str(hit_on)[:10] < str(entry)[:10]:
@@ -707,7 +739,7 @@ def _check_rows(rows, meta, rep, scan_mode):
         # would have caught it, so it can never come back silently.
         for col in ORDER_LEVEL_COLUMNS:
             f = _num(r.get(col))
-            if f is not None and not _on_tick(f):
+            if f is not None and not _on_tick(f, sid):
                 hit("price_off_tick", sid, col)
 
     dups = [s for s, n in ids_seen.items() if n > 1]
@@ -779,6 +811,7 @@ def _check_rows(rows, meta, rep, scan_mode):
         "add_hit_on_pending_row": "staged add booked before entry",
         "add_hit_before_entry": "Add_Hit_Date earlier than Entry_Date",
         "exit_signal_partial": "Exit_Signal without its date or price",
+        "exited_row_has_days_left": "a closed trade still counts hold days",
         "scale_out_pct_mismatch": "Scale_Out_Price is not close x (1 + PRELAUNCH_SCALE_OUT_PCT)",
         "price_off_tick": "an order level that the exchange does not quote "
                           "(not on the tick ladder, so it cannot be placed)",
@@ -899,7 +932,13 @@ def _check_quotes(payload, quotes, rep, tracked_ids=None):
         rep.error("quotes_series_length", "quotes.closes", len(bad_len),
                   "series length != sessions", sample=bad_len)
 
-    missing, gap, mismatch, noname = [], [], [], []
+    # Names the pre-export top-up asked every source about and still found
+    # nothing newer for: halted or delisted. A listed row with no close IS a
+    # problem, but not one the scan can fix by running again, so it is
+    # reported rather than failed -- the same treatment the tracked names get
+    # a few lines below.
+    ended_now = (meta.get("quotes") or {}).get("source_ended") or {}
+    missing, gap, mismatch, noname, gap_ended = [], [], [], [], []
     for r in rows:
         sid = str(r.get("Stock_ID") or "").strip()
         series = closes.get(sid)
@@ -907,7 +946,7 @@ def _check_quotes(payload, quotes, rep, tracked_ids=None):
             missing.append(sid)
             continue
         if series[-1] is None:
-            gap.append(sid)
+            (gap_ended if sid in ended_now else gap).append(sid)
         else:
             c = _num(r.get("Close_Price"))
             if c is not None and abs(float(series[-1]) - c) > _PRICE_TOL:
@@ -920,6 +959,10 @@ def _check_quotes(payload, quotes, rep, tracked_ids=None):
     if gap:
         rep.error("quotes_gap_row", "quotes.closes", len(gap),
                   "listed stock has no close for the session", sample=gap)
+    if gap_ended:
+        rep.warn("quotes_gap_row_ended", "quotes.closes", len(gap_ended),
+                 "listed stock has no close and no newer bar at any source "
+                 "(halted or delisted)", sample=gap_ended)
     if mismatch:
         rep.error("quotes_close_mismatch", "quotes.closes", len(mismatch),
                   "feed close != row Close_Price", sample=mismatch)
@@ -983,6 +1026,26 @@ def _check_recommendations(payload, recs, rep):
                   sample=detached)
 
 
+def _check_tracked(payload, meta, rep, scan_mode):
+    tracked = payload.get("tracked")
+    if not isinstance(tracked, list) or not tracked:
+        return
+    sub = _Report()
+    sub.block = "tracked"
+    try:
+        _check_columns(tracked, sub)
+        _check_rows(tracked, meta, sub, scan_mode)
+    except Exception as e:
+        sub.add("error", "checker_crash", "", 1,
+                "{}: {}".format(type(e).__name__, e))
+    for item in sub.items:
+        if item["level"] == "error":
+            item["level"] = "warn"
+        rep.items.append(item)
+    rep.add("info", "tracked_rows_checked", "", len(tracked),
+            "dropped-out names audited with the same column rules")
+
+
 # --------------------------------------------------------------------------
 # public API
 # --------------------------------------------------------------------------
@@ -999,6 +1062,15 @@ def check_payload(payload, quotes=None, recs=None, tracked_ids=None,
         _check_rows(rows, meta, rep, scan_mode)
         _check_quotes(payload, quotes, rep, tracked_ids=tracked_ids)
         _check_recommendations(payload, recs, rep)
+        # The tracked block is what a HOLDER reads once a name drops off the
+        # list, and until 2026-09-21 nothing checked it at all: the column
+        # registry, the tick ladder and every fill-level identity ran on
+        # `rows` only, while `tracked` shipped straight to the phone. It is
+        # audited with the same rules, its codes prefixed so the two blocks
+        # stay distinguishable, and reported at WARN: a problem there must be
+        # visible, but it must not fail -- and so retry -- a scan whose actual
+        # recommendation list is sound.
+        _check_tracked(payload, meta, rep, scan_mode)
     except Exception as e:      # the checker must never take the scan down
         rep.error("checker_crash", "", 1, "{}: {}".format(type(e).__name__, e))
 
@@ -1053,14 +1125,20 @@ def github_annotations(report):
 def tracked_ids_from_ledger(ledger_path, scan_mode, since_date):
     """Distinct stock ids the ledger picked on or after since_date."""
     import sqlite3
+    conn = None
     try:
-        with sqlite3.connect(str(ledger_path)) as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT stock_id FROM picks WHERE scan_mode = ? AND bar_date >= ?",
-                (scan_mode, str(since_date)[:10])).fetchall()
+        # `with sqlite3.connect(...)` does not close the handle; on Windows
+        # that keeps the ledger file locked until GC.
+        conn = sqlite3.connect(str(ledger_path))
+        rows = conn.execute(
+            "SELECT DISTINCT stock_id FROM picks WHERE scan_mode = ? AND bar_date >= ?",
+            (scan_mode, str(since_date)[:10])).fetchall()
         return sorted(str(r[0]) for r in rows if r and r[0])
     except Exception:
         return []
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _load_json(path):

@@ -205,7 +205,21 @@ def audit_store(price_db_path=None, stock_ids=None) -> pd.DataFrame:
 # are left alone by only judging the recent window.
 SESSION_WINDOW = 40    # recent dates to judge; a placeholder only lands here
 SESSION_SHARE = 0.20   # a real session is nowhere near this thin
-SESSION_NEIGHBOURS = 9  # dates compared against, centred on the one judged
+SESSION_NEIGHBOURS = 8  # dates compared against: half of them on each side
+
+# A date this many stocks reported for is a SESSION, whatever its neighbours
+# look like. The relative rule below is the one that catches a placeholder
+# (2026-09-20: 22 names out of ~1,930), and it has to stay sensitive enough to
+# catch one. But coverage in this store now swings four-fold -- ~320 names on
+# a shortlist-only day against ~2,300 on a whole-market day -- and a genuine
+# shortlist day sitting between two whole-market days is judged against a
+# reference near 1,300, i.e. a threshold of 260 against a count of 320. That
+# margin is one filter change from deleting a real trading day, and
+# purge_nonsession_bars is the only code in this project that DELETEs price
+# rows: a wrong deletion moves hold days and entry dates, which is exactly
+# the 2026-09-20 damage. 100 sits an order of magnitude above any placeholder
+# ever observed and an order of magnitude below any real session.
+SESSION_FLOOR = 100
 
 
 def _median(values):
@@ -217,13 +231,14 @@ def _median(values):
 
 
 def nonsession_dates(date_counts, window=SESSION_WINDOW, share=SESSION_SHARE,
-                     neighbours=SESSION_NEIGHBOURS):
+                     neighbours=SESSION_NEIGHBOURS, floor=SESSION_FLOOR):
     """Dates in the recent `window` whose coverage is a fraction of normal.
 
     `date_counts` is an iterable of (date, stock_count). Returns a sorted list
     of the dates that cannot be real sessions.
 
-    Each date is judged against the median of its NEAREST NEIGHBOURS, not
+    A date with at least SESSION_FLOOR stocks is always kept. Below that, it
+    is judged against the median of its NEAREST NEIGHBOURS, not
     against the whole window. That matters as soon as coverage changes level:
     from 2026-09-21 the scan stores the whole market's bar (~2,300 names a
     day) while older dates hold only what the daily shortlist happened to
@@ -243,6 +258,8 @@ def nonsession_dates(date_counts, window=SESSION_WINDOW, share=SESSION_SHARE,
     bad = []
     half = max(1, neighbours // 2)
     for i, (d, n) in enumerate(recent):
+        if n >= floor:
+            continue
         before = values[max(0, i - half):i]
         after = values[i + 1:i + 1 + half]
         # Compare against the QUIETER side. On the day coverage steps up, one

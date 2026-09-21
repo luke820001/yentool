@@ -65,6 +65,24 @@ def _num(row, col):
         return None
 
 
+def _on_ladder(value, direction, stock_id=None):
+    """A stored level snapped onto the exchange's quote ladder, or None."""
+    if value in (None, ""):
+        return None
+    try:
+        px = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not px > 0:
+        return None
+    try:
+        from scanner.tick import round_to_tick
+    except Exception:
+        return round(px, 2)
+    got = round_to_tick(px, direction, stock_id)
+    return got if got is not None else round(px, 2)
+
+
 def attach_recommendations(df, scan_mode, strategy_version, ledger_path,
                            session_date=None, next_session=None):
     """Record first-qualified recommendations and attach the frozen columns.
@@ -139,10 +157,18 @@ def attach_recommendations(df, scan_mode, strategy_version, ledger_path,
             stats["attached"] += 1
             ids.append(rec["recommendation_id"])
             buys.append(float(rec["initial_buy_price"]))
-            stops.append(float(rec["initial_stop_price"])
-                         if rec["initial_stop_price"] else None)
-            targets.append(float(rec["initial_target_price"])
-                           if rec["initial_target_price"] else None)
+            # The frozen levels are PUBLISHED as order levels, so they have to
+            # be prices the exchange quotes. Records written before the tick
+            # ladder shipped (2026-09-21) carry raw multiplications -- 1815's
+            # Initial_Target_Price was one of them -- and an unplaceable price
+            # is not a plan. The ledger row itself is untouched: this rounds
+            # the value on its way to the screen, by at most one tick, and the
+            # direction follows the same rule as everywhere else (a stop down,
+            # a target up, never flattering the level).
+            stops.append(_on_ladder(rec["initial_stop_price"], "down",
+                                    sid.strip()))
+            targets.append(_on_ladder(rec["initial_target_price"], "up",
+                                      sid.strip()))
             dates.append(rec["first_qualified_session"])
             statuses.append(rec["status"])
             valids.append(rec["valid_until_session"])
