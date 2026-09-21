@@ -318,13 +318,14 @@ def _normalize_yf_single(sub, stock_id):
     if any(c not in sub.columns for c in required):
         return pd.DataFrame()
     out = sub[required].dropna().reset_index(drop=True)
-    # A quoted price has two decimals. yfinance hands back float32-widened
-    # values -- 47.5999984741211 for a 47.60 open, 534.5045776367 for 534.50 --
-    # and every level the scan publishes is derived from one of them, so a
-    # storage artefact of 1e-5 could become a FULL TICK once the level is
-    # snapped onto the ladder (measured 2026-09-21: 3,086 level computations
-    # across the stored opens since 2026-08-01, worst case 5.00 on 2383).
-    # Rounding here costs nothing and keeps the store readable as prices.
+    # A quoted price has two decimals; this feed returns values a hair off it
+    # (13.1499996185303 for 13.15, 2402.926758 for 2402.93), partly float
+    # widening and partly the auto_adjust factor. Every level the scan
+    # publishes is derived from one of them, so that hair becomes a FULL TICK
+    # once the level is snapped onto the ladder -- measured 2026-09-21 at
+    # 3,086 level computations across the stored opens since 2026-08-01,
+    # worst case 5.00 on 2383. Rounding here costs nothing and keeps the store
+    # readable as prices.
     for c in ("open", "high", "low", "close"):
         out[c] = out[c].astype(float).round(2)
     return _drop_synthetic_bars(out)

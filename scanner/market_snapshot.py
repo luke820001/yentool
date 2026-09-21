@@ -289,14 +289,22 @@ BASIS_TOLERANCE_PCT = 0.5
 def round_stored_prices(price_db, log=print):
     """Round every stored OHLC value to two decimals where it is not already.
 
-    Taiwan quotes carry at most two decimals. yfinance hands back
-    float32-widened numbers -- 13.1499996185303 for a 13.15 open,
-    534.5045776367 for 534.50 -- and 10,352 of 21,337 bars stored since
-    2026-09-01 were like that. Harmless to look at, not harmless to compute
-    with: every published level is one of these numbers times something, and
-    a 1e-5 artefact becomes a FULL TICK once the product is snapped onto the
-    ladder (3,086 level computations across the stored opens since
-    2026-08-01, worst case 5.00 on 2383).
+    Taiwan quotes carry at most two decimals. The batch feed does not: it
+    returns values a hair off the quoted price -- 13.1499996185303 for a 13.15
+    open, 2402.926758 for a 2402.93 close -- partly float widening and partly
+    the adjustment factor yfinance applies with auto_adjust=True. 10,352 of
+    the 21,337 bars stored since 2026-09-01 were like that, all within
+    0.0002% of a clean two-decimal price.
+
+    Harmless to look at, not harmless to compute with: every published level
+    is one of these numbers times something, and the difference becomes a FULL
+    TICK once the product is snapped onto the ladder -- 3,086 level
+    computations across the stored opens since 2026-08-01, worst case 5.00 on
+    2383.
+
+    Rounding restores the price the exchange actually published. A genuinely
+    dividend-adjusted bar stays adjusted; it is only tidied, and the basis
+    question is handled by compare_to_store and reassert_exchange_prices.
 
     New bars are rounded on the way in (ingestion/price_volume_multi and the
     exchange feed, which is clean anyway). This heals what is already there,
@@ -317,8 +325,8 @@ def round_stored_prices(price_db, log=print):
             "UPDATE data SET %s WHERE %s"
             % (", ".join("{c} = ROUND({c}, 2)".format(c=c) for c in cols), where))
         conn.commit()
-        log("  [snapshot] rounded {} stored bar(s) to two decimals (float "
-            "artefacts from the batch feed)".format(n))
+        log("  [snapshot] rounded {} stored bar(s) back to the quoted two "
+            "decimals (the batch feed returns them a hair off)".format(n))
         return n
     except Exception as e:
         log("  [snapshot] price rounding skipped: {}".format(str(e)[:80]))
