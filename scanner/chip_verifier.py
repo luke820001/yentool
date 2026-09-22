@@ -378,6 +378,22 @@ def verify_candidates(
         merged.sort_values("date", inplace=True)
         merged.reset_index(drop=True, inplace=True)
 
+        # An UN-ADJUSTED corporate action leaves two price bases in one series,
+        # and every rolling figure computed across the boundary is void. 6949
+        # on 2026-09-22 published MA20 511.15 and MA60 791.80 against a close
+        # of 50.80 and told the owner the stock was down 95.3% in a month; the
+        # series stepped 1,490.00 -> 67.10 with volume up a hundred-fold, which
+        # is a split. Drop the older half rather than average across it: we do
+        # not know the ratio well enough to rescale, and inventing the old
+        # prices in today's unit would be worse than having none.
+        try:
+            from scanner.data_integrity import split_start
+            _cut = split_start(merged)
+            if _cut:
+                merged = merged.iloc[_cut:].reset_index(drop=True)
+        except Exception:
+            pass
+
         # Recompute rolling-derived columns from the raw close/volume. The stored
         # ones are computed at fetch time and can drift out of sync with prices
         # that were later re-fetched or back-adjusted (auto_adjust), which would

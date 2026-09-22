@@ -237,7 +237,10 @@ COLUMNS = {
 # Flag prefixes data_integrity uses for UNAMBIGUOUS data errors; everything
 # else it emits (jump / recent_jump / gap / short_*) is an observation about a
 # series that is still trustworthy.
-_HARD_FLAGS = ("nan:", "nonpos:", "ohlc:", "dup:")
+# "split:" joins these 2026-09-22: a step beyond any legal move means the
+# series carries two price bases, so it is a data error, not an observation
+# about a volatile stock.
+_HARD_FLAGS = ("nan:", "nonpos:", "ohlc:", "dup:", "split:")
 
 # Tolerances for identity checks on rounded prices.
 _PRICE_TOL = 0.011      # two-decimal rounding on both sides

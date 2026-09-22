@@ -27,6 +27,22 @@ import pandas as pd
 
 # Taiwan daily price limit is +-10%; 10.5% leaves room for tick rounding.
 LIMIT_JUMP    = 0.105
+
+# A jump BEYOND this ratio is not a price move under any Taiwan rule, limit or
+# no limit: it is an un-adjusted corporate action, so the series carries two
+# different price bases and every rolling figure derived across it is void.
+#
+# Found 2026-09-22 on 6949, a TSE innovation-board biotech: 2026-08-26 closed 1,490.00 on 550
+# lots, then after a seven-session gap 2026-09-07 closed 67.10 on 24,345 lots
+# -- a ratio of 22 with volume up a hundred-fold, which is a split, not a
+# crash. The row published MA20 511.15 and MA60 791.80 against a close of
+# 50.80, told the owner the stock had lost 95.3% in a month, and still carried
+# Integrity_OK = True because a >10% jump was classified as a soft flag. That
+# classification is right for 10-20%; it is not right for 3x.
+#
+# 3.0 is deliberately far above any legitimate session, including a first-day
+# listing with no limit, so this never fires on a real move.
+SPLIT_RATIO   = 3.0
 MIN_BARS_MA60 = 60     # below this the 60-day MA (a trend gate) is not real
 MIN_BARS_52W  = 240    # below this 52-week-high / 63-day RS are weak
 RECENT_BARS   = 60     # a suspect jump within this many bars still taints the
@@ -57,6 +73,8 @@ def audit_series(df: pd.DataFrame, calendar=None) -> dict:
         "jumps":          0,   # bars with |close-to-close| > LIMIT_JUMP
         "recent_jump":    False,
         "last_jump_date": None,
+        "splits":          0,  # bars whose step is beyond any legal move
+        "last_split_date": None,
         "gaps":           0,   # missing trading days inside the stock's range
         "short_ma60":     True,
         "short_52w":      True,
@@ -98,6 +116,15 @@ def audit_series(df: pd.DataFrame, calendar=None) -> dict:
         ret = close.pct_change()
         jump_mask = ret.abs() > LIMIT_JUMP
         out["jumps"] = int(jump_mask.fillna(False).sum())
+        # A split-scale step is counted separately: it is a data error, not an
+        # observation about a volatile stock.
+        ratio = (1.0 + ret).abs()
+        split_mask = ((ratio >= SPLIT_RATIO) | (ratio <= 1.0 / SPLIT_RATIO))
+        split_mask = split_mask.fillna(False)
+        out["splits"] = int(split_mask.sum())
+        if out["splits"]:
+            sdates = d.loc[split_mask, "date"]
+            out["last_split_date"] = sdates.max().strftime("%Y-%m-%d")
         if out["jumps"]:
             jdates = d.loc[jump_mask.fillna(False), "date"]
             out["last_jump_date"] = jdates.max().strftime("%Y-%m-%d")
@@ -124,6 +151,7 @@ def audit_series(df: pd.DataFrame, calendar=None) -> dict:
     if out["nonpositive"]: flags.append("nonpos:{}".format(out["nonpositive"]))
     if out["ohlc_bad"]:    flags.append("ohlc:{}".format(out["ohlc_bad"]))
     if out["dup_dates"]:   flags.append("dup:{}".format(out["dup_dates"]))
+    if out["splits"]:      flags.append("split:{}".format(out["splits"]))
     if out["jumps"]:       flags.append("jump:{}".format(out["jumps"]))
     if out["recent_jump"]: flags.append("recent_jump")
     if out["gaps"]:        flags.append("gap:{}".format(out["gaps"]))
@@ -131,8 +159,32 @@ def audit_series(df: pd.DataFrame, calendar=None) -> dict:
     elif out["short_52w"]: flags.append("short_52w")
 
     out["flags"] = flags
-    out["trustworthy"] = not bool(data_error)
+    # A split-scale step is an UNAMBIGUOUS data error: the two halves of the
+    # series are in different units. Everything else jump-shaped stays an
+    # observation, as before.
+    out["trustworthy"] = not bool(data_error) and not out["splits"]
     return out
+
+
+def split_start(frame, close_col="close"):
+    """Index of the first row AFTER the last split-scale step, or 0.
+
+    Everything before that index is quoted in a different unit, so no rolling
+    figure may span it. Rescaling would be inventing data -- we do not know the
+    exact ratio, only that the two halves are incomparable -- so the caller
+    drops the older half and lets the averages be null until enough bars in the
+    current unit accumulate. That is the same rule scanner/universe_export.py
+    applies to a coverage gap.
+    """
+    if frame is None or len(frame) < 2 or close_col not in frame.columns:
+        return 0
+    c = pd.to_numeric(frame[close_col], errors="coerce")
+    prev = c.shift(1)
+    ratio = (c / prev).abs()
+    bad = ((ratio >= SPLIT_RATIO) | (ratio <= 1.0 / SPLIT_RATIO)) & prev.notna() & c.notna()
+    if not bool(bad.any()):
+        return 0
+    return int(frame.index.get_loc(bad[bad].index[-1]))
 
 
 def audit_store(price_db_path=None, stock_ids=None) -> pd.DataFrame:

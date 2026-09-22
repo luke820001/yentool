@@ -938,6 +938,43 @@ async function voidExecution(executionId, reason) {
   await restateCycle(exe.position_id, "撤銷誤登");
 }
 
+// Remove a record and everything derived from it, in one transaction.
+//
+// This project's rule is SUPERSEDE, NEVER DELETE (report 5.2): a trade that
+// happened must survive being cancelled, which is what 撤銷誤登 is for. But a
+// record the owner created by mistake and then cancelled entirely has no event
+// to preserve -- and until 2026-09-22 there was no way to get rid of it. It
+// stayed on 持倉 claiming 持有中 with 0 shares, nagged from 待處理 every day,
+// and the only exits were 封存 or 撤銷, each of which just moves the ghost to a
+// different permanent table.
+//
+// So deletion exists, and it tells the truth about what it destroys: the
+// caller must show what is going, because from here nothing is recoverable.
+// Everything keyed to the position goes together, or the leftovers become
+// orphans that portfolioSummary and latestMark would keep reading.
+async function deletePosition(posId) {
+  const execs = await dbGetAll("executions", "by_position", posId);
+  const marks = await dbGetAll("marks", "by_position", posId);
+  const pos = await dbGet("positions", posId);
+  const horizon = (pos && pos.horizon_days) || STRATEGY.horizon;
+  const db = await openDB();
+  const tx = db.transaction(["positions", "executions", "marks", "meta"], "readwrite");
+  for (const e of execs) tx.objectStore("executions").delete(e.execution_id);
+  for (const m of marks) tx.objectStore("marks").delete([m.position_id, m.session_date]);
+  tx.objectStore("meta").delete(`cycle:${posId}:${horizon}:position`);
+  tx.objectStore("positions").delete(posId);
+  await txDone(tx);
+  return { executions: execs.length, marks: marks.length };
+}
+
+// What deleting this record would actually destroy, in the owner's terms.
+function deleteCost(pos) {
+  const live = (STATE.execsByPos[pos.position_id] || []).filter((e) => e.is_current === 1);
+  const realized = pos.realized_net || 0;
+  const empty = live.length === 0 && realized === 0;
+  return { live: live.length, realized, empty };
+}
+
 async function createPosition(fields) {
   const pos = Object.assign({
     position_id: newId("pos"),
@@ -2387,6 +2424,7 @@ function positionCard(pos, pinned) {
         ${btn("archive", "封存已結束紀錄", "primary", { pos: pos.position_id })}
         ${btn("execs", "補登／更正成交", "", { pos: pos.position_id })}
         ${btn("cycle", `${horizon}日明細`, "", { pos: pos.position_id })}
+        ${btn("pos-delete", "刪除這筆紀錄", "danger", { pos: pos.position_id })}
       </div>
     </article>`;
   }
@@ -2518,6 +2556,7 @@ function positionCard(pos, pinned) {
       ${btn("execs", "補登／更正成交", "", { pos: pos.position_id })}
       ${btn("cycle", `${horizon}日明細`, "", { pos: pos.position_id })}
       ${pos.open_shares === 0 ? btn("archive", "封存已結束紀錄", "", { pos: pos.position_id }) : ""}
+      ${btn("pos-delete", "刪除這筆紀錄", "danger", { pos: pos.position_id })}
     </div>
   </article>`;
 }
@@ -2557,7 +2596,8 @@ function renderPerf() {
       <td>${esc(p.opened_session || "?")} → ${esc(p.closed_session || "?")}</td>
       <td class="${signClass(p.realized_net)}">${esc(fmtPnl(p.realized_net))}</td>
       <td>${p.status === "archived" ? "已封存" : "已平倉"}<div class="btns">${
-        btn("execs", "更正", "", { pos: p.position_id })}</div></td>
+        btn("execs", "更正", "", { pos: p.position_id })}${
+        btn("pos-delete", "刪除", "danger", { pos: p.position_id })}</div></td>
     </tr>`).join("")}</tbody></table>`
     : `<div class="empty-inline">尚無已平倉紀錄。</div>`;
 
@@ -3568,6 +3608,29 @@ document.addEventListener("click", async (ev) => {
       pos.archived_at = nowStamp();
       await dbPut("positions", pos);
       toast("已封存");
+      await load();
+      return;
+    }
+    if (act === "pos-delete") {
+      const pos = await dbGet("positions", d.pos);
+      if (!pos) { toast("找不到這筆紀錄"); return; }
+      const cost = deleteCost(pos);
+      const name = pos.stock_name || pos.stock_id;
+      const msg = cost.empty
+        ? `刪除「${name}」？
+
+這筆沒有任何有效成交，也沒有已實現損益，刪除後不會留下紀錄。`
+        : `刪除「${name}」？
+
+會一併移除 ${cost.live} 筆有效成交與已實現淨損益 `
+          + `${fmtPnl(cost.realized)}，帳戶總額會跟著改變。
+
+`
+          + `這個動作無法復原。若只是想把它從清單收起來，請改用「封存已結束紀錄」。`;
+      if (!confirm(msg)) return;
+      const gone = await deletePosition(d.pos);
+      closeModal();
+      toast(`已刪除（成交 ${gone.executions} 筆）`);
       await load();
       return;
     }

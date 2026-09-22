@@ -254,6 +254,11 @@ body {
 }
 .btn.primary { background: rgba(74,144,226,0.18); border-color: var(--accent); color: #bcd7f5; }
 .btn:active { background: var(--line); }
+/* A button that destroys data must not look like the one beside it. Muted
+   rather than loud: it sits next to routine actions and the confirm dialog is
+   what actually stops a mistake. */
+.btn.danger { color: #e8a0a0; border-color: rgba(214,92,92,0.55); }
+.btn.danger:active { background: rgba(214,92,92,0.18); }
 
 /* --- tables ---------------------------------------------------------------*/
 .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
