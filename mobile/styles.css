@@ -261,6 +261,10 @@ body {
 .tbl th:first-child, .tbl td:first-child { text-align: left; }
 .tbl th { color: var(--dim); font-weight: 600; font-size: 11px; }
 .tbl tr.hl td { background: rgba(255,215,64,0.1); font-weight: 700; }
+/* A button inside a table cell. .btn defaults to min-width 96px (84px on a
+   narrow phone), either of which blows a four-column table off the screen.
+   min-height stays at --tap: the target must still be thumb-sized. */
+.tbl .btn { min-width: 0; flex: 0 0 auto; padding: 6px 10px; font-size: 12px; }
 
 /* detail rows */
 .drow { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 3px 0; border-bottom: 1px solid rgba(58,61,74,0.5); }

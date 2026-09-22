@@ -103,6 +103,10 @@ MODE_SCORE_DEFAULT = ("Explosion_Score", "蓄勢分")
 # as its raw ASCII rather than being silently dropped.
 BLOCK_TEXT = {
     "regime":    "大盤未站上20/60MA",
+    # Not the same fact: the index feed is simply behind the stock data, so the
+    # regime cannot be judged. Saying "has not reclaimed its averages" there is
+    # a false statement about the market (2026-09-21).
+    "regime_stale": "大盤資料尚未更新到今天，本次不判定順風",
     "rank":      "非前20名",
     "market":    "非上櫃",
     "quality":   "未過品質閘門",

@@ -608,10 +608,18 @@ def mark_buy_ready(df, scan_mode, session_date=None):
         # from a stale TAIEX cache is equally unusable (F15) -- is_current is
         # absent on older callers, so treat only an explicit False as a veto.
         enter_ok = bool(reg.get("ok")) and bool(reg.get("enter_ok"))
-        if reg.get("is_current") is False:
+        # A regime computed from a stale TAIEX cache is unusable either way,
+        # but it is NOT the same fact. 2026-09-21: the index closed above both
+        # averages and the feed simply had not published that bar yet, so the
+        # scan blocked all 46 rows and both screens told the owner "the index
+        # has not reclaimed its 20/60-day averages" -- a statement about the
+        # market that was false. Keep the veto, and say which veto it is.
+        regime_stale = reg.get("is_current") is False
+        if regime_stale:
             enter_ok = False
     except Exception:
         enter_ok = False
+        regime_stale = False
 
     n = len(df)
     # A missing Market column must not collapse to a scalar: `"" != "OTC"` is a
@@ -659,7 +667,8 @@ def mark_buy_ready(df, scan_mode, session_date=None):
     block = block.mask(~integrity, "integrity")
     block = block.mask(~current, "stale")
     if not enter_ok:
-        block = pd.Series("regime", index=df.index)
+        block = pd.Series("regime_stale" if regime_stale else "regime",
+                          index=df.index)
 
     df["Buy_Ready"] = ok
     df["Buy_Block"] = block.where(~ok, "")

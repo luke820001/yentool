@@ -22,7 +22,7 @@
  * useful for the browser's own cache without fragmenting ours.
  * ==========================================================================*/
 
-const VERSION = "v26";
+const VERSION = "v27";
 const CACHE = "yentool-" + VERSION;
 
 // Data files are cached under their bare URL too, so an offline start finds

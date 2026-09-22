@@ -121,6 +121,7 @@ const SORTS = [
 // and "no_rule" must read as REFUSALS: report section 8, "未知不能當通過".
 const BLOCK_TEXT = {
   regime: "大盤未站上20/60MA",
+  regime_stale: "大盤資料尚未更新到今天，本次不判定順風",
   stale: "資料非當日，需重新確認",
   integrity: "資料完整性未通過",
   rank: "非前20名",
@@ -693,6 +694,53 @@ function replay(execsSorted, through) {
   };
 }
 
+// --- what a proposed edit would make the history look like ---------------
+//
+// The share bound for a SELL used to be `pos.open_shares`, which is the state
+// AFTER the whole history. For an archived or closed record that is 0 by
+// construction, so correcting the sell that closed the trade -- the commonest
+// archive edit there is -- was rejected with 0 shares held, against the state
+// that same sell had produced. The bound has to be the shares held at the
+// moment the fill being edited sits in, which means folding the proposed
+// history rather than reading a summary field.
+
+// `cur` with the row being amended replaced by `candidate`, or `candidate`
+// appended for a backfill, in fold order.
+function plannedExecutions(cur, editingId, candidate) {
+  const others = editingId ? cur.filter((e) => e.execution_id !== editingId) : cur.slice();
+  const list = sortExecutions(others.concat([candidate]));
+  return { list, index: list.indexOf(candidate) };
+}
+
+// Shares held immediately before `index` in that order.
+function heldBefore(list, index) {
+  return replay(list.slice(0, index), null).shares;
+}
+
+// The first SELL in `list` that exceeds the shares held at that point, or null.
+//
+// Bounding only the EDITED row says nothing about the fills after it. Amend a
+// sell upward and the next sell can be left folding against zero shares, where
+// replay() simply `continue`s past it (its comment called that "defensive;
+// addExecution refuses this" -- which was not true until this function) and
+// the whole of that sell's proceeds vanish from realised P&L with no error and
+// no label. The mirror case is amending an earlier BUY down: replay then
+// removes more basis than exists and lands open_shares negative.
+function firstOversell(list) {
+  let shares = 0;
+  for (const e of list) {
+    if (e.side === "BUY") { shares += e.shares; continue; }
+    if (e.shares > shares) return { exe: e, held: shares };
+    shares -= e.shares;
+  }
+  return null;
+}
+
+function oversellMessage(bad, verb) {
+  return `${verb} ${bad.exe.session_date} 的賣出 ${bad.exe.shares.toLocaleString("en-US")} 股`
+    + ` 會超過當時持有的 ${bad.held.toLocaleString("en-US")} 股，請先更正那一筆`;
+}
+
 function applyDerived(pos, execsSorted) {
   const d = replay(execsSorted, null);
   pos.open_shares = d.shares;
@@ -708,6 +756,27 @@ function applyDerived(pos, execsSorted) {
   // An archived or voided position keeps that state; otherwise shares decide.
   if (pos.status !== "archived" && pos.status !== "void") {
     pos.status = d.shares > 0 ? "open" : (execsSorted.length ? "closed" : "open");
+  } else if (pos.status === "archived" && d.shares !== 0) {
+    // A correction gave this record shares again -- the closing sell was
+    // voided, or a buy was backfilled. Leaving it archived would hide a LIVE
+    // holding: activePositions filters it off 持倉, pendingItems never raises
+    // its stop or its day 10, ensureUniverseFor never fetches its quote --
+    // while rebuildMarks (which skips only void) keeps valuing it and
+    // portfolioSummary keeps counting it. The owner would own shares the app
+    // never mentions again.
+    //
+    // Note what this is NOT: dropping "archived" from the condition above is
+    // the smaller-looking change and the destructive one, because then the
+    // next unrelated correction on any archived record would silently flip it
+    // back to "closed" -- archiving undone by a price typo fix. This branch
+    // fires only in the one dangerous state.
+    //
+    // `!== 0` rather than `> 0`: with the oversell guard in place a negative
+    // count is unreachable, but visible-and-wrong beats invisible-and-wrong.
+    // archived_at is KEPT: this codebase supersedes and never deletes, and the
+    // filing timestamp is the one hand-written audit datum on the record.
+    pos.status = "open";
+    pos.unarchived_at = nowStamp();
   }
   pos.needs_shares = execsSorted.length === 0 && pos.origin === "migrated";
   pos.updated_at = nowStamp();
@@ -803,6 +872,14 @@ async function addExecution(positionId, value, opts) {
     idempotency_key: o.idempotency_key || newId("idem"),
     recorded_at: nowStamp(),
   };
+  // Refuse before the transaction opens, not after: a fold that cannot be
+  // replayed must never reach the store. This guard holds for EVERY caller,
+  // not only the form.
+  const keptPre = execs.filter((e) => e.execution_id !== (o.supersedes || null));
+  const plannedPre = currentExecutions(keptPre.concat([row]));
+  const badPre = firstOversell(plannedPre);
+  if (badPre) throw new LedgerError(oversellMessage(badPre, "更正後"));
+
   const db = await openDB();
   const tx = db.transaction(["executions", "positions"], "readwrite");
   const eos = tx.objectStore("executions");
@@ -815,15 +892,20 @@ async function addExecution(positionId, value, opts) {
     }
   }
   eos.put(row);
-  const kept = execs.filter((e) => e.execution_id !== o.supersedes);
-  kept.push(row);
-  applyDerived(pos, currentExecutions(kept));
+  applyDerived(pos, plannedPre);      // the same fold the guard above checked
   tx.objectStore("positions").put(pos);
   await txDone(tx);
   // A corrected fill changes the ten-day result, so the frozen snapshot has to
   // be restated rather than silently kept (report 11.6). The old value is kept
   // inside the meta record's revision list.
-  if (o.supersedes) await restateCycle(positionId, "成交更正");
+  // A BACKFILL changes the ten-day result exactly as much as a correction
+  // does. Until 2026-09-22 only a correction restated it, so a backfilled
+  // fill moved realized_net and the marks while the frozen figure kept its old
+  // value and grew no 已更正 label at all -- strictly worse than the corrected
+  // path, because nothing on the page said the two numbers disagreed.
+  // restateCycle returns immediately when the position has no frozen cycle, so
+  // the first buy of a new position is a no-op.
+  await restateCycle(positionId, o.supersedes ? "成交更正" : "補登成交");
   return row;
 }
 
@@ -839,6 +921,12 @@ async function voidExecution(executionId, reason) {
   exe.voided_at = nowStamp();
   const all = await dbGetAll("executions", "by_position", exe.position_id);
   const kept = all.map((e) => (e.execution_id === executionId ? exe : e));
+  // Voiding the first of two buys that a single sell sits on top of is exactly
+  // the case a per-row bound cannot see. Refuse with the conflict named rather
+  // than let replay() silently swallow the sell (F11: a refusal with a reason,
+  // never a silent coercion).
+  const badVoid = firstOversell(currentExecutions(kept));
+  if (badVoid) throw new LedgerError(oversellMessage(badVoid, "撤銷這筆後，"));
   const db = await openDB();
   const tx = db.transaction(["executions", "positions"], "readwrite");
   tx.objectStore("executions").put(exe);
@@ -968,11 +1056,14 @@ async function rebuildMarks() {
   const sessions = STATE.quotes && STATE.quotes.sessions ? STATE.quotes.sessions : [];
   if (!sessions.length) return;   // no feed: keep the marks we already have
   const closesAll = (STATE.quotes && STATE.quotes.closes) || {};
+  const lo = sessions[0], hi = sessions[sessions.length - 1];
   const fresh = [];
+  const touched = [];             // every non-void position this pass visited
   for (const pos of STATE.positions) {
     if (pos.status === "void") continue;
+    touched.push(pos);
     const execs = currentExecutions(STATE.execsByPos[pos.position_id] || []);
-    if (!execs.length) continue;
+    if (!execs.length) continue;  // no current fills: the whole series is baseless
     const series = closesAll[pos.stock_id];
     const closes = {};
     if (series) {
@@ -983,28 +1074,136 @@ async function rebuildMarks() {
     }
     for (const m of buildMarks(pos, execs, closes, sessions, CAL)) fresh.push(m);
   }
-  await dbPutMany("marks", fresh);
-  await freezeDueCycles(fresh);
+
+  // Marks were the one derived store that was written and never deleted, so an
+  // edit that SHORTENS a history -- the sell moved earlier, the first buy
+  // voided -- left the old rows behind. latestMark() then returns a valuation
+  // day the corrected fills no longer reach, and portfolioSummary keeps adding
+  // that row's total_book while realized_net has already moved: 帳面總損益 and
+  // 已實現淨損益 disagree by the whole correction, permanently, with nothing on
+  // screen saying which is current.
+  //
+  // ONLY inside the quote window. buildMarks iterates `sessions`, so it can
+  // never emit a mark outside [lo, hi]; an unbounded sweep would delete every
+  // older mark for every position on plain startup -- and marks are NOT in the
+  // backup, so that loss is permanent. The `if (!sessions.length) return`
+  // above must stay above this: on a feed-outage day `keep` is empty.
+  const keep = new Set(fresh.map((m) => m.position_id + " " + m.session_date));
+  const stale = [];
+  for (const pos of touched) {
+    for (const m of (STATE.marksByPos[pos.position_id] || [])) {
+      if (m.session_date < lo || m.session_date > hi) continue;
+      if (keep.has(pos.position_id + " " + m.session_date)) continue;
+      stale.push([pos.position_id, m.session_date]);
+    }
+  }
+  const db = await openDB();
+  const tx = db.transaction("marks", "readwrite");
+  const mos = tx.objectStore("marks");
+  for (const k of stale) mos.delete(k);
+  for (const m of fresh) mos.put(m);
+  await txDone(tx);
+  await freezeDueCycles(fresh, touched);
 }
 
 // Report 5.3: at D10 the ten-day result is FIXED. If the user still holds, the
 // position keeps being valued (D11, D12...) and stays on the 待處理 list, but
 // this number stops moving.
-async function freezeDueCycles(marks) {
+// `touched` is every non-void position this pass visited, NOT only the ones
+// that produced marks. A record whose fills were all voided produces none, and
+// driving the loop off the marks alone would leave needs_rebuild set forever --
+// a 已更正 label hanging over a pre-void number nothing will ever recompute.
+async function freezeDueCycles(marks, touched) {
   const byPos = {};
   for (const m of marks) {
     (byPos[m.position_id] = byPos[m.position_id] || []).push(m);
   }
-  for (const [posId, list] of Object.entries(byPos)) {
-    const pos = STATE.positions.find((p) => p.position_id === posId);
-    if (!pos) continue;
+  const visit = touched || Object.keys(byPos).map(
+    (id) => STATE.positions.find((p) => p.position_id === id)).filter(Boolean);
+  for (const pos of visit) {
+    const posId = pos.position_id;
+    const list = byPos[posId] || [];
     const horizon = pos.horizon_days || STRATEGY.horizon;
     const key = `cycle:${posId}:${horizon}:position`;
-    if (await metaGet(key)) continue;                 // already frozen: leave it
+    const existing = await metaGet(key);
+    // Already frozen and untouched since: leave it. Report 5.3 -- at D10 the
+    // number STOPS moving, and later prices must not rewrite it.
+    if (existing && !existing.needs_rebuild) continue;
+    if (!list.length) {
+      if (existing) {
+        await metaSet(key, Object.assign({}, existing, {
+          needs_rebuild: false,
+          rebuild_failed: "這筆已沒有任何有效成交，十日成果無法重算",
+          rebuild_checked_at: nowStamp(),
+        }));
+      }
+      continue;
+    }
     let mark = list.find((m) => m.day_index === horizon);
-    if (!mark && pos.status === "closed") mark = list[list.length - 1];
+    if (!mark && (pos.status === "closed" || pos.status === "archived")) {
+      mark = list[list.length - 1];
+    }
     if (!mark) continue;
-    await metaSet(key, cycleFrom(pos, mark, horizon));
+    if (!existing) {
+      await metaSet(key, cycleFrom(pos, mark, horizon));
+      continue;
+    }
+    // A corrected or voided fill changed the history behind this number, and
+    // restateCycle() flagged it. Until 2026-09-22 NOTHING read that flag: the
+    // history page grew a "已更正" label while the figures stayed the ones
+    // computed from the fill the owner had just corrected. Rebuild it from the
+    // corrected marks, keeping the restatement trail so "yesterday's number
+    // changed" stays answerable.
+    const rebuilt = cycleFrom(pos, mark, horizon);
+    const sameSession = rebuilt.session_date === existing.session_date;
+    // The quote feed keeps 30 sessions. An archived trade older than about six
+    // weeks has no reconstructible timeline: buildMarks emits a single mark at
+    // sessions[0], and rebuilding off it would rewrite the valuation day to
+    // ~30 sessions ago with a null day_index and the close of a stock the
+    // owner no longer holds -- then compute a return from that.
+    if (!sameSession && pos.open_shares > 0) {
+      // Still held, so that last mark is TODAY's unrealised figure, not day
+      // 10's. Say so rather than overwrite a frozen number with it.
+      await metaSet(key, Object.assign({}, existing, {
+        needs_rebuild: false,
+        rebuild_failed: "這段期間的收盤資料已不在手機上（只保留最近 30 個交易日），"
+          + "十日成果無法重算",
+        rebuild_checked_at: nowStamp(),
+      }));
+      continue;
+    }
+    if (!sameSession) {
+      // Flat position: replay() zeroes the cost basis at zero shares, so the
+      // marked value is 0 and total_gross/total_book are the realised figures
+      // whatever session the mark sits on. The MONEY is therefore terminal and
+      // follows the corrected fills; the VALUATION identity (which day, which
+      // close) is not reconstructible, so it keeps the frozen values and the
+      // row says that it did.
+      Object.assign(rebuilt, {
+        session_date: existing.session_date,
+        day_index: existing.day_index,
+        close_price: existing.close_price,
+        return_vs_initial: existing.return_vs_initial,
+        return_vs_cost: existing.return_vs_cost,
+      });
+    }
+    // A rebuild must never turn a non-null field null.
+    if (rebuilt.return_vs_cost === null && existing.return_vs_cost !== null) {
+      rebuilt.return_vs_cost = existing.return_vs_cost;
+    }
+    if (rebuilt.day_index === null && existing.day_index !== null) {
+      rebuilt.day_index = existing.day_index;
+    }
+    await metaSet(key, Object.assign(rebuilt, {
+      frozen_at: existing.frozen_at,
+      revisions: existing.revisions || [],
+      restated_at: existing.restated_at || null,
+      restated_reason: existing.restated_reason || null,
+      rebuilt_at: nowStamp(),
+      needs_rebuild: false,
+      valuation_stale: sameSession ? null : true,
+      rebuild_failed: null,
+    }));
   }
 }
 
@@ -1026,8 +1225,19 @@ function cycleFrom(pos, mark, horizon) {
     net_if_liquidated: mark.net_if_liquidated,
     return_vs_initial: (initial && mark.close_price !== null)
       ? pctOf(mark.close_price - initial, initial) : null,
-    return_vs_cost: (pos.avg_cost && mark.close_price !== null)
-      ? pctOf(mark.close_price - pos.avg_cost, pos.avg_cost) : null,
+    // replay() zeroes avg_cost the moment shares hit 0, so reading
+    // pos.avg_cost here silently blanks 相對實際成本 on every rebuild of a
+    // closed or archived record -- editing a trade would LOSE a column. The
+    // mark carries the cost basis AT that session, which is the number this
+    // ratio was always meant to use; buildMarks writes both from one replay
+    // snapshot, so it is definitionally the same quantity.
+    return_vs_cost: (() => {
+      const avg = (mark.open_shares && mark.gross_cost != null)
+        ? fromSub(divRound(toSub(mark.gross_cost), mark.open_shares))
+        : pos.avg_cost;
+      return (avg && mark.close_price !== null)
+        ? pctOf(mark.close_price - avg, avg) : null;
+    })(),
     still_open: pos.status === "open",
     frozen_at: nowStamp(),
     revisions: [],
@@ -2314,7 +2524,12 @@ function positionCard(pos, pinned) {
 function renderPerf() {
   const closed = STATE.positions.filter((p) => p.status === "closed" || p.status === "archived");
   const voided = STATE.positions.filter((p) => p.status === "void");
-  const cycles = Object.values(STATE.cycles);
+  // loadCycles keys by position_id with no status filter, so this table could
+  // show a profit for a position the section below declares 不計入損益.
+  const cycles = Object.values(STATE.cycles).filter((c) => {
+    const p = STATE.positions.find((x) => x.position_id === c.position_id);
+    return p && p.status !== "void";
+  });
   const s = portfolioSummary();
 
   const cycleRows = cycles.length ? `<table class="tbl">
@@ -2326,7 +2541,9 @@ function renderPerf() {
       <td class="${signClass(c.total_gross)}">${esc(fmtCents(c.total_gross, { signed: true }))}</td>
       <td>${esc(fmtPct(c.return_vs_initial))}</td>
       <td>${esc(fmtPct(c.return_vs_cost))}</td>
-      <td>${c.still_open ? "仍持有" : "已平倉"}${c.restated_at ? " · 已更正" : ""}</td>
+      <td>${c.still_open ? "仍持有" : "已平倉"}${c.restated_at ? " · 已更正" : ""}${
+        c.rebuild_failed ? " · 十日成果未重算"
+          : (c.valuation_stale ? " · 估值日維持原凍結" : "")}</td>
     </tr>`).join("")}</tbody></table>
     <div class="hint">十日成果在第 ${STRATEGY.horizon} 個交易日凍結，之後的價格不會改寫它；仍持有的部位另在「持倉」頁繼續估值。</div>`
     : `<div class="empty-inline">尚無已凍結的十日成果（需要持倉滿 ${STRATEGY.horizon} 個交易日，或提前平倉）。</div>`;
@@ -2337,7 +2554,8 @@ function renderPerf() {
       <td>${esc(p.stock_name || p.stock_id)}<br><span class="sm">${esc(p.stock_id)}</span></td>
       <td>${esc(p.opened_session || "?")} → ${esc(p.closed_session || "?")}</td>
       <td class="${signClass(p.realized_net)}">${esc(fmtPnl(p.realized_net))}</td>
-      <td>${p.status === "archived" ? "已封存" : "已平倉"}</td>
+      <td>${p.status === "archived" ? "已封存" : "已平倉"}<div class="btns">${
+        btn("execs", "更正", "", { pos: p.position_id })}</div></td>
     </tr>`).join("")}</tbody></table>`
     : `<div class="empty-inline">尚無已平倉紀錄。</div>`;
 
@@ -2348,7 +2566,8 @@ function renderPerf() {
   document.getElementById("page-perf").innerHTML =
     gapNote +
     `<div class="sec"><h2>已凍結的十日成果</h2>${cycleRows}</div>` +
-    `<div class="sec"><h2>已平倉／封存</h2>${closedRows}</div>` +
+    `<div class="sec"><h2>已平倉／封存</h2>${closedRows}` +
+    `<div class="hint">封存只是把紀錄移出持倉清單，金額仍計入帳戶總額。按「更正」可以修改成交價、股數、日期，或撤銷誤登；舊版本一律保留。更正後若又有持股，這筆會自動移回「持倉」。</div></div>` +
     (voided.length ? `<div class="sec"><h2>已撤銷（誤登）</h2><div class="hint">資料保留、不計入損益：${
       esc(voided.map((p) => p.stock_id).join("、"))}</div></div>` : "") +
     `<div class="sec"><h2>建議 vs 實際</h2><div class="hint">
@@ -2732,7 +2951,6 @@ async function openExecutionForm(cfg) {
   const editing = cfg.execution || null;
   const side = cfg.side || (editing ? editing.side : "BUY");
   const isBuy = side === "BUY";
-  const held = pos ? pos.open_shares : 0;
 
   const today = taipeiDate(new Date());
   // A NEW execution defaults to today, full stop. This used to default to
@@ -2749,6 +2967,22 @@ async function openExecutionForm(cfg) {
   const dateNote = (!editing && calIndex(today) < 0)
     ? "今日尚無收盤資料（盤中、或非交易日）。日期仍預設今天；若不是今天成交請直接改。"
     : "";
+  // The hint has to agree with the bound the SAVE will apply. Reading
+  // pos.open_shares here would put 目前持有 0 股 beside a field that now
+  // accepts 1,000 on an archived record -- the contradiction the owner sees
+  // first. Same fold, same answer. (Static if the date is changed afterwards,
+  // exactly as before; the save-time check is the authority.)
+  let held = 0;
+  if (pos) {
+    const curForHint = currentExecutions(
+      await dbGetAll("executions", "by_position", pos.position_id));
+    const ph = plannedExecutions(curForHint, editing ? editing.execution_id : null, {
+      execution_id: "__probe__", side, session_date: defDate,
+      executed_at: "", recorded_at: nowStamp(),
+      shares: 0, price_cents: 0, fee_cents: 0, tax_cents: 0, is_current: 1,
+    });
+    held = heldBefore(ph.list, ph.index);
+  }
   const defPrice = editing ? (editing.price_cents / 100).toFixed(2) : "";
   const defShares = editing ? String(editing.shares) : "";
 
@@ -2776,7 +3010,9 @@ async function openExecutionForm(cfg) {
       hint: dateNote || "沒有成交日就無法放上損益時間軸" })}
     ${field("price", isBuy ? "實際成交價" : "實際賣出價", defPrice, { inputmode: "decimal", hint: "必填。輸入非數字或 0 會被拒絕，不會用參考價代替" })}
     ${field("shares", "股數", defShares, { inputmode: "numeric",
-      hint: isBuy ? "1 張 = 1,000 股；零股請直接填股數" : `目前持有 ${held.toLocaleString("en-US")} 股，可部分賣出` })}
+      hint: isBuy ? "1 張 = 1,000 股；零股請直接填股數"
+        : editing ? `這筆成交當下可賣 ${held.toLocaleString("en-US")} 股（已扣除原紀錄）`
+                  : `目前持有 ${held.toLocaleString("en-US")} 股，可部分賣出` })}
     ${field("fee", "手續費（留空＝依費率自動計算）", editing ? (editing.fee_cents / 100).toFixed(2) : "", { inputmode: "decimal" })}
     ${isBuy ? "" : field("tax", "交易稅（留空＝賣出金額 0.3%）", editing ? (editing.tax_cents / 100).toFixed(2) : "", { inputmode: "decimal" })}
     ${field("note", "備註", editing ? editing.note : "")}
@@ -2862,6 +3098,27 @@ async function saveExecution(data) {
     }
   }
 
+  // The SELL bound is the shares held AT THIS FILL, not the shares held after
+  // the whole history. pos.open_shares is the latter, and it is 0 for every
+  // archived and closed record, so correcting the sell that closed a trade was
+  // rejected against the state that same sell produced. Share count does not
+  // affect sort order (sortExecutions keys on session_date, executed_at,
+  // recorded_at), so a zero-share probe with the same keys sorts exactly where
+  // the real row will.
+  let cur = [];
+  let held = 0;
+  if (pos) {
+    cur = currentExecutions(await dbGetAll("executions", "by_position", pos.position_id));
+    const probe = {
+      execution_id: "__probe__", side: data.side,
+      session_date: String(v.session_date || "").slice(0, 10),
+      executed_at: "", recorded_at: nowStamp(),
+      shares: 0, price_cents: 0, fee_cents: 0, tax_cents: 0, is_current: 1,
+    };
+    const p = plannedExecutions(cur, data.edit || null, probe);
+    held = heldBefore(p.list, p.index);
+  }
+
   const check = validateExecution({
     side: data.side,
     session_date: v.session_date,
@@ -2871,9 +3128,20 @@ async function saveExecution(data) {
     tax: v.tax,
     note: v.note,
     fee_schedule: STATE.settings.fee_schedule,
-  }, pos, pos ? pos.open_shares : 0);
+  }, pos, held);
 
   if (!check.ok) { showErrors(modal, check.errs); return; }
+
+  // The per-row bound says nothing about the fills AFTER this one.
+  if (pos) {
+    const cand = Object.assign({
+      execution_id: "__new__", is_current: 1, recorded_at: nowStamp(),
+      executed_at: check.value.executed_at || "",
+    }, check.value);
+    const p2 = plannedExecutions(cur, data.edit || null, cand);
+    const bad = firstOversell(p2.list);
+    if (bad) { showErrors(modal, { shares: oversellMessage(bad, "更正後") }); return; }
+  }
   showErrors(modal, {});
 
   if (!pos) {
@@ -2900,16 +3168,30 @@ async function saveExecution(data) {
     await dbPut("positions", pos);
   }
 
+  const wasArchived = pos.status === "archived";
   try {
     await addExecution(pos.position_id, check.value,
       data.edit ? { supersedes: data.edit, revision: 2 } : {});
   } catch (e) {
-    showErrors(modal, { price: e.message || String(e) });
+    // The ledger's own refusals are about SHARES, not the price.
+    showErrors(modal, { shares: e.message || String(e) });
     return;
   }
   closeModal();
-  toast(data.side === "BUY" ? "已登錄買入" : "已登錄賣出");
+  // toast() shares one timer, so a second call within 3.2s replaces the first.
+  // The archive-exit notice has to REPLACE the ordinary toast, not follow it.
+  const note = await unarchivedNote(pos.position_id, wasArchived);
+  toast(note || (data.side === "BUY" ? "已登錄買入" : "已登錄賣出"));
   await load();
+}
+
+// A record that acquires shares again leaves the archive (see applyDerived).
+// That is a visible move between two pages, so it is announced.
+async function unarchivedNote(posId, wasArchived) {
+  if (!wasArchived) return null;
+  const after = await dbGet("positions", posId);
+  return (after && after.status !== "archived")
+    ? "這筆又有持股，已移回持倉清單" : null;
 }
 
 async function openExecutionList(posId) {
@@ -2932,7 +3214,12 @@ async function openExecutionList(posId) {
   openModal(`成交明細 · ${pos.stock_name || pos.stock_id}`,
     `<div class="hint">更正會寫入新版本並保留舊紀錄；撤銷誤登不會刪除資料，只是不再計入損益。</div>` +
     (rows || `<div class="empty-inline">尚無成交紀錄。</div>`) +
-    `<div class="btns">${btn("buy", "補登買入", "primary", { pos: posId })}${btn("sell", "補登賣出", "", { pos: posId })}</div>`,
+    // Every archived record has open_shares === 0 by the archive gate, and the
+    // `sell` branch can only answer 這筆持倉沒有可賣股數. A button that can
+    // only ever toast an error is worse than no button: backfill the buy
+    // first (which returns the record to 持倉), then sell from the card.
+    `<div class="btns">${btn("buy", "補登買入", "primary", { pos: posId })}${
+      pos.open_shares > 0 ? btn("sell", "補登賣出", "", { pos: posId }) : ""}</div>`,
     { noFoot: true });
 }
 
@@ -2952,9 +3239,14 @@ async function openCycleDetail(posId) {
   </tr>`).join("");
 
   const frozen = cycle
-    ? `<div class="notice ok">已凍結：${esc(cycle.session_date)}（D${cycle.day_index}）價差損益 ${
+    ? `<div class="notice ok">已凍結：${esc(cycle.session_date)}${
+        cycle.day_index === null ? "（估值日不在已知交易日曆內）" : `（D${cycle.day_index}）`} 價差損益 ${
         esc(fmtCents(cycle.total_gross, { signed: true }))} 元｜相對首日建議 ${esc(fmtPct(cycle.return_vs_initial))}｜相對實際成本 ${esc(fmtPct(cycle.return_vs_cost))}${
         cycle.net_if_liquidated !== null ? `｜全數賣出估計淨額 ${esc(fmtCents(cycle.net_if_liquidated, { signed: true }))}` : ""}</div>` +
+      (cycle.rebuild_failed
+        ? `<div class="notice warn">已實現損益已依更正後的成交重算，但${esc(cycle.rebuild_failed)}，上面的十日成果仍是更正前的數字。</div>` : "") +
+      (cycle.valuation_stale
+        ? `<div class="hint">損益金額已依更正後的成交重算；估值日與當日收盤超出手機保留的 30 個交易日，維持原凍結值。</div>` : "") +
       (cycle.revisions && cycle.revisions.length
         ? `<div class="hint">曾更正 ${cycle.revisions.length} 次（保留舊值供追溯）。</div>` : "")
     : `<div class="hint">尚未達第 ${horizon} 個交易日，或尚無足夠報價。</div>`;
@@ -3256,9 +3548,13 @@ document.addEventListener("click", async (ev) => {
     }
     if (act === "exec-void") {
       if (!confirm("撤銷誤登：這筆成交將不再計入損益，但紀錄會保留。確定嗎？")) return;
+      const exe0 = await dbGet("executions", d.exe);
+      const pos0 = exe0 ? await dbGet("positions", exe0.position_id) : null;
+      const wasArchived = !!pos0 && pos0.status === "archived";
       await voidExecution(d.exe, "user_void");
       closeModal();
-      toast("已撤銷該筆成交");
+      const note = pos0 ? await unarchivedNote(pos0.position_id, wasArchived) : null;
+      toast(note || "已撤銷該筆成交");
       await load();
       return;
     }

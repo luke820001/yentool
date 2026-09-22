@@ -49,16 +49,26 @@ wait_until() {
 }
 
 published_today() {
-  local body date degraded
+  local body date degraded regime_current
   body=$(curl -fsS --max-time 30 "${PAGES_URL}/scan_result.json?t=$(date +%s%N)") || return 1
   date=$(jq -r '.meta.data_date // "" | .[0:10]' <<<"$body")
   degraded=$(jq -r '.meta.degraded // ""' <<<"$body")
   checks=$(jq -r '.meta.checks.status // "ok"' <<<"$body")
-  log "published data_date=${date:-?} degraded=${degraded:-none} checks=${checks}"
-  # Done = today's session, no degraded market, and the per-column self-check
-  # (tools/check_scan_result.py) did not fail. A failed check is published
-  # with a red banner so the phone knows, and retried here.
-  [[ "$date" == "$(today)" && -z "$degraded" && "$checks" != "fail" ]]
+  # The TAIEX arrives from a different feed than the per-stock bars and can be
+  # a session behind them. When it is, the regime cannot be judged, so the buy
+  # gate vetoes EVERY row -- 46 of 46 on 2026-09-21. The data_date is today and
+  # nothing is degraded and no check fails, so none of the conditions below
+  # noticed, and the whole session stayed unbuyable for a reason that usually
+  # fixes itself within the hour. Retry it like any other incomplete scan; if
+  # the feed never catches up the attempts run out and it publishes blocked,
+  # exactly as before.
+  regime_current=$(jq -r '.meta.regime.is_current // true' <<<"$body")
+  log "published data_date=${date:-?} degraded=${degraded:-none} checks=${checks} regime_current=${regime_current}"
+  # Done = today's session, no degraded market, the per-column self-check
+  # (tools/check_scan_result.py) did not fail, and the index feed is current.
+  # A failed check is published with a red banner so the phone knows, and
+  # retried here.
+  [[ "$date" == "$(today)" && -z "$degraded" && "$checks" != "fail"      && "$regime_current" != "false" ]]
 }
 
 dispatch_and_wait() {

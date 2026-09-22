@@ -44,8 +44,12 @@ HISTORY_KEEP = 60
 MARKETS = ("TSE", "OTC")
 HOLD_STATUSES = ("", "pending", "holding", "exit_today", "overdue",
                  "delay", "exited")
-BUY_BLOCKS = ("", "regime", "held", "unknown", "quality", "market", "rank",
-              "integrity", "stale", "no_rule", "dropped")
+# "regime" = the index really is below its 20/60-day averages.
+# "regime_stale" = the index FEED is behind the stock data, so the regime is
+# unusable. Both veto a buy; they are different facts and the screens must not
+# state the first when the second is true (2026-09-21, 46 rows).
+BUY_BLOCKS = ("", "regime", "regime_stale", "held", "unknown", "quality",
+              "market", "rank", "integrity", "stale", "no_rule", "dropped")
 REC_STATUSES = ("active", "expired", "converted", "cancelled", "closed")
 EXIT_SIGNALS = ("", "stop", "lock", "tp", "late", "time")
 CHIP_BASES = ("", "current", "lag", "ahead")

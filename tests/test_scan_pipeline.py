@@ -109,12 +109,38 @@ class TestBuyGate(GateCase):
         self.assertEqual(block, "regime")
 
     def test_stale_regime_blocks_even_when_it_reads_green(self):
-        """F15: a tailwind computed from a months-old TAIEX cache is not one."""
+        """F15: a tailwind computed from a months-old TAIEX cache is not one.
+
+        The VETO is the point and it is unchanged. What changed on 2026-09-22
+        is the reason code: "regime" asserts the index is below its 20/60-day
+        averages, and on 2026-09-21 that assertion was false -- the index had
+        closed above both, the feed simply had not published the bar yet, and
+        all 46 rows were blocked while both screens told the owner the market
+        had not reclaimed its averages. A stale feed says "regime_stale".
+        """
         market_regime.get_market_regime = lambda: {
             "ok": True, "enter_ok": True, "risk_on": True, "is_current": False}
         ready, block = self.block_of(frame())
         self.assertFalse(ready)
+        self.assertEqual(block, "regime_stale")
+
+    def test_a_genuinely_closed_market_still_says_regime(self):
+        market_regime.get_market_regime = lambda: {
+            "ok": True, "enter_ok": False, "risk_on": False, "is_current": True}
+        ready, block = self.block_of(frame())
+        self.assertFalse(ready)
         self.assertEqual(block, "regime")
+
+    def test_both_reasons_are_registered_and_rendered(self):
+        """A code the screens cannot render shows as a raw identifier."""
+        from pathlib import Path
+        from scanner.result_checks import BUY_BLOCKS
+        root = Path(__file__).resolve().parent.parent
+        self.assertIn("regime_stale", BUY_BLOCKS)
+        for rel in ("mobile/app.js", "gui/app.py"):
+            self.assertIn("regime_stale",
+                          (root / rel).read_text(encoding="utf-8"),
+                          "%s cannot render the new reason" % rel)
 
     def test_regime_without_freshness_keys_still_works(self):
         """Older callers return no is_current; absent must not mean stale."""
