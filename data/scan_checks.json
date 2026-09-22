@@ -701,6 +701,20 @@
     "tracked_range_high",
     "tracked_range_low"
    ]
+  },
+  {
+   "checked_at": "2026-09-22 20:33:55",
+   "session_date": "2026-09-22",
+   "scan_time": "2026-09-22 20:33:54",
+   "status": "warn",
+   "rows": 41,
+   "errors": 0,
+   "warnings": 4,
+   "codes": [
+    "tracked_null",
+    "tracked_range_high",
+    "tracked_range_low"
+   ]
   }
  ]
 }
