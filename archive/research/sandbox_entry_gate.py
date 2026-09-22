@@ -57,6 +57,8 @@ STOP = DEFAULT_RULE["stop_pct"]
 TP = DEFAULT_RULE["tp_pct"]
 ARM = DEFAULT_RULE["arm_pct"]
 LOCK = DEFAULT_RULE["lock_pct"]
+LATE_FROM = DEFAULT_RULE["late_from"]
+LATE_GAIN = DEFAULT_RULE["late_gain"]
 BUY_COST = 0.001425
 SELL_COST = 0.001425 + 0.003
 SEED = 7
@@ -173,7 +175,17 @@ def run(t, hold=HOLD, ride=True, cap=20, slip=0.0):
     bar-for-bar against replay_exit, is the whole point.
     """
     from sandbox_daily_plan import run_plan
+    # DEFAULT_RULE has SIX legs and this plan used to carry four: the late
+    # profit-take (from day 8, exit at the next open on a close at or above
+    # fill +1%) was simply missing, so every number this file produced was for
+    # a rule the project does not ship. On the 556-trade sample that is
+    # RECENT 69.08% with no late leg against 70.81% with it -- and the figure
+    # the documents carried, 71.68%, is the +0% threshold that section H of
+    # docs/BACKTEST_LOG.md records as REJECTED. The old window is 69.52% for
+    # both thresholds, which is why the mismatch survived so long.
+    # Found 2026-09-22. Take the legs from DEFAULT_RULE, never by hand.
     plan = dict(stop=STOP, tp=TP, arm=ARM, lock=LOCK,
+                late_profit=(LATE_FROM, LATE_GAIN),
                 ride="ma5" if ride else "off", cap=cap if ride else hold)
     pnl, capital, events = run_plan(t, plan, hold=hold)
     reason = events[-1][1] if events else "na"
