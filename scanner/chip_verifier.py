@@ -386,13 +386,14 @@ def verify_candidates(
         # is a split. Drop the older half rather than average across it: we do
         # not know the ratio well enough to rescale, and inventing the old
         # prices in today's unit would be worse than having none.
+        _split_cut = 0
         try:
             from scanner.data_integrity import split_start
-            _cut = split_start(merged)
-            if _cut:
-                merged = merged.iloc[_cut:].reset_index(drop=True)
+            _split_cut = split_start(merged)
+            if _split_cut:
+                merged = merged.iloc[_split_cut:].reset_index(drop=True)
         except Exception:
-            pass
+            _split_cut = 0
 
         # Recompute rolling-derived columns from the raw close/volume. The stored
         # ones are computed at fetch time and can drift out of sync with prices
@@ -440,6 +441,18 @@ def verify_candidates(
         # surfaces whether this name's series is clean. recent_jump means an
         # un-adjusted corporate action within ~60 bars is tainting its MAs.
         ig = audit_series(merged, calendar=_calendar)
+        # The truncation above REMOVED the step from the series, so the audit
+        # can no longer see it -- the detector would be silenced by its own
+        # remedy, and every downstream consumer would read the short series as
+        # ordinary. Put the fact back: the flag is what tells the column check
+        # that this row's null averages are deliberate, and what stops the buy
+        # gate treating the row as sound.
+        if _split_cut:
+            ig = dict(ig)
+            ig["splits"] = max(1, int(ig.get("splits") or 0))
+            ig["trustworthy"] = False
+            flags = [f for f in (ig.get("flags") or []) if not f.startswith("split:")]
+            ig["flags"] = ["split:{}".format(ig["splits"])] + flags
 
         # 1-month (~20 bars) and 3-month (~63 bars) price change. Both drive the
         # pre-launch momentum mode and expose how much each name has already run.

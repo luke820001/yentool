@@ -129,6 +129,41 @@ class ASplitIsADataErrorNotAPriceMove(unittest.TestCase):
                       "the truncation must happen BEFORE any rolling figure "
                       "is computed, or MA20 spans two price bases")
 
+
+    def test_the_flag_survives_its_own_remedy(self):
+        """The truncation removes the step from the series, so a later audit
+        cannot see it. Without putting the fact back, the detector is silenced
+        by its own fix: the column check reads the null averages as a contract
+        violation and the buy gate reads the row as sound."""
+        src = (ROOT / "scanner" / "chip_verifier.py").read_text(encoding="utf-8")
+        i = src.find("ig = audit_series(")
+        self.assertGreater(i, 0)
+        after = src[i:i + 900]
+        self.assertIn("_split_cut", after,
+                      "the split is not re-attached after the audit")
+        self.assertIn('ig["trustworthy"] = False', after)
+        self.assertIn("split:", after)
+
+    def test_the_null_exemption_is_keyed_on_that_row_only(self):
+        """Loosening the column contract for everyone would hide real gaps."""
+        from scanner.result_checks import check_payload
+        meta = {"mode": "mode_prelaunch", "data_date": "2026-09-22",
+                "session_date": "2026-09-22"}
+        clean = {"Stock_ID": "1111", "Close_Price": 100.0, "MA20": 98.0,
+                 "Integrity_Flags": "", "Integrity_OK": True}
+        split = {"Stock_ID": "6949", "Close_Price": 50.8, "MA20": None,
+                 "Integrity_Flags": "split:1;jump:1", "Integrity_OK": False}
+        codes = {i["code"]: i for i in
+                 check_payload({"meta": meta, "rows": [clean, split]})["items"]}
+        self.assertIn("split_truncated", codes)
+        self.assertEqual(codes["split_truncated"]["level"], "info")
+
+        broken = dict(clean); broken["Stock_ID"] = "2222"; broken["MA20"] = None
+        items = check_payload({"meta": meta, "rows": [broken]})["items"]
+        self.assertTrue(
+            any(i["code"] == "null" and i["level"] == "error" for i in items),
+            "a null on a row with no split flag must still fail")
+
     def test_it_is_registered_as_a_hard_flag(self):
         from scanner.result_checks import _HARD_FLAGS
         self.assertIn("split:", _HARD_FLAGS,

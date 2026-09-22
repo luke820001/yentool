@@ -346,9 +346,30 @@ class _Report:
 # --------------------------------------------------------------------------
 # column registry checks
 # --------------------------------------------------------------------------
+def _split_truncated(row):
+    """True when this row's price series was cut at an un-adjusted corporate
+    action, so its rolling figures are legitimately null.
+
+    scanner/chip_verifier drops the bars before a split-scale step rather than
+    average across two price units (see scanner/data_integrity.SPLIT_RATIO).
+    What is left is often too short for MA20, MA60, the 52-week distance or a
+    three-month change, and NULL is the honest answer -- the alternative is the
+    figure this guard exists to stop, 6949's MA20 of 511.15 against a close of
+    50.80. The exemption is per ROW and keyed on that stock's own flag, so the
+    contract stays intact for every other name.
+    """
+    return "split:" in str(row.get("Integrity_Flags") or "")
+
+
 def _check_columns(rows, rep):
     if not rows:
         return
+    split_rows = [r for r in rows if _split_truncated(r)]
+    if split_rows:
+        rep.info("split_truncated", "Integrity_Flags", len(split_rows),
+                 "series cut at an un-adjusted corporate action; its rolling "
+                 "columns are null on purpose",
+                 sample=[str(r.get("Stock_ID")) for r in split_rows])
     present = set()
     for r in rows:
         present.update(r.keys())
@@ -372,7 +393,11 @@ def _check_columns(rows, rep):
         for r in rows:
             v = r.get(col)
             if _is_null(v):
-                nulls += 1
+                # A row whose series was cut at a corporate action is allowed
+                # to be null here, and ONLY here: its type and range checks
+                # below still apply to whatever it does carry.
+                if not _split_truncated(r):
+                    nulls += 1
                 continue
             if kind == "id":
                 if not (isinstance(v, str) and _ID_RE.match(v.strip())):
