@@ -37,6 +37,7 @@ class TheAuditReadsARealBackup(unittest.TestCase):
             {"position_id": "A", "stock_id": "1111", "stock_name": "A", "status": "closed"},
             {"position_id": "B", "stock_id": "2222", "stock_name": "B", "status": "closed"},
             {"position_id": "C", "stock_id": "4444", "stock_name": "D", "status": "open"},
+            {"position_id": "F", "stock_id": "3333", "stock_name": "C", "status": "open"},
             {"position_id": "E", "stock_id": "2222", "stock_name": "B", "status": "void"},
         ]
         executions = [
@@ -50,8 +51,12 @@ class TheAuditReadsARealBackup(unittest.TestCase):
             exe("B", "SELL", DAY3, 1000, 65.0),
             # a voided fill must not count
             exe("B", "BUY", DAY1, 5000, 50.0, voided_at="x"),
+            # ... nor a superseded revision (the phone marks it is_current 0)
+            exe("B", "BUY", DAY2, 7000, 40.0, is_current=0, superseded_by="y"),
             # C: still held, flat bars
             exe("C", "BUY", DAY1, 2000, 100.0),
+            # F: a fill the market never offered that day (bars are 99-101)
+            exe("F", "BUY", DAY1, 1000, 90.0),
             # E: a voided position is skipped entirely
             exe("E", "BUY", DAY1, 1000, 100.0),
         ]
@@ -102,11 +107,16 @@ class TheAuditReadsARealBackup(unittest.TestCase):
         self.assertEqual(c["verdict"], "ok")
         self.assertLessEqual(c["held_sessions"], DEFAULT_RULE["ride_cap"])
 
+    def test_a_fill_outside_the_days_range_is_a_ledger_error(self):
+        f = self.by["F"]
+        self.assertIn("fill_outside_bar", f["flags"])
+        self.assertEqual(f["bar_range"], "99.00-101.00")
+
     def test_the_summary_adds_up(self):
-        self.assertEqual(self.sm["positions"], 3)
+        self.assertEqual(self.sm["positions"], 4)
         self.assertEqual(self.sm["closed"], 2)
         self.assertEqual(self.sm["flags"]["stop_not_taken"], 1)
-        self.assertEqual(self.sm["flags"]["no_signal"], 1)
+        self.assertEqual(self.sm["flags"]["no_signal"], 2)   # B and F
         self.assertAlmostEqual(self.sm["leak_sum_pct"],
                                round(self.by["B"]["leak_pct"], 1), places=1)
 

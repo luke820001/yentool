@@ -15,8 +15,10 @@ ten rule-following trades. This tool answers, per position:
      the whole shipped rule (stop, lock, target, late take, hold, ride).
   3. What did the owner actually do?  Sells from the ledger: average price,
      last sell date, sessions held.
-  4. The difference, and a flag for the four ways it can go wrong:
-     stop_not_taken, sold_early, held_past_cap, no_signal.
+  4. The difference, and a flag for the ways it can go wrong:
+     stop_not_taken, sold_early, held_past_cap, no_signal -- and
+     fill_outside_bar when the recorded fill is outside that day's range,
+     i.e. the ledger entry itself is wrong and nothing computed from it holds.
 
 Usage:
     python tools/ledger_audit.py path/to/yentool-ledger-YYYY-MM-DD.json
@@ -63,8 +65,11 @@ def load_backup(path):
 
 def fills(executions, position_id):
     """Live (not voided) fills of one position, oldest first."""
+    # a superseded revision carries is_current 0 (and superseded_by); a
+    # cancelled fill carries voided_at / void_reason -- neither is a fill
     rows = [e for e in executions
-            if e.get("position_id") == position_id and not e.get("voided_at")]
+            if e.get("position_id") == position_id and not e.get("voided_at")
+            and not e.get("void_reason") and e.get("is_current", 1) not in (0, False)]
     rows.sort(key=lambda e: (str(e.get("session_date") or ""), str(e.get("created_at") or "")))
     return rows
 
@@ -190,6 +195,20 @@ def audit_position(pos, execs, signals, series_of):
     flags = []
     if row["bucket"] != "tradable":
         flags.append("no_signal")
+    # A fill the market could not have given on that day is a ledger entry
+    # error (a date or a price typed from memory), and everything downstream
+    # -- the phone's P&L, the rule replay here -- is computed off it. Found
+    # on the owner's first real backup: two of three fills sat outside the
+    # day's range by 5-18%.
+    bar = series[series["date"] == fs["first_buy_date"]]
+    if len(bar):
+        lo, hi = float(bar["low"].iloc[0]), float(bar["high"].iloc[0])
+        px = fs["first_buy_price"]
+        if lo == lo and hi == hi and not (lo * 0.995 <= px <= hi * 1.005):
+            flags.append("fill_outside_bar")
+            row["bar_range"] = "%.2f-%.2f" % (lo, hi)
+    else:
+        flags.append("fill_on_no_session")
     if rule is None or rule.get("entry") is None:
         row.update(verdict="no_bars_after_fill", flags=flags)
         return row
@@ -274,7 +293,7 @@ def main(argv=None):
     ap.add_argument("--json", default=None)
     a = ap.parse_args(argv)
     rows, sm = audit(a.backup, since=a.since)
-    cols = ["sid", "name", "first_buy_date", "first_buy_price", "bucket_label",
+    cols = ["sid", "name", "first_buy_date", "first_buy_price", "bar_range", "bucket_label",
             "last_sell_date", "actual_ret_net", "mark_ret_net", "rule_exit",
             "rule_exit_date", "rule_ret_net", "leak_pct", "held_sessions", "verdict"]
     df = pd.DataFrame(rows)
