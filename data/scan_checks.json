@@ -2,22 +2,6 @@
  "version": 1,
  "runs": [
   {
-   "checked_at": "2026-09-15 12:26:14",
-   "session_date": "2026-09-14",
-   "scan_time": "2026-09-15 12:26:14",
-   "status": "fail",
-   "rows": 42,
-   "errors": 3,
-   "warnings": 2,
-   "codes": [
-    "calendar_vs_data_date",
-    "quotes_as_of_vs_data",
-    "quotes_gap_row",
-    "quotes_gap_tracked",
-    "quotes_session_vs_data"
-   ]
-  },
-  {
    "checked_at": "2026-09-15 15:02:10",
    "session_date": "2026-09-15",
    "scan_time": "2026-09-15 15:02:10",
@@ -723,6 +707,18 @@
    "checked_at": "2026-09-23 19:13:16",
    "session_date": "2026-09-23",
    "scan_time": "2026-09-23 19:13:15",
+   "status": "warn",
+   "rows": 41,
+   "errors": 0,
+   "warnings": 1,
+   "codes": [
+    "tracked_null"
+   ]
+  },
+  {
+   "checked_at": "2026-09-23 19:38:39",
+   "session_date": "2026-09-23",
+   "scan_time": "2026-09-23 19:38:38",
    "status": "warn",
    "rows": 41,
    "errors": 0,
