@@ -323,3 +323,75 @@ class TrackerColumns(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RidePastTheTimeExit(unittest.TestCase):
+    """DEFAULT_RULE["ride_cap"] (added to the engine 2026-09-23). At the time
+    exit's close and every close after it, the position is kept while the
+    close is above its own 5-bar mean, at most until the cap. Verified
+    bar-for-bar against archive/research/sandbox_daily_plan.run_plan on all
+    556 CORE+ trades (0 disagreements) the day it was added."""
+
+    HOLD = DEFAULT_RULE["hold_bars"]
+
+    @staticmethod
+    def rising(n, step=0.05, start=100.0):
+        # closes creep up but stay below the arm price and the late-profit
+        # line, so neither the lock nor the late take-profit can fire
+        rows = []
+        for i in range(n):
+            c = round(start + step * (i + 1), 2)
+            rows.append((c - 0.02, c + 0.03, c - 0.05, c))
+        return bars(*rows)
+
+    def test_the_ride_extends_the_hold_to_the_cap(self):
+        cap = self.HOLD + 2
+        o, h, l, c = self.rising(cap + 3)
+        p = replay_exit(o, h, l, c, hold_bars=self.HOLD, ride_cap=cap)
+        self.assertEqual(p["reason"], "time")
+        self.assertEqual(p["bar"], cap - 1)
+        self.assertAlmostEqual(p["exit_price"], c[cap - 1])
+
+    def test_a_close_under_its_5_bar_mean_ends_the_ride(self):
+        o, h, l, c = self.rising(self.HOLD + 5)
+        # the time exit's close falls below the mean of the last five closes
+        c[self.HOLD - 1] = round(c[self.HOLD - 5] - 0.1, 2)
+        p = replay_exit(o, h, l, c, hold_bars=self.HOLD, ride_cap=20)
+        self.assertEqual(p["reason"], "time")
+        self.assertEqual(p["bar"], self.HOLD - 1)
+        self.assertAlmostEqual(p["exit_price"], c[self.HOLD - 1])
+
+    def test_ride_cap_none_is_the_plain_time_exit(self):
+        o, h, l, c = self.rising(self.HOLD + 5)
+        p = replay_exit(o, h, l, c, hold_bars=self.HOLD, ride_cap=None)
+        self.assertEqual((p["reason"], p["bar"]), ("time", self.HOLD - 1))
+        self.assertFalse(p["riding"])
+
+    def test_a_window_that_ends_mid_ride_is_open_not_a_result(self):
+        """Booking the last available bar as a time exit would publish a
+        number for a rule nobody trades; the trade is still on."""
+        o, h, l, c = self.rising(self.HOLD + 1)
+        p = replay_exit(o, h, l, c, hold_bars=self.HOLD, ride_cap=20)
+        self.assertEqual(p["reason"], "")
+        self.assertTrue(p["riding"])
+        self.assertFalse(p["exited"])
+        self.assertEqual(simulate_exit(o, h, l, c, hold_bars=self.HOLD,
+                                       ride_cap=20)[2], "na")
+
+    def test_the_late_profit_take_still_fires_during_the_ride(self):
+        o, h, l, c = self.rising(self.HOLD + 6)
+        late_px = 100.0 * (1 + DEFAULT_RULE["late_gain"])
+        c[self.HOLD] = round(late_px + 0.5, 2)       # day 11 closes in profit
+        h[self.HOLD] = c[self.HOLD] + 0.03
+        p = replay_exit(o, h, l, c, hold_bars=self.HOLD, ride_cap=20)
+        self.assertEqual(p["reason"], "late")
+        self.assertEqual(p["bar"], self.HOLD + 1)
+        self.assertAlmostEqual(p["exit_price"], o[self.HOLD + 1])
+
+    def test_the_ledger_window_rows_do_not_ride(self):
+        """signal_ledger's h-bar rows keep their meaning: the rule inside the
+        window. The ride belongs to scanner/live_record.py."""
+        src = (Path(__file__).resolve().parent.parent / "scanner"
+               / "signal_ledger.py").read_text(encoding="utf-8")
+        i = src.find("def _simulate_rule(")
+        self.assertIn("ride_cap=None", src[i:i + 4000])

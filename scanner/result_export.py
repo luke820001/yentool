@@ -31,7 +31,8 @@ from config.settings import (
 
 def export_scan_result(df, scan_mode="", reports=None, degraded=None,
                        session_date=None, strategy_version="",
-                       quality=None, quotes_meta=None, tracked=None):
+                       quality=None, quotes_meta=None, tracked=None,
+                       live_record=None):
     """
     Write the full result DataFrame (all computed columns) to SCAN_RESULT_FILE,
     overwriting any previous version. Two context columns (mode + timestamp) are
@@ -63,7 +64,7 @@ def export_scan_result(df, scan_mode="", reports=None, degraded=None,
                                 degraded=degraded, session_date=session_date,
                                 strategy_version=strategy_version,
                                 quality=quality, quotes_meta=quotes_meta,
-                                tracked=tracked)
+                                tracked=tracked, live_record=live_record)
     except Exception as e:
         # A mobile-feed hiccup must never break the primary CSV export.
         print("  [export] mobile json failed: {}".format(e))
@@ -129,7 +130,7 @@ def _publish_quotes(df, names=None):
 def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
                             degraded=None, session_date=None,
                             strategy_version="", quality=None,
-                            quotes_meta=None, tracked=None):
+                            quotes_meta=None, tracked=None, live_record=None):
     """
     Write the scan result as JSON for the mobile PWA. Structure:
         {"meta": {...}, "rows": [...]}
@@ -147,6 +148,12 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
     "if I already hold something, it should still give me advice on it"). The
     scanner never learns what is actually held -- it publishes the superset and
     the phone matches its own private holdings against it.
+    `live_record` is the dict from scanner.live_record.build_live_record --
+    what the shipped rule has actually done on the signals this scanner
+    published -- shown on the phone next to the backtest. A caller that has
+    none keeps the previous block, marked carried_forward, for the same
+    reason `tracked` is carried: the desktop export must not strip what the
+    cloud built.
     NaN/inf are coerced to null so the JSON is valid. Returns the written path.
     """
     MOBILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -245,6 +252,18 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
                 meta_old.setdefault("built_for", str(
                     (prev.get("meta") or {}).get("session_date") or "")[:10])
                 payload["meta"]["tracked"] = meta_old
+        except Exception:
+            pass
+    if isinstance(live_record, dict) and live_record:
+        payload["meta"]["live_record"] = live_record
+    else:
+        try:
+            with open(MOBILE_DATA_FILE, encoding="utf-8") as f:
+                prev_rec = ((json.load(f).get("meta") or {}).get("live_record"))
+            if isinstance(prev_rec, dict) and prev_rec:
+                prev_rec = dict(prev_rec)
+                prev_rec["carried_forward"] = True
+                payload["meta"]["live_record"] = prev_rec
         except Exception:
             pass
     if quotes_meta:

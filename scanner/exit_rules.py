@@ -67,6 +67,14 @@ DEFAULT_RULE = {
     # sells at the NEXT open instead of waiting for the time exit.
     "late_from": 8,
     "late_gain": 0.01,
+    # Ride past the time exit (2026-09-21, docs/BACKTEST_LOG.md section B).
+    # At the time exit's close, and at every close after it, the position is
+    # kept while the close is above its own 5-bar mean, at most until this
+    # bar. None disables the leg. Added here 2026-09-23: until then the leg
+    # lived only in holding_tracker (live) and sandbox_daily_plan (research),
+    # so nothing in production could replay the WHOLE shipped rule on a
+    # finished trade -- which is what scanner/live_record.py needs.
+    "ride_cap": 20,
 }
 
 # WHY LATE PROFIT-TAKING EXISTS. Breaking the adopted rule down by exit reason
@@ -101,18 +109,21 @@ DEFAULT_RULE = {
 
 def simulate_exit(opens, highs, lows, closes, hold_bars=..., stop_pct=...,
                   tp_pct=..., arm_pct=..., lock_pct=..., late_from=...,
-                  late_gain=...):
+                  late_gain=..., ride_cap=...):
     """Replay one trade through the exit stack.
 
     Entry is the FIRST bar's open (the live rule is a market order at the next
     open; no limit is posted). Returns (entry, return_pct, reason) where reason
     is one of 'tp', 'lock', 'stop', 'late', 'time', or (None, None, 'na') when
-    the window is too short or the open is unusable.
+    the window is too short or the open is unusable. "Too short" includes a
+    window that ends while the ride past the time exit is still on: the trade
+    has no result yet, and guessing one at the last bar would be a number for
+    a rule nobody trades.
 
-    Set any of `tp_pct`, `arm_pct` or `late_from` to None to disable that leg
-    -- which is how a parameter search asks "what would this be worth without
-    a take profit at all", rather than approximating it with a very large
-    number.
+    Set any of `tp_pct`, `arm_pct`, `late_from` or `ride_cap` to None to
+    disable that leg -- which is how a parameter search asks "what would this
+    be worth without a take profit at all", rather than approximating it with
+    a very large number.
 
     2026-09-21: `late_from` / `late_gain` were missing here after the late
     profit-take was adopted, so DEFAULT_RULE's values applied no matter what a
@@ -131,15 +142,15 @@ def simulate_exit(opens, highs, lows, closes, hold_bars=..., stop_pct=...,
     plan = replay_exit(opens, highs, lows, closes, hold_bars=hold_bars,
                        stop_pct=stop_pct, tp_pct=tp_pct, arm_pct=arm_pct,
                        lock_pct=lock_pct, late_from=late_from,
-                       late_gain=late_gain)
-    if plan["reason"] == "na":
+                       late_gain=late_gain, ride_cap=ride_cap)
+    if plan["reason"] in ("na", ""):
         return None, None, "na"
     return plan["entry"], plan["ret_pct"], plan["reason"]
 
 
 def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
                 stop_pct=..., tp_pct=..., arm_pct=..., lock_pct=...,
-                late_from=..., late_gain=...):
+                late_from=..., late_gain=..., ride_cap=...):
     """Replay the exit stack bar by bar and report WHERE the trade stands.
 
     This is simulate_exit with the outcome kept, so the live scan can tell a
@@ -148,13 +159,18 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
 
     `hold_bars=None` replays every bar given and never books a time exit --
     the live annotation has its own calendar-based time exit. With an
-    integer, behaves exactly like simulate_exit (time exit on bar N-1's close).
+    integer, behaves exactly like simulate_exit (time exit on bar N-1's close,
+    or later when `ride_cap` keeps the position: see DEFAULT_RULE["ride_cap"]).
+    A window that runs out while the ride is still on comes back with
+    reason '' and `riding` True -- the trade is open, not finished.
 
     Returns a dict:
       entry       fill (first open) or None
       reason      '' still open | 'stop' | 'lock' | 'tp' | 'late' | 'time'
                   | 'na'  ('late' = a profit taken at the open after a late
                   in-profit close; see the block comment on DEFAULT_RULE)
+      riding      True when the time exit has passed and the rule is holding
+                  on because the close is above its own 5-bar mean
       exited      reason is a booked exit
       bar         index of the exit bar (None while open)
       date        dates[bar] when `dates` is given
@@ -174,14 +190,20 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
     lock_pct = rule["lock_pct"] if lock_pct is ... else lock_pct
     late_from = rule["late_from"] if late_from is ... else late_from
     late_gain = rule["late_gain"] if late_gain is ... else late_gain
+    ride_cap = rule.get("ride_cap") if ride_cap is ... else ride_cap
     if lock_pct is None:
         lock_pct = rule["lock_pct"]
 
     out = {"entry": None, "reason": "na", "exited": False, "bar": None,
            "date": None, "exit_price": None, "ret_pct": None, "armed": False,
            "stop": None, "arm_px": None, "lock_px": None, "target": None,
-           "late_due": False, "late_px": None}
-    n = len(opens) if hold_bars is None else min(hold_bars, len(opens))
+           "late_due": False, "late_px": None, "riding": False}
+    # The ride only exists with a time exit to ride past, and only when the
+    # cap is beyond it; otherwise the window is exactly the hold, as before.
+    riding = (hold_bars is not None and ride_cap is not None
+              and int(ride_cap) > int(hold_bars))
+    cap = int(ride_cap) if riding else hold_bars
+    n = len(opens) if hold_bars is None else min(cap, len(opens))
     if n <= 0:
         return out
     try:
@@ -251,7 +273,38 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
                 and (i + 1) >= late_from and cl >= late_px):
             late_due = True
 
+        # 5. the time exit, and the ride past it. Decided at the close like
+        # everything else: on the time exit's bar and every bar after it, the
+        # position is kept while the close is above its own 5-bar mean (over
+        # closes since entry only; hold_bars >= 5 keeps the window past the
+        # fill), at most until bar `cap`. Otherwise it is closed on this
+        # close. When the ride wants to continue but the window has no more
+        # bars, the trade is left OPEN -- see the docstring.
+        if riding and i >= hold_bars - 1:
+            keep = False
+            if i < cap - 1 and cl == cl:
+                try:
+                    window = [float(x) for x in closes[max(0, i - 4):i + 1]]
+                    mean5 = sum(window) / len(window)
+                    keep = mean5 == mean5 and cl > mean5
+                except (TypeError, ValueError, ZeroDivisionError):
+                    keep = False
+            if not keep:
+                if cl != cl:
+                    out["reason"] = "na"
+                    return out
+                return booked(i, cl, "time")
+            if i + 1 >= n:
+                out.update(armed=armed, stop=stop_px, late_due=late_due,
+                           riding=True, reason="")
+                return out
+
     out.update(armed=armed, stop=stop_px, late_due=late_due)
+    if riding:
+        # The loop ran out before the time exit's bar was reached, or every
+        # bar from it on was unusable: no result, same as a short window.
+        out["reason"] = "na"
+        return out
     if hold_bars is not None:
         try:
             final = float(closes[hold_bars - 1])

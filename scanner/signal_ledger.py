@@ -472,10 +472,15 @@ def _simulate_rule(opens, highs, lows, closes, hold):
     # that chooses the numbers and the rule that measures them can never
     # drift apart again -- which is exactly how F09 got baked into both
     # this function and eval_winrate_round2.sim_trail independently.
+    # ride_cap=None on purpose: a ledger row is "the rule inside an h-bar
+    # window", and the ride past day 10 would make the 10-bar row depend on
+    # bars 11-20. The WHOLE shipped rule, ride included, is what
+    # scanner/live_record.py replays; these rows keep their documented meaning.
     return simulate_exit(
         opens, highs, lows, closes, hold_bars=hold,
         stop_pct=PRELAUNCH_STOP_PCT, tp_pct=PRELAUNCH_TP_PCT,
-        arm_pct=PRELAUNCH_TRAIL_ARM, lock_pct=PRELAUNCH_TRAIL_LOCK)
+        arm_pct=PRELAUNCH_TRAIL_ARM, lock_pct=PRELAUNCH_TRAIL_LOCK,
+        ride_cap=None)
 
 
 def _refetch(stock_ids, market_of):

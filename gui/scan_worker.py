@@ -120,6 +120,16 @@ class ScanWorker:
             except Exception as e:
                 print("  [ledger] skipped: {}".format(e))
 
+            # The rule's actual record on this scanner's own signals
+            # (scanner/live_record.py); the export carries the previous block
+            # forward when this fails, so the phone never loses it.
+            live_record = None
+            try:
+                from scanner.live_record import build_live_record
+                live_record = build_live_record()
+            except Exception as e:
+                print("  [record] skipped: {}".format(e))
+
             # Annotate each pick with its holding day + exit date (from the
             # ledger streak + trading calendar) so a user who does not open the
             # app daily still knows which day of the 5-bar hold they are on.
@@ -163,7 +173,8 @@ class ScanWorker:
             try:
                 path = export_scan_result(result_df, self._scan_mode,
                                           degraded=degraded,
-                                          tracked=tracked_df)
+                                          tracked=tracked_df,
+                                          live_record=live_record)
                 if path:
                     print("  [export] scan result -> {}".format(path))
             except Exception as e:

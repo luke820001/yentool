@@ -63,6 +63,28 @@ class TheHarnessCarriesEveryLegOfTheRule(unittest.TestCase):
             "DEFAULT_RULE instead")
 
 
+class TheMoneyHarnessCarriesEveryLeg(unittest.TestCase):
+    """archive/research/sandbox_money.py (2026-09-23) scores the rule in
+    money. Its base plan must be the shipped rule, ride included, or every
+    portfolio figure it prints belongs to a rule nobody trades."""
+
+    MONEY = ROOT / "archive" / "research" / "sandbox_money.py"
+
+    def test_the_base_plan_is_built_from_default_rule(self):
+        src = self.MONEY.read_text(encoding="utf-8")
+        m = re.search(r"BASE = dict\((.*?)\)\n", src, re.S)
+        self.assertIsNotNone(m, "the base plan could not be found")
+        plan = m.group(1)
+        for leg in ("stop=", "tp=", "arm=", "lock=", "late_profit=", "ride="):
+            self.assertIn(leg, plan, "the money harness omits %s" % leg)
+        self.assertNotRegex(plan, r"=\s*0\.\d",
+                            "a hand-written threshold in the money harness")
+        for key in ("stop_pct", "tp_pct", "arm_pct", "lock_pct",
+                    "late_from", "late_gain", "ride_cap"):
+            self.assertIn('R["%s"]' % key, plan,
+                          "%s is not taken from DEFAULT_RULE" % key)
+
+
 class TheDocumentsQuoteTheShippedRule(unittest.TestCase):
     """The headline the owner reads must belong to the rule that runs. 71.7%
     is the +0% threshold, which the log records as rejected."""

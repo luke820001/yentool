@@ -316,6 +316,20 @@ def run_scan(scan_mode="mode_prelaunch"):
     except Exception as e:
         print("  [ledger] skipped: {}".format(e))
 
+    # What the shipped rule has actually done on the signals this scanner
+    # published (scanner/live_record.py), shown on the phone next to the
+    # backtest. Observes only; a failure keeps the previous block.
+    live_record = None
+    try:
+        from scanner.live_record import build_live_record
+        live_record = build_live_record()
+        t = live_record.get("tradable") or {}
+        print("  [record] since {}: {} tradable closed, win {}%, mean {}%, "
+              "{} open".format(live_record.get("since"), t.get("closed"),
+                               t.get("win_pct"), t.get("mean_pct"), t.get("open")))
+    except Exception as e:
+        print("  [record] skipped: {}".format(e))
+
     # F04 regression found by the 2026-09-14 column audit: only today's
     # candidates get fetched, so a name that dropped off the list stops
     # updating and its trailing closes go null in quotes.json -- 20 of the 95
@@ -406,7 +420,7 @@ def run_scan(scan_mode="mode_prelaunch"):
                                   session_date=session_date,
                                   strategy_version=STRATEGY_VERSION,
                                   quality=data_health, quotes_meta=quotes_meta,
-                                  tracked=tracked_df)
+                                  tracked=tracked_df, live_record=live_record)
         print("  [export] scan result -> {}".format(path))
     except Exception as e:
         print("  [export] failed: {}".format(e))
@@ -422,7 +436,7 @@ def run_scan(scan_mode="mode_prelaunch"):
                                degraded=degraded, session_date=session_date,
                                strategy_version=STRATEGY_VERSION,
                                quality=data_health, quotes_meta=quotes_meta,
-                               tracked=tracked_df)
+                               tracked=tracked_df, live_record=live_record)
             print("  [ai] {} report(s) attached".format(len(reports)))
         except Exception as e:
             print("  [ai] attach failed, prices already published: {}".format(e))

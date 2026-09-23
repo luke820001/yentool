@@ -79,6 +79,7 @@ const MODE_CARDS = {
       "兩種買法擇一，出場價位完全相同（都以第一筆成交價計算）：一次買滿；或先買一半、跌到成交價 -10% 再補另一半。\n" +
       "出場計畫：災難停損 -20% · 收盤站上 +2.5% 後隔一個交易日起停損上調到 +2% · 目標 +20% · 第 8 天起收盤仍有實質獲利（+1% 以上）就隔日開盤收下 · 基本抱 10 個交易日，第 10 天收盤若仍站上自己的 5 日均價就續抱，最晚第 20 天。\n" +
       "回測（2017-2026，556 筆，近 3 年，含手續費與證交稅）：70.8% 勝、每筆平均 +1.95%；更早的資料 69.5% / +2.04%。19 個有效季度裡沒有一季低於 60%。歷史統計，不是未來勝率。\n" +
+      "這 +1.95% 是怎麼來的（2026-09-23 拆解）：獲利有 4 成來自 17% 碰到 +20% 停利的交易；鎖利出場（36%）平均只有 +1.2%；時間出場（20%）平均 −9.9%、停損（6%）−20.5%。所以勝率高不代表一直在賺——沒有大波段的那幾個月，合計就是負的（2022 年全年 −6.6%、2026-07~09 實際訊號合計為負）。固定資金 10 格、有訊號就買的話，六年半年化約 +18%、最大回撤約 −12%；5 格則是 +25% / −26%。看下面「帳本實際」那一行，那才是你這段時間真的會拿到的數字。\n" +
       "「勝」在這裡指「有賺錢」。若改用「至少賺 25% 才算贏」，這套規則只有 2.3%，因為 +20% 就停利了。那個目標有另一套規則（見回測登錄簿 G 節）可達 37.6%，但只有 54.9% 的交易賺錢、資金要卡 16 天。兩者已完整比較過，你選擇維持這一套。\n" +
       "2026-09-21 程式碼稽核修正（與規則無關，但會改變畫面上的數字）：① ETF 的升降單位跟個股不同（50 元以上跳 0.05 而不是 0.50），舊版把 0050 的鎖利價算成 108.50、比規則更寬，已修。②「後段獲利了結」這一行早了一天，正確是第 8 天，不是第 7 天。③價格出場之後不再繼續數持有天數。\n" +
       "2026-09-21 修正：鎖利原本「當天盤中觸及 +6%」就算數，但你是收盤後才看到、隔天才下得了單。改成收盤判定、隔日生效後重算同一批交易，舊規則真實勝率 63.0%、新規則 67.1%——先前畫面上的約 70% 有一大半是模擬器產生的。\n" +
@@ -2047,11 +2048,39 @@ function dataCompletenessText() {
 
 // Report 7.4: the long strategy blurb becomes a collapsible summary instead of
 // a fixed header eating the top of a 375px screen.
+// The rule's ACTUAL record on the signals this scanner published, built by
+// scanner/live_record.py and shipped in meta.live_record. 2026-09-23: the
+// owner reported poor real profit while this card quoted only the backtest
+// (70.8% / +1.95%). Both were true -- 2026-06-25..09-22 produced nine
+// tradable signals and a negative sum -- and nothing on the phone said so.
+// Three buckets, because the list shows more than the rule buys: what the
+// rule bought, what the list showed but the badge refused, and CORE+ names
+// on days the market gate was shut.
+function liveRecordHtml() {
+  const rec = STATE.meta && STATE.meta.live_record;
+  if (!rec || !rec.tradable) return "";
+  const line = (b) => {
+    if (!b || !b.closed) return "0 筆已結束";
+    return `${b.closed} 筆 · 勝率 ${esc(fmt(b.win_pct, 1))}% · 平均 ${esc(fmtSigned(b.mean_pct, 2))}% · 合計 ${esc(fmtSigned(b.sum_pct, 1))}%`;
+  };
+  const t = rec.tradable;
+  const open = t.open ? `，進行中 ${t.open} 筆` : "";
+  const carried = rec.carried_forward ? "，沿用上一次掃描算的" : "";
+  return `<div class="strategy-meta live-record">
+    <b>帳本實際（${esc(rec.since || "?")} 起，到 ${esc(rec.through || "?")}${carried}）</b><br>
+    符合完整買進規則：${line(t)}${open}<br>
+    名單上但不可買（未過核心+）：${line(rec.not_core)}<br>
+    核心+ 但大盤未順風：${line(rec.regime_closed)}<br>
+    同一套出場、隔日開盤進場、含手續費與證交稅。回測是 2017–2026 的平均；這裡是這支掃描器真的發出的訊號。
+  </div>`;
+}
+
 function strategyCardHtml() {
   const card = MODE_CARDS[STATE.meta.mode] || MODE_CARD_DEFAULT;
   return `<details class="strategy ${card.tone}">
     <summary>${esc(card.summary)}</summary>
     <div class="strategy-body">${esc(card.body)}</div>
+    ${liveRecordHtml()}
     <div class="strategy-meta">模式 ${esc(STATE.meta.mode || "未知")}｜策略版本 ${esc(STATE.meta.strategy_version || "未提供")}</div>
   </details>`;
 }
