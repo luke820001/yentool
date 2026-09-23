@@ -49,9 +49,15 @@ def trades():
 
 
 def replay(t, plan, slip=0.0):
-    pnl, cap, ev = run_plan(t, plan, hold=R["hold_bars"])
+    # a plan may carry its own hold (section G's routes hold 20 with the
+    # ride off); everything else uses the shipped hold
+    pnl, cap, ev = run_plan(t, plan, hold=plan.get("hold", R["hold_bars"]))
     bar, reason = (ev[-1][0], ev[-1][1]) if ev else (0, "na")
     r = pnl / cap * 100
+    # capital actually deployed, in units of a plain single fill: 1.0, or
+    # ~1.5 when the plan added half. portfolio() reserves the maximum for
+    # every slot, so an add is never paid for with money the sim did not have
+    mult = cap / (1 + BUY_COST)     # Position(entry, size=1.0): capital is 1.0 + adds
     if slip and reason in ("stop", "lock"):
         E = float(t["o"][0])
         px = (r / 100 + 1) * E * (1 + BUY_COST) / (1 - SELL_COST)
@@ -59,7 +65,7 @@ def replay(t, plan, slip=0.0):
     dates = t["dates"]
     return dict(sig=t["sig"], sid=t["sid"], atr=t.get("atr"), rank=t["rank"],
                 entry=dates[0], exit=dates[min(bar, len(dates) - 1)],
-                bars=bar + 1, ret=r, why=reason)
+                bars=bar + 1, ret=r, why=reason, mult=mult)
 
 
 def evaluate(ts, plan_of, slip=0.0):
@@ -121,6 +127,9 @@ def portfolio(df, slots):
     slots are full (by rank). Returns final multiple, CAGR %, max drawdown %,
     per-year %, trades taken."""
     d = df.sort_values(["entry", "rank"])
+    # every slot reserves enough for the plan's largest position, so a trade
+    # that never adds earns its return on only part of the slot
+    reserve = float(d["mult"].max()) if "mult" in d.columns else 1.0
     eq, open_, curve, taken = 1.0, [], [], 0
     days = sorted(set(d.entry) | set(d.exit))
     by_entry = {k: v for k, v in d.groupby("entry")}
@@ -135,7 +144,8 @@ def portfolio(df, slots):
         for _, r in by_entry.get(day, pd.DataFrame()).iterrows():
             if len(open_) >= slots:
                 continue
-            open_.append(dict(exit=r.exit, ret=r.ret, size=eq / slots))
+            m = float(r.mult) if "mult" in d.columns else 1.0
+            open_.append(dict(exit=r.exit, ret=r.ret * m / reserve, size=eq / slots))
             taken += 1
         curve.append((day, eq))
     c = pd.Series(dict(curve))
@@ -289,10 +299,35 @@ def cmd_half():
         report("sell half at %+.0f%%" % (100 * lv), base, cand, ts, pl)
 
 
+def cmd_groute():
+    """Section G's alternative target (net +25% or more), scored in money.
+    It was only ever compared on win rate and 'reached +25%'; the owner now
+    asks for profit, so CAGR / drawdown decide. Q1: tp +26%, hold 20, no
+    lock, no late take. Q2: Q1 plus add half at -10%. Q5: Q1 with a lock
+    that arms only at +10%. The win-rate gate fails BY DESIGN here (a
+    different target); read the money lines."""
+    ts = trades()
+    base = evaluate(ts, BASE)
+    q1 = dict(stop=R["stop_pct"], tp=0.26, arm=None, ride="off", cap=20, hold=20)
+    plans = [("Q1 tp +26, hold 20, no lock", q1),
+             ("Q2 = Q1 + add half at -10", dict(q1, add=(0.10, 0.5))),
+             ("Q5 = Q1 + lock arming at +10", dict(q1, arm=0.10, lock=R["lock_pct"])),
+             ("Q1 but hold 15", dict(q1, cap=15, hold=15)),
+             ("Q2 but hold 15", dict(q1, cap=15, hold=15, add=(0.10, 0.5))),
+             ("shipped rule + add half at -10 (E section)", dict(BASE, add=(0.10, 0.5)))]
+    for label, pl in plans:
+        cand = evaluate(ts, pl)
+        report(label, base, cand, ts, pl)
+        for wname, k in zip(("RECENT", "OLD"), split(cand)):
+            print("     %s reached +25%%: %4.1f%%  p10 %+6.2f  mean bars %.1f  mean capital x%.2f"
+                  % (wname[:3], 100 * (k["ret"] >= 25).mean(), np.percentile(k["ret"], 10),
+                     k["bars"].mean(), k["mult"].mean()))
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "base"
     if cmd == "all":
-        for c in (cmd_base, cmd_atr, cmd_latecut, cmd_tp, cmd_half):
+        for c in (cmd_base, cmd_atr, cmd_latecut, cmd_tp, cmd_half, cmd_groute):
             c()
     else:
         globals()["cmd_" + cmd]()

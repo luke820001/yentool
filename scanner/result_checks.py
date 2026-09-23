@@ -205,6 +205,9 @@ COLUMNS = {
     "Hold_Cap":            _c("int", lo=1, hi=120, phone=True),
     "Hold_Status":         _c("choice", nullable=True, choices=HOLD_STATUSES),
     "Hold_Note":           _c("str", nullable=True),
+    # 2026-09-23: the research definition of a new signal (absent on the
+    # previous ledger session), separate from the streak behind Hold_Status.
+    "First_Day":           _c("bool", nullable=True),
     "Entry_Open":          _c("num", nullable=True, lo=0.01),
     "Fill_Stop_Loss":      _c("num", nullable=True, lo=0.01),
     "Fill_Trail_Arm_Price": _c("num", nullable=True, lo=0.01),
@@ -741,8 +744,11 @@ def _check_rows(rows, meta, rep, scan_mode):
             if not br and _is_null(bb):
                 hit("blocked_without_reason", sid, "Buy_Block")
             if br and prelaunch:
+                # a re-entry after an absence is a fresh signal even though
+                # the streak (with its holder's gap tolerance) says "held"
+                fresh = status == "pending" or r.get("First_Day") is True
                 if r.get("Market") != "OTC" or r.get("Core_Plus") is not True \
-                        or status != "pending" or iok is not True or rank >= n_enter:
+                        or not fresh or iok is not True or rank >= n_enter:
                     hit("buy_ready_violates_gate", sid, "Buy_Ready")
 
         # recommendation columns travel together
@@ -831,7 +837,7 @@ def _check_rows(rows, meta, rep, scan_mode):
         "hold_overdue": "rows past the exit cap still listed (hysteresis)",
         "buy_ready_with_block": "Buy_Ready true but Buy_Block non-empty",
         "blocked_without_reason": "Buy_Ready false with empty Buy_Block",
-        "buy_ready_violates_gate": "Buy_Ready true on a row failing the OTC/Core+/pending/integrity/rank gate",
+        "buy_ready_violates_gate": "Buy_Ready true on a row failing the OTC/Core+/fresh(pending or First_Day)/integrity/rank gate",
         "recommendation_partial": "Recommendation_ID without its frozen prices/dates",
         "recommendation_orphan_value": "frozen recommendation value without an id",
         "non_positive": "MA / volume average not positive",

@@ -395,3 +395,26 @@ class RidePastTheTimeExit(unittest.TestCase):
                / "signal_ledger.py").read_text(encoding="utf-8")
         i = src.find("def _simulate_rule(")
         self.assertIn("ride_cap=None", src[i:i + 4000])
+
+
+class FirstDayColumn(TrackerColumns):
+    """First_Day is 'not on the previous LEDGER session', independent of the
+    streak's gap tolerance (2026-09-23)."""
+
+    def test_absent_yesterday_is_a_first_day_even_inside_a_streak(self):
+        flat = [(100, 101, 99, 100)] * 10
+        # A: on the list 09-10 and 09-11 (the previous ledger session);
+        # B: last seen 09-09, so absent on 09-11 -- a re-entry the streak
+        # (gap tolerance 10) still counts as one appearance block
+        led = {"A": ["2026-09-10", "2026-09-11"], "B": ["2026-09-09"]}
+        out = self._run({"A": flat, "B": flat}, led)
+        by = dict(zip(out["Stock_ID"], out["First_Day"]))
+        self.assertFalse(by["A"])
+        self.assertTrue(by["B"])
+        # and the streak still anchors B on 09-09: the holder's calendar is kept
+        self.assertEqual(out.set_index("Stock_ID").loc["B", "Entry_Date"], "2026-09-10")
+
+    def test_no_history_at_all_is_a_first_day(self):
+        flat = [(100, 101, 99, 100)] * 10
+        out = self._run({"A": flat}, {})
+        self.assertTrue(bool(out["First_Day"].iloc[0]))

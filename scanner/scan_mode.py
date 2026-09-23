@@ -648,9 +648,19 @@ def mark_buy_ready(df, scan_mode, session_date=None):
     integrity = (_safe_bool(df, "Integrity_OK") if "Integrity_OK" in df.columns
                  else pd.Series([False] * n, index=df.index))
 
-    # Only an explicit "pending" is a fresh, not-yet-entered signal.
-    fresh = status.eq("pending")
+    # A fresh signal is a name that was NOT on the previous session's list
+    # (holding_tracker.First_Day, the definition the rule was validated on),
+    # or a row whose streak says it has not been entered yet. "pending" alone
+    # used to be the whole test, and the streak behind it tolerates a
+    # ten-session absence -- so a name that came back after three days off
+    # the list was "held", and the live scanner emitted 302 of the rule's
+    # 479 signals (2020-01..2026-09). The dropped 177 were as good as the
+    # kept ones, so the loss was pure count: docs/BACKTEST_LOG.md section L.
+    # An UNKNOWN status still blocks, First_Day or not.
     known = status.ne("")
+    first_day = (_safe_bool(df, "First_Day") if "First_Day" in df.columns
+                 else pd.Series([False] * n, index=df.index))
+    fresh = status.eq("pending") | (first_day & known)
 
     ok = ((rank < N_ENTER) & (market == "OTC") & core & fresh & current
           & integrity & enter_ok)

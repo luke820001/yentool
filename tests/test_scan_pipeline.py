@@ -541,3 +541,41 @@ class TestRecommendationExport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestFirstDayIsAFreshSignal(GateCase):
+    """2026-09-23 (BACKTEST_LOG section L). The rule was validated on
+    'absent the previous session'; reading freshness off Hold_Status alone
+    required a name to be gone for more than ten sessions, which dropped 177
+    of 479 signals over 2020-01..2026-09 with no gain in quality."""
+
+    def test_a_re_entry_the_streak_calls_held_is_buyable(self):
+        ready, block = self.block_of(frame(Hold_Status="holding", First_Day=True))
+        self.assertTrue(ready)
+        self.assertEqual(block, "")
+
+    def test_a_name_on_yesterdays_list_is_still_held(self):
+        ready, block = self.block_of(frame(Hold_Status="holding", First_Day=False))
+        self.assertFalse(ready)
+        self.assertEqual(block, "held")
+
+    def test_pending_without_the_column_still_buys(self):
+        ready, block = self.block_of(frame(Hold_Status="pending"))
+        self.assertTrue(ready)
+
+    def test_an_unknown_status_blocks_even_on_a_first_day(self):
+        ready, block = self.block_of(frame(Hold_Status="", First_Day=True))
+        self.assertFalse(ready)
+        self.assertEqual(block, "unknown")
+
+    def test_the_column_check_accepts_the_re_entry(self):
+        from scanner.result_checks import check_payload
+        out = mark_buy_ready(frame(Hold_Status="holding", First_Day=True), MODE,
+                             session_date=TODAY)
+        row = out.iloc[0].to_dict()
+        row.update({"Rank": 0})
+        items = check_payload({"meta": {"mode": MODE, "data_date": TODAY,
+                                        "session_date": TODAY},
+                               "rows": [row]})["items"]
+        self.assertFalse(any(i["code"] == "buy_ready_violates_gate" for i in items),
+                         [i for i in items if i["code"] == "buy_ready_violates_gate"])

@@ -33,3 +33,6 @@ archive/legacy/*.xlsx
 mobile/scan_result.json
 mobile/quotes.json
 mobile/universe.json
+
+# the phone ledger backup (real fills) must never be committed: tools/ledger_audit.py reads it in place
+yentool-ledger-*.json

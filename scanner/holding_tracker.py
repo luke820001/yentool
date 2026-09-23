@@ -276,9 +276,15 @@ def annotate_holding(df, scan_mode):
     df = df.copy()
     today = str(df["Data_Date"].iloc[0])[:10] if "Data_Date" in df.columns else cal[-1]
 
+    # The previous LEDGER session: the newest bar date any pick was recorded
+    # on before today. Measured against the ledger rather than the calendar so
+    # a day the scan did not run cannot turn every name into a "new" signal.
+    prev_session = max((d for ds in led.values() for d in ds if d < today), default=None)
+
     entry_dates, exit_dates, hold_days = [], [], []
     remainings, statuses, notes = [], [], []
     time_exit_dates = []                    # the bar a calendar exit lands on
+    first_days = []
     for _, r in df.iterrows():
         sid = str(r.get("Stock_ID", "")).strip()
         # Union the ledger history with this pick's own signal day so a just-
@@ -286,6 +292,17 @@ def annotate_holding(df, scan_mode):
         bar_dates = set(led.get(sid, []))
         bar_dates.add(str(r.get("Data_Date") or today)[:10])
         anchor = _streak_start(sorted(bar_dates), idx_of, gap_tol=hold)
+        # FIRST DAY ON THE LIST, the research definition (2026-09-23): the
+        # name was not on the previous session's list. This is a different
+        # question from the streak above. The streak's gap tolerance exists
+        # for a HOLDER (a name that blips off the list for a day must keep
+        # its exit calendar); the buy rule was validated on "absent the
+        # previous session". Reading the buy rule off the streak made the
+        # live scanner require a name to be gone for MORE than ten sessions
+        # before it could be bought again -- 302 of the rule's 479 signals
+        # over 2020-01..2026-09, with the dropped ones no worse than the
+        # kept. docs/BACKTEST_LOG.md section L.
+        first_days.append(prev_session is None or prev_session not in led.get(sid, []))
 
         if anchor is None or anchor not in idx_of:
             entry_dates.append(""); exit_dates.append("")
@@ -346,6 +363,7 @@ def annotate_holding(df, scan_mode):
     df["Hold_Cap"] = cap             # latest exit bar when delayed
     df["Hold_Status"] = statuses
     df["Hold_Note"] = notes
+    df["First_Day"] = first_days
 
     # Exit levels anchored to the price actually paid (see module docstring).
     # A pending row has no fill yet, so its Entry_Open stays None and the UI
