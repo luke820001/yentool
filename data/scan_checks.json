@@ -14,18 +14,6 @@
    ]
   },
   {
-   "checked_at": "2026-09-16 15:06:44",
-   "session_date": "2026-09-16",
-   "scan_time": "2026-09-16 15:06:44",
-   "status": "warn",
-   "rows": 42,
-   "errors": 0,
-   "warnings": 1,
-   "codes": [
-    "integrity_flags_on_ok_row"
-   ]
-  },
-  {
    "checked_at": "2026-09-16 20:00:30",
    "session_date": "2026-09-16",
    "scan_time": "2026-09-16 20:00:30",
@@ -715,6 +703,19 @@
    "checked_at": "2026-09-25 17:46:36",
    "session_date": "2026-09-24",
    "scan_time": "2026-09-25 17:46:36",
+   "status": "warn",
+   "rows": 42,
+   "errors": 0,
+   "warnings": 2,
+   "codes": [
+    "data_lag",
+    "tracked_null"
+   ]
+  },
+  {
+   "checked_at": "2026-09-25 19:08:19",
+   "session_date": "2026-09-24",
+   "scan_time": "2026-09-25 19:08:19",
    "status": "warn",
    "rows": 42,
    "errors": 0,
