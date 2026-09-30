@@ -2,18 +2,6 @@
  "version": 1,
  "runs": [
   {
-   "checked_at": "2026-09-17 22:50:45",
-   "session_date": "2026-09-17",
-   "scan_time": "2026-09-17 22:50:44",
-   "status": "warn",
-   "rows": 42,
-   "errors": 0,
-   "warnings": 1,
-   "codes": [
-    "integrity_flags_on_ok_row"
-   ]
-  },
-  {
    "checked_at": "2026-09-18 15:08:51",
    "session_date": "2026-09-18",
    "scan_time": "2026-09-18 15:08:51",
@@ -727,6 +715,18 @@
    "scan_time": "2026-09-30 00:28:15",
    "status": "warn",
    "rows": 43,
+   "errors": 0,
+   "warnings": 1,
+   "codes": [
+    "tracked_null"
+   ]
+  },
+  {
+   "checked_at": "2026-09-30 15:05:29",
+   "session_date": "2026-09-30",
+   "scan_time": "2026-09-30 15:05:29",
+   "status": "warn",
+   "rows": 41,
    "errors": 0,
    "warnings": 1,
    "codes": [
