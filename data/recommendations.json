@@ -1,5 +1,5 @@
 {
- "count": 2,
+ "count": 3,
  "format_version": 1,
  "recommendations": [
   {
@@ -40,6 +40,26 @@
    "strategy_version": "prelaunch-2026-09-09",
    "trail_arm_price": "19371.50",
    "trail_lock_price": "18640.50",
+   "valid_until_session": null
+  },
+  {
+   "cycle_seq": 1,
+   "first_qualified_session": "2026-10-06",
+   "gate_snapshot": "{\"ATR_Pct\": 7.03, \"Buy_Block\": \"\", \"Buy_Ready\": true, \"Close_Price\": 234.5, \"Core_Plus\": true, \"Data_Date\": \"2026-10-06\", \"Dist_52W_High_Pct\": 0.8, \"Explosion_Score\": 0.0, \"Hold_Status\": \"exited\", \"Integrity_OK\": true, \"Launch_Score\": 74.4, \"Market\": \"OTC\", \"Ret_5D_Pct\": -0.2, \"Surge_Score\": 64.2}",
+   "horizon_days": 10,
+   "initial_buy_price": "234.50",
+   "initial_stop_price": "187.50",
+   "initial_target_price": "281.50",
+   "market": "OTC",
+   "recommendation_id": "rec-3498-mode_prelaunch-1",
+   "recommended_at": "2026-10-06 15:05:53",
+   "status": "active",
+   "stock_id": "3498",
+   "stock_name": "陽程",
+   "strategy": "mode_prelaunch",
+   "strategy_version": "prelaunch-2026-09-21",
+   "trail_arm_price": "240.50",
+   "trail_lock_price": "239.00",
    "valid_until_session": null
   }
  ],
