@@ -1,0 +1,1 @@
+{"url":"https://openapi.twse.com.tw/v1/exchangeReport/TWTAWU","params":null,"status":200,"last_modified":"Tue, 06 Oct 2026 21:22:57 GMT","fetched_at":"2026-10-08T03:59:41","body":[{"Number":"1","Code":"1218","Name":"泰山","TradingHaltDate":"1150813","TradingHaltTime":"080000","TradingResumptionDate":"1150814","TradingResumptionTime":"080000"}]}

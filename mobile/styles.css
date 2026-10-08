@@ -72,6 +72,10 @@ body {
 
 /* --- data notices (NOT card states) --------------------------------------*/
 .notices:empty { display: none; }
+/* The notices sit in the sticky top bar: seven faults at once measured 273px
+   of 812 (the bar was 42% of the screen). Cap the stack and scroll inside it;
+   renderNotices() puts the errors first. */
+.notices { max-height: 24vh; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .notice {
   margin-top: 6px;
   padding: 7px 10px;
@@ -356,6 +360,71 @@ body {
   padding: 11px 13px; font-size: 13px; font-weight: 600;
   box-shadow: 0 6px 20px rgba(0,0,0,0.5);
 }
+
+/* --- investor views (2026-10-08) -------------------------------------------
+   Picks page in three groups, the list-freeze stamp, restriction and event
+   tags, the sizing and order panels and the system-record chart. Tags are
+   INFORMATION tones; none of them reuses .verdict, which stays the buy
+   verdict alone. */
+.list-state { font-size: 11.5px; color: var(--dim); line-height: 1.5; }
+.list-state.final { color: var(--green-t); }
+.list-state.prov { color: var(--orange); }
+.funnel {
+  font-size: 12.5px; font-weight: 600; line-height: 1.5; color: var(--fg);
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 9px;
+}
+details.grp { display: flex; flex-direction: column; gap: 8px; }
+details.grp > summary {
+  font-size: 12.5px; color: var(--accent); margin: 6px 0 4px;
+  font-weight: 700; letter-spacing: 0.4px; cursor: pointer; min-height: 24px;
+}
+details.grp[open] > summary { margin-bottom: 8px; }
+details.grp > .card { margin-bottom: 8px; }
+.tag {
+  font-size: 10.5px; font-weight: 600; border-radius: 5px; padding: 2px 6px;
+  border: 1px solid var(--line); color: var(--dim);
+}
+.tag.info { color: #9fc3ee; border-color: rgba(74,144,226,0.6); }
+.tag.warn { color: var(--orange); border-color: rgba(255,138,61,0.6); }
+.tag.err  { color: var(--red-t); border-color: var(--red); }
+.card-head .tag { margin-left: 4px; }
+.kv-v.warn { color: var(--orange); }
+.sub-h { font-size: 11px; font-weight: 700; color: var(--accent); margin-top: 2px; }
+.prev-seg {
+  font-size: 11.5px; color: var(--dim); line-height: 1.5;
+  border-left: 3px solid var(--line); padding: 2px 0 2px 8px;
+}
+.sizing { line-height: 1.6; }
+.sizing b { color: var(--fg); }
+.sizing .warn, .plan .warn { color: var(--orange); }
+.sizing .btns { margin-top: 6px; }
+details.order {
+  background: var(--surface2); border-radius: 8px; padding: 7px 9px;
+  font-size: 12px; line-height: 1.55; color: var(--dim);
+}
+details.order > summary { cursor: pointer; font-weight: 700; color: var(--fg); min-height: 24px; }
+ol.steps { margin: 6px 0 6px; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
+ol.steps li { color: var(--fg); }
+ol.steps .notice { margin: 2px 0; }
+.exit-guide { color: var(--fg); }
+ul.hist { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.6; }
+svg.eq { width: 100%; height: auto; background: var(--surface); border-radius: 8px; }
+svg.eq polyline { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; }
+svg.eq .eq-line { stroke: var(--gold); }
+svg.eq .eq-taiex { stroke: var(--accent); stroke-width: 1.4; }
+svg.eq .eq-otc { stroke: var(--green); stroke-width: 1.4; }
+svg.eq .eq-zero { stroke: var(--line); stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--dim); }
+.legend .lg::before {
+  content: ""; display: inline-block; width: 12px; height: 3px;
+  margin-right: 4px; vertical-align: middle; background: currentColor;
+}
+.legend .lg.eq-line { color: var(--gold); }
+.legend .lg.eq-taiex { color: var(--accent); }
+.legend .lg.eq-otc { color: var(--green); }
+.legend .lg-note { color: var(--dimmer); }
+.tbl.reasons td:first-child { white-space: nowrap; }
 
 /* --- narrow phones (375px) ------------------------------------------------*/
 @media (max-width: 380px) {

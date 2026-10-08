@@ -48,10 +48,50 @@ HOLD_STATUSES = ("", "pending", "holding", "exit_today", "overdue",
 # "regime_stale" = the index FEED is behind the stock data, so the regime is
 # unusable. Both veto a buy; they are different facts and the screens must not
 # state the first when the second is true (2026-09-21, 46 rows).
+# "restricted" (2026-10-08) = the row's Trade_Restriction is in
+# trade_restrictions.BLOCKING_RESTRICTIONS; lowest priority, so it is the
+# reason only when every other gate passed.
 BUY_BLOCKS = ("", "regime", "regime_stale", "held", "unknown", "quality",
-              "market", "rank", "integrity", "stale", "no_rule", "dropped")
-REC_STATUSES = ("active", "expired", "converted", "cancelled", "closed")
+              "market", "rank", "integrity", "stale", "no_rule", "dropped",
+              "restricted")
+# scanner.trade_restrictions.RESTRICTION_KINDS (most severe first) and the
+# default blocking set; the checker prefers the set the payload declares in
+# meta.quality.restrictions.blocking, so a payload is judged by the rule that
+# produced it.
+RESTRICTION_KINDS = ("suspended", "disposition", "altered", "limit_lock",
+                     "unknown", "attention", "none")
+RESTRICTION_PREPAY = ("all", "threshold")
+DEFAULT_BLOCKING_RESTRICTIONS = ("suspended",)
+# meta.report_sources[market].source (gemini_hook.gemini_client.REPORT_SOURCES)
+REPORT_SOURCES = ("gemini", "groq", "template")
+# Company events (ingestion/company_events, 2026-10-08): display only, never
+# scored. ingestion.company_events.EX_KINDS.
+EX_KINDS = ("div", "right", "both")
+_MONTH_RE = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
+# meta.live_record per-name history and benchmark (scanner/live_record:
+# BY_SID_KEPT, BENCH_POINTS, the three buckets)
+LIVE_RECORD_BUCKETS = ("tradable", "not_core", "regime_closed")
+BY_SID_MAX = 5
+BENCH_MAX_POINTS = 120
+# The recommendation lifecycle (portfolio.sync, 2026-10-08): 'active' while the
+# recommended trade is live, then exactly one terminal status. 'converted' is
+# local only (a real position) and must never reach a public file.
+REC_STATUSES = ("active", "expired", "converted", "cancelled", "closed",
+                "superseded")
+REC_TERMINAL = ("expired", "closed", "superseded", "cancelled")
+# portfolio.sync.REC_HORIZON_SESSIONS: an active recommendation this many
+# sessions past its entry session means the lifecycle's safety net did not run
+REC_HORIZON_SESSIONS = 25
 EXIT_SIGNALS = ("", "stop", "lock", "tp", "late", "time")
+# why the card's trade starts where it does (holding_tracker.ANCHOR_KINDS)
+ANCHOR_KINDS = ("", "first", "gap", "reentry", "rec")
+# the previous trade, set only when a re-entry or a recommendation anchor
+# opened the current one (holding_tracker.PREV_COLUMNS)
+PREV_COLUMNS = (
+    "Prev_Signal_Date", "Prev_Was_Signal", "Prev_Entry_Date",
+    "Prev_Entry_Open", "Prev_Exit_Signal", "Prev_Exit_Signal_Date",
+    "Prev_Exit_Signal_Price", "Prev_Exit_Ret_Pct", "Sessions_Since_Prev_Exit",
+)
 CHIP_BASES = ("", "current", "lag", "ahead")
 CHIP_ACTIONS = ("", "sell", "add", "hold")
 
@@ -89,6 +129,10 @@ def _c(kind, nullable=False, lo=None, hi=None, phone=False, choices=None):
             "phone": phone, "choices": choices}
 
 
+# 2026-10-08 (stage F1): Gain_1M_Pct, Vol_MA20, Vol_Today, Core_Plus,
+# Entry_Date, Entry_Open, Hold_Status, Fill_Target_Price and
+# Initial_Stop/Target_Price became phone=True: the picks page now reads
+# them (investor info, funnel line, hold group, card levels).
 COLUMNS = {
     "Stock_ID":            _c("id", phone=True),
     "Stock_Name":          _c("str", phone=True),
@@ -106,7 +150,7 @@ COLUMNS = {
     # measure.
     "RS_Score":            _c("num", lo=-2000, hi=2000, phone=True),
     "Gain_3M_Pct":         _c("num", lo=-95, hi=2000, phone=True),
-    "Gain_1M_Pct":         _c("num", lo=-95, hi=1000),
+    "Gain_1M_Pct":         _c("num", lo=-95, hi=1000, phone=True),
     # NOT nullable: it is an entry-gate input, and a null on the daily list
     # means a row was scored on data that does not exist. A tracked row with
     # less than a year of history legitimately has none, and that surfaces as
@@ -169,9 +213,9 @@ COLUMNS = {
     "Range_Tightness":     _c("num", lo=0, hi=20, phone=True),
     "Volume_Dryup":        _c("num", lo=0, hi=20, phone=True),
     "Volume_Bias":         _c("num", lo=0, hi=5, phone=True),
-    "Vol_MA20":            _c("num", lo=0),
+    "Vol_MA20":            _c("num", lo=0, phone=True),
     "Vol_MA5":             _c("num", lo=0),
-    "Vol_Today":           _c("int", lo=0),
+    "Vol_Today":           _c("int", lo=0, phone=True),
     "High_20_Prev":        _c("num", lo=0.01),
     "High_Today":          _c("num", lo=0.01),
     "Low_Today":           _c("num", lo=0.01),
@@ -192,8 +236,8 @@ COLUMNS = {
     "Add_Price":           _c("num", lo=0.01),
     # optional scale-out (2026-09-21): sell half at +15% from the fill
     "Scale_Out_Price":     _c("num", lo=0.01, phone=True),
-    "Core_Plus":           _c("bool"),
-    "Entry_Date":          _c("date", nullable=True),
+    "Core_Plus":           _c("bool", phone=True),
+    "Entry_Date":          _c("date", nullable=True, phone=True),
     "Exit_Date":           _c("date", nullable=True),
     # Nullable: a listed name with no ledger anchor has an UNKNOWN holding
     # day, and null is the honest value for that. Before 2026-09-21 the
@@ -203,16 +247,17 @@ COLUMNS = {
     "Hold_Remaining":      _c("int", nullable=True, lo=-400, hi=400),
     "Hold_Total":          _c("int", lo=1, hi=60, phone=True),
     "Hold_Cap":            _c("int", lo=1, hi=120, phone=True),
-    "Hold_Status":         _c("choice", nullable=True, choices=HOLD_STATUSES),
+    "Hold_Status":         _c("choice", nullable=True, choices=HOLD_STATUSES,
+                              phone=True),
     "Hold_Note":           _c("str", nullable=True),
     # 2026-09-23: the research definition of a new signal (absent on the
     # previous ledger session), separate from the streak behind Hold_Status.
     "First_Day":           _c("bool", nullable=True),
-    "Entry_Open":          _c("num", nullable=True, lo=0.01),
+    "Entry_Open":          _c("num", nullable=True, lo=0.01, phone=True),
     "Fill_Stop_Loss":      _c("num", nullable=True, lo=0.01),
     "Fill_Trail_Arm_Price": _c("num", nullable=True, lo=0.01),
     "Fill_Trail_Lock_Price": _c("num", nullable=True, lo=0.01),
-    "Fill_Target_Price":   _c("num", nullable=True, lo=0.01),
+    "Fill_Target_Price":   _c("num", nullable=True, lo=0.01, phone=True),
     "Fill_Scale_Out_Price": _c("num", nullable=True, lo=0.01, phone=True),
     # exit plan (holding_tracker, 2026-09-14): the one price to act on
     "Plan_Stop":           _c("num", nullable=True, lo=0.01, phone=True),
@@ -225,16 +270,60 @@ COLUMNS = {
     "Exit_Signal_Date":    _c("date", nullable=True, phone=True),
     "Exit_Signal_Price":   _c("num", nullable=True, lo=0.01, phone=True),
     "Exit_Note":           _c("str", nullable=True),
+    # segments (2026-10-08): the signal day the card's trade is anchored to,
+    # and why -- first appearance, a long gap, a re-entry after the previous
+    # trade closed (or was not a signal), or a recommendation
+    "Hold_Anchor":         _c("date", nullable=True),
+    "Hold_Anchor_Kind":    _c("choice", nullable=True, choices=ANCHOR_KINDS),
+    # the previous trade (holding_tracker.PREV_COLUMNS), all null unless a
+    # re-entry or a recommendation anchor opened the current one
+    "Prev_Signal_Date":    _c("date", nullable=True, phone=True),
+    "Prev_Was_Signal":     _c("bool", nullable=True, phone=True),
+    "Prev_Entry_Date":     _c("date", nullable=True, phone=True),
+    "Prev_Entry_Open":     _c("num", nullable=True, lo=0.01, phone=True),
+    "Prev_Exit_Signal":    _c("choice", nullable=True, choices=EXIT_SIGNALS,
+                              phone=True),
+    "Prev_Exit_Signal_Date": _c("date", nullable=True, phone=True),
+    "Prev_Exit_Signal_Price": _c("num", nullable=True, lo=0.01, phone=True),
+    "Prev_Exit_Ret_Pct":   _c("num", nullable=True, lo=-100, hi=1000, phone=True),
+    "Sessions_Since_Prev_Exit": _c("int", nullable=True, lo=0, hi=400, phone=True),
     "Buy_Ready":           _c("bool", phone=True),
     "Buy_Block":           _c("choice", nullable=True, choices=BUY_BLOCKS, phone=True),
     "Recommendation_ID":   _c("str", nullable=True, phone=True),
     "Initial_Buy_Price":   _c("num", nullable=True, lo=0.01, phone=True),
-    "Initial_Stop_Price":  _c("num", nullable=True, lo=0.01),
-    "Initial_Target_Price": _c("num", nullable=True, lo=0.01),
+    "Initial_Stop_Price":  _c("num", nullable=True, lo=0.01, phone=True),
+    "Initial_Target_Price": _c("num", nullable=True, lo=0.01, phone=True),
     "Recommended_On":      _c("date", nullable=True, phone=True),
     "Rec_Status":          _c("choice", nullable=True, choices=REC_STATUSES,
                               phone=True),
     "Rec_Valid_Until":     _c("date", nullable=True, phone=True),
+    # why a recommendation ended (the exit reason of a closed one); null while
+    # it is active
+    "Rec_Status_Reason":   _c("str", nullable=True, phone=True),
+    # trade restrictions (scanner/trade_restrictions, 2026-10-08). The kind is
+    # NOT nullable: "none" is spelled out, so a missing value means the scan
+    # never checked the lists.
+    "Trade_Restriction":   _c("choice", choices=RESTRICTION_KINDS, phone=True),
+    "Restriction_Flags":   _c("str", nullable=True, phone=True),
+    "Restriction_Since":   _c("date", nullable=True, phone=True),
+    "Restriction_Until":   _c("date", nullable=True, phone=True),
+    "Restriction_Match_Min": _c("int", nullable=True, lo=1, hi=60, phone=True),
+    "Restriction_Prepay":  _c("choice", nullable=True,
+                              choices=RESTRICTION_PREPAY, phone=True),
+    # company events (ingestion/company_events, 2026-10-08). DISPLAY ONLY:
+    # no score, gate or exit reads them. app.js renders them (stage F1)
+    # but they stay phone=False on purpose: the card simply omits the line
+    # when a value is absent, and an events-feed outage must not fail the
+    # whole payload (test_missing_event_column_only_warns).
+    "Rev_Month":           _c("str", nullable=True),
+    "Rev_Amount_K":        _c("num", nullable=True, lo=0),
+    "Rev_YoY_Pct":         _c("num", nullable=True, lo=-100, hi=100000),
+    "Rev_MoM_Pct":         _c("num", nullable=True, lo=-100, hi=100000),
+    "Rev_Cum_YoY_Pct":     _c("num", nullable=True, lo=-100, hi=100000),
+    "Ex_Date":             _c("date", nullable=True),
+    "Ex_Kind":             _c("choice", nullable=True, choices=EX_KINDS),
+    "Ex_Cash_Div":         _c("num", nullable=True, lo=0, hi=1000),
+    "Conf_Date":           _c("date", nullable=True),
 }
 
 # Flag prefixes data_integrity uses for UNAMBIGUOUS data errors; everything
@@ -453,7 +542,9 @@ def _check_columns(rows, rep):
             rep.error("null", col, nulls, "null/empty in a non-nullable column")
         if nulls == len(rows) and spec["nullable"] and spec["kind"] != "str" \
                 and col not in ("Entry_Date", "Exit_Date") \
-                and not col.startswith(("Initial_", "Rec")):
+                and not col.startswith(("Initial_", "Rec", "Prev_",
+                                        "Sessions_Since_Prev", "Restriction_",
+                                        "Ex_", "Conf_")):
             rep.info("all_null", col, nulls, "every row is null (may be normal)")
         if bad_type:
             rep.error("type", col, bad_type,
@@ -526,13 +617,249 @@ def _lvl(base, pct, direction, stock_id=None):
     return got if got is not None else round(base * (1 + pct), 2)
 
 
+def _check_prev(r, sid, data_date, hit):
+    """Prev_* integrity (2026-10-08). The group is all-null, or carries the
+    previous signal, its entry and an exit verdict ('' = the old trade was
+    still open when the current one began); an exit verdict brings its date,
+    price, net return and the session count with it. Dates run signal <
+    entry <= exit <= data date, and the old trade starts before the current
+    one. The group and Hold_Anchor_Kind agree: a 'reentry' anchor always has
+    a previous trade, and only a 'reentry' or 'rec' anchor may carry one."""
+    vals = {c: r.get(c) for c in PREV_COLUMNS}
+    kind = r.get("Hold_Anchor_Kind")
+    kind = "" if _is_null(kind) else str(kind).strip()
+    if all(_is_null(v) for v in vals.values()):
+        if kind == "reentry":
+            hit("prev_segment_kind", sid, "Hold_Anchor_Kind")
+        return
+    hit("prev_segment", sid, "Prev_Signal_Date")
+    if "Hold_Anchor_Kind" in r and kind not in ("reentry", "rec"):
+        hit("prev_segment_kind", sid, "Hold_Anchor_Kind")
+    psd, ped = vals["Prev_Signal_Date"], vals["Prev_Entry_Date"]
+    sig = vals["Prev_Exit_Signal"]
+    exit_cols = ("Prev_Exit_Signal_Date", "Prev_Exit_Signal_Price",
+                 "Prev_Exit_Ret_Pct", "Sessions_Since_Prev_Exit")
+    partial = _is_null(psd) or _is_null(ped) or not isinstance(sig, str)
+    if isinstance(sig, str):
+        if sig.strip():
+            partial = partial or any(_is_null(vals[c]) for c in exit_cols)
+        else:
+            partial = partial or any(not _is_null(vals[c]) for c in exit_cols)
+    if partial:
+        hit("prev_segment_partial", sid, "Prev_Signal_Date")
+        return
+    psd, ped = str(psd)[:10], str(ped)[:10]
+    pxd = vals["Prev_Exit_Signal_Date"]
+    pxd = None if _is_null(pxd) else str(pxd)[:10]
+    entry = r.get("Entry_Date")
+    entry = None if _is_null(entry) else str(entry)[:10]
+    anchor = r.get("Hold_Anchor")
+    anchor = None if _is_null(anchor) else str(anchor)[:10]
+    n = vals["Sessions_Since_Prev_Exit"]
+    bad = not psd < ped
+    if pxd is not None:
+        bad = bad or not ped <= pxd or (bool(data_date) and pxd > data_date)
+        bad = bad or (anchor is not None and pxd > anchor)
+    bad = bad or (entry is not None and not ped < entry)
+    bad = bad or (anchor is not None and not psd < anchor)
+    bad = bad or (_is_int(n) and n < 0)
+    if bad:
+        hit("prev_segment_order", sid, "Prev_Signal_Date")
+
+
+_REC_ROW_CODES = ("rec_segment_mismatch", "rec_state_mismatch",
+                  "rec_vs_card_consistency", "rec_target_mismatch")
+
+
+def _check_rec_card(r, sid, status, data_date, hit, taiex_asof=""):
+    """A row carrying a recommendation shows THAT trade (holding_tracker
+    rec_anchors, portfolio.sync.load_rec_anchors). Keyed on Hold_Anchor_Kind
+    and Hold_Anchor: the tracker keeps the natural anchor when the
+    recommendation's trade closed on or before a newer segment's start.
+
+    `taiex_asof` is meta.regime.as_of_date. A TIME exit on a session the
+    TAIEX feed has not reached is provisional -- the market leg may still
+    keep the trade -- so the lifecycle leaves the recommendation active
+    (portfolio.sync._leg_unknown) while the card already shows the exit."""
+    rst = r.get("Rec_Status")
+    if rst not in ("active", "closed"):
+        return
+    ron = str(r.get("Recommended_On") or "")[:10]
+    vu = str(r.get("Rec_Valid_Until") or "")[:10]
+    entry = str(r.get("Entry_Date") or "")[:10]
+    bar = str(r.get("Data_Date") or data_date or "")[:10]
+    has_kind = "Hold_Anchor_Kind" in r
+    kind = r.get("Hold_Anchor_Kind")
+    anchor = str(r.get("Hold_Anchor") or "")[:10]
+    on_rec = (kind == "rec") if has_kind else True
+    sig = r.get("Exit_Signal")
+
+    if rst == "active":
+        if has_kind and (kind != "rec" or anchor != ron):
+            hit("rec_segment_mismatch", sid, "Hold_Anchor")
+        elif status == "pending":
+            if ron != bar:
+                hit("rec_segment_mismatch", sid, "Recommended_On")
+        elif vu and entry and entry != vu:
+            hit("rec_segment_mismatch", sid, "Entry_Date")
+        if status == "exited":
+            # whichever trade the card shows, an active recommendation's
+            # trade cannot be over: the lifecycle would have closed it --
+            # unless it deferred a time exit the index feed cannot judge yet
+            xd = str(r.get("Exit_Signal_Date") or "")[:10]
+            deferred = (sig == "time" and bool(taiex_asof) and bool(xd)
+                        and xd > taiex_asof)
+            if not deferred:
+                hit("rec_state_mismatch", sid, "Rec_Status")
+        if on_rec and status == "pending" and "Plan_Stop" in r:
+            want = _num(r.get("Initial_Stop_Price"))
+            got = _num(r.get("Plan_Stop"))
+            if want is not None and (got is None or abs(got - want) > _PRICE_TOL):
+                hit("rec_vs_card_consistency", sid, "Plan_Stop")
+            tgt = _num(r.get("Initial_Target_Price"))
+            ref = _num(r.get("Target_Price"))
+            if tgt is not None and ref is not None and abs(ref - tgt) > _PRICE_TOL:
+                hit("rec_target_mismatch", sid, "Target_Price")
+        return
+    # closed (attached for a few sessions after its exit)
+    if on_rec:
+        if has_kind and anchor != ron:
+            hit("rec_segment_mismatch", sid, "Hold_Anchor")
+        elif vu and entry and entry != vu:
+            hit("rec_segment_mismatch", sid, "Entry_Date")
+        if _is_null(sig):
+            hit("rec_state_mismatch", sid, "Exit_Signal")
+    elif not anchor or not ron or anchor <= ron:
+        # the natural anchor may only win with a NEWER trade
+        hit("rec_segment_mismatch", sid, "Hold_Anchor")
+
+
+def _blocking_restrictions(meta):
+    """The restriction kinds that block a buy, as the PAYLOAD declares them
+    (meta.quality.restrictions.blocking), else trade_restrictions' constant."""
+    q = (meta or {}).get("quality") if isinstance(meta, dict) else None
+    r = q.get("restrictions") if isinstance(q, dict) else None
+    if isinstance(r, dict) and isinstance(r.get("blocking"), list):
+        return tuple(str(k) for k in r["blocking"])
+    try:
+        from scanner.trade_restrictions import BLOCKING_RESTRICTIONS
+        return tuple(BLOCKING_RESTRICTIONS)
+    except Exception:
+        return DEFAULT_BLOCKING_RESTRICTIONS
+
+
+def _ex_today_ids(meta, data_date):
+    """Ids with an ex-dividend / ex-rights entry on the payload's session, as
+    meta.quality.restrictions.ex_today declares them. On such a day the
+    exchange's limits come from the reduced reference price, which the row
+    does not carry, so the raw-close recomputation below cannot judge them."""
+    q = (meta or {}).get("quality") if isinstance(meta, dict) else None
+    r = q.get("restrictions") if isinstance(q, dict) else None
+    ex = r.get("ex_today") if isinstance(r, dict) else None
+    if not isinstance(ex, dict) or not isinstance(ex.get("ids"), list):
+        return frozenset()
+    if data_date and str(ex.get("date") or "")[:10] not in ("", data_date):
+        return frozenset()
+    return frozenset(str(i) for i in ex["ids"])
+
+
+_RESTRICTION_DETAIL = ("Restriction_Since", "Restriction_Until",
+                       "Restriction_Match_Min", "Restriction_Prepay")
+
+
+def _check_restriction(r, sid, br, bb, data_date, blocking, hit,
+                       ex_ids=frozenset()):
+    """The six restriction columns against each other and the buy gate."""
+    kind = r.get("Trade_Restriction")
+    raw = r.get("Restriction_Flags")
+    flags = set() if _is_null(raw) else {
+        f.strip() for f in str(raw).split(",") if f.strip()}
+    if isinstance(kind, str) and kind:
+        if br is True and kind in blocking:
+            hit("restricted_buy_ready", sid, "Buy_Ready")
+        if kind not in ("none",):
+            hit("restricted_rows", "{}:{}".format(sid, kind), "Trade_Restriction")
+        # the kind is the most severe flag; display-only flags never count
+        ranked = [f for f in flags if f in RESTRICTION_KINDS and f != "none"]
+        want = (min(ranked, key=RESTRICTION_KINDS.index) if ranked else "none")
+        if kind in RESTRICTION_KINDS and kind != want:
+            hit("restriction_flags_mismatch", sid, "Restriction_Flags")
+    if bb == "restricted" and kind not in blocking:
+        hit("restricted_block_mismatch", sid, "Buy_Block")
+    if "disposition" in flags or kind == "disposition":
+        until = r.get("Restriction_Until")
+        if _is_null(until) or (data_date and str(until)[:10] < data_date):
+            hit("restriction_until_missing", sid, "Restriction_Until")
+    elif any(not _is_null(r.get(c)) for c in _RESTRICTION_DETAIL):
+        hit("restriction_orphan_detail", sid, "Restriction_Since")
+    # signal-day limit lock, recomputed: Close_Prev x 1.10 rounded down onto
+    # the ladder (trade_restrictions.limit_flags); skipped on a recent jump,
+    # on a row whose own bar is not the session's (not flagged there) and on
+    # an ex-date (the limits come from the reference price, not Close_Prev)
+    own = r.get("Data_Date")
+    own_bar = _is_null(own) or not data_date or str(own)[:10] == data_date
+    if own_bar and not r.get("Recent_Jump") and "Restriction_Flags" in r \
+            and sid not in ex_ids:
+        prev, close = _num(r.get("Close_Prev")), _num(r.get("Close_Price"))
+        if prev and prev > 0 and close is not None:
+            try:
+                from scanner.tick import round_to_tick
+                up = round_to_tick(prev * 1.10, "down", sid)
+            except Exception:
+                up = None
+            if up is not None and (abs(close - up) < 1e-6) != ("limit_lock" in flags):
+                hit("limit_lock_mismatch", sid, "Restriction_Flags")
+
+
+_EVENT_WARN_CODES = ("rev_month_format", "rev_month_future",
+                     "rev_fields_without_month", "ex_fields_without_date",
+                     "ex_date_not_after_session")
+
+
+def _month_index(ym):
+    return int(ym[:4]) * 12 + int(ym[5:7]) - 1
+
+
+def _check_event_cols(r, sid, data_date, hit):
+    """Row identities of the display-only company-event columns."""
+    rm = r.get("Rev_Month")
+    if _is_null(rm):
+        for col in ("Rev_Amount_K", "Rev_YoY_Pct", "Rev_MoM_Pct",
+                    "Rev_Cum_YoY_Pct"):
+            if not _is_null(r.get(col)):
+                hit("rev_fields_without_month", sid, col)
+                break
+    elif not (isinstance(rm, str) and _MONTH_RE.match(rm)):
+        hit("rev_month_format", sid, "Rev_Month")
+    elif _DATE_RE.match(data_date or ""):
+        if rm >= data_date[:7]:
+            hit("rev_month_future", sid, "Rev_Month")
+        elif _month_index(data_date[:7]) - _month_index(rm) > 2:
+            hit("rev_month_old", sid, "Rev_Month")
+    ex = r.get("Ex_Date")
+    if _is_null(ex):
+        if not _is_null(r.get("Ex_Kind")) or not _is_null(r.get("Ex_Cash_Div")):
+            hit("ex_fields_without_date", sid, "Ex_Date")
+    else:
+        # annotate_events sets Ex_Date and Ex_Kind together; a date with no
+        # kind is a half-written event the phone would show as a bare date
+        if _is_null(r.get("Ex_Kind")):
+            hit("ex_fields_without_date", sid, "Ex_Kind")
+        if data_date and str(ex)[:10] <= data_date:
+            hit("ex_date_not_after_session", sid, "Ex_Date")
+
+
 def _check_rows(rows, meta, rep, scan_mode):
     if not rows:
         return
     data_date = str(meta.get("data_date") or "")[:10]
+    reg = meta.get("regime") if isinstance(meta.get("regime"), dict) else {}
+    taiex_asof = str(reg.get("as_of_date") or "")[:10]
     (stop_pct, tp_pct, arm_pct, lock_pct, add_pct, out_pct,
      n_enter) = _trade_params()
     prelaunch = scan_mode == "mode_prelaunch"
+    blocking = _blocking_restrictions(meta)
+    ex_ids = _ex_today_ids(meta, data_date)
 
     counters = {}
     samples = {}
@@ -657,10 +984,13 @@ def _check_rows(rows, meta, rep, scan_mode):
                 if status == "pending":
                     if hd != 0 or hr != ht:
                         hit("hold_pending_counts", sid, "Hold_Day")
-                elif status == "exited":
+                elif status == "exited" or (
+                        status == "exit_today" and not _is_null(r.get("Exit_Signal"))):
                     # The exit stack closed this trade, so Hold_Day is the day
                     # it closed on and nothing remains. "day + remaining ==
-                    # total" describes an OPEN hold and does not apply.
+                    # total" describes an OPEN hold and does not apply. Since
+                    # 2026-10-08 an exit booked on TODAY's bar is exit_today
+                    # with its signal, and closes the hold the same way.
                     if hr != 0:
                         hit("exited_row_has_days_left", sid, "Hold_Remaining")
                 elif hd + hr != ht:
@@ -705,7 +1035,11 @@ def _check_rows(rows, meta, rep, scan_mode):
                         hit("exit_signal_on_pending_row", sid, "Exit_Signal")
                     if plan_stop is not None and stop is not None \
                             and abs(plan_stop - stop) > _PRICE_TOL:
-                        hit("plan_stop_pending_mismatch", sid, "Plan_Stop")
+                        # a row anchored to a recommendation shows the
+                        # recommendation's frozen stop before entry
+                        rec_stop = _num(r.get("Initial_Stop_Price"))
+                        if rec_stop is None or abs(plan_stop - rec_stop) > _PRICE_TOL:
+                            hit("plan_stop_pending_mismatch", sid, "Plan_Stop")
                 elif fill is not None and plan_stop is not None and _is_bool(armed):
                     want = (_lvl(fill, lock_pct, "down", sid) if armed
                             else _lvl(fill, -stop_pct, "down", sid))
@@ -750,6 +1084,28 @@ def _check_rows(rows, meta, rep, scan_mode):
                 if r.get("Market") != "OTC" or r.get("Core_Plus") is not True \
                         or not fresh or iok is not True or rank >= n_enter:
                     hit("buy_ready_violates_gate", sid, "Buy_Ready")
+            # A buy signal's card must describe a trade that can still be
+            # entered. The 2026-10-07 payload shipped 8227 as Buy_Ready on an
+            # 'exited' card (the old, closed trade) and stayed green. Since
+            # 2026-10-08 a re-entry after a closed trade is its own pending
+            # segment, so a closed card on a buy row is a tracker fault.
+            if br and isinstance(status, str):
+                if status in ("exited", "exit_today", "overdue"):
+                    hit("buy_ready_on_closed_segment", sid, "Hold_Status")
+                elif status in ("holding", "delay"):
+                    # a valid re-signal during an open trade (research counts
+                    # it as a separate trade): buying doubles the position
+                    hit("buy_ready_while_open", sid, "Hold_Status")
+
+        # trade restrictions (2026-10-08): the kind agrees with its flags, a
+        # disposition carries its period, a blocking kind is never buyable
+        if "Trade_Restriction" in r:
+            _check_restriction(r, sid, br, bb, data_date, blocking, hit, ex_ids)
+
+        # the previous trade (holding_tracker.PREV_COLUMNS) travels together
+        # and is ordered in time
+        if any(c in r for c in PREV_COLUMNS):
+            _check_prev(r, sid, data_date, hit)
 
         # recommendation columns travel together
         rid = r.get("Recommendation_ID")
@@ -759,10 +1115,16 @@ def _check_rows(rows, meta, rep, scan_mode):
                 hit("recommendation_partial", sid, "Recommendation_ID")
         else:
             for col in ("Initial_Buy_Price", "Initial_Stop_Price",
-                        "Initial_Target_Price", "Recommended_On", "Rec_Status"):
+                        "Initial_Target_Price", "Recommended_On", "Rec_Status",
+                        "Rec_Status_Reason"):
                 if not _is_null(r.get(col)):
                     hit("recommendation_orphan_value", sid, col)
                     break
+
+        # the recommendation and the card describe the SAME trade (2026-10-08)
+        if not _is_null(rid) and isinstance(status, str) and status:
+            _check_rec_card(r, sid, status, data_date, hit,
+                            taiex_asof=taiex_asof)
 
         # moving averages and volumes are positive when present
         for col in ("MA5", "MA10", "MA20", "MA60", "Vol_MA20", "Vol_MA5"):
@@ -779,6 +1141,8 @@ def _check_rows(rows, meta, rep, scan_mode):
             f = _num(r.get(col))
             if f is not None and not _on_tick(f, sid):
                 hit("price_off_tick", sid, col)
+
+        _check_event_cols(r, sid, data_date, hit)
 
     dups = [s for s, n in ids_seen.items() if n > 1]
     if dups:
@@ -800,11 +1164,27 @@ def _check_rows(rows, meta, rep, scan_mode):
         "exit_signal_on_pending_row", "plan_stop_pending_mismatch",
         "plan_stop_level_mismatch", "exit_signal_partial",
         "scale_out_pct_mismatch", "price_off_tick",
+        "buy_ready_on_closed_segment", "prev_segment_partial",
+        "prev_segment_order", "prev_segment_kind",
+        "rec_segment_mismatch", "rec_state_mismatch", "rec_vs_card_consistency",
+        "restricted_buy_ready", "restricted_block_mismatch",
+        "restriction_until_missing", "restriction_flags_mismatch",
+        "restriction_orphan_detail",
     }
     warns = {"daily_move_over_limit", "row_stale", "held_row_without_fill",
-             "integrity_flags_on_ok_row", "integrity_fail_without_flags"}
+             "integrity_flags_on_ok_row", "integrity_fail_without_flags",
+             "rec_target_mismatch", "limit_lock_mismatch"}
+    # display-only company events never fail a scan (a fail makes the
+    # scan-timer rerun the whole scan)
+    warns = warns | set(_EVENT_WARN_CODES)
+    if meta.get("degraded"):
+        # a degraded run does not advance or create recommendations (P0-3),
+        # so a card can legitimately run ahead of its recommendation
+        errors = errors - set(_REC_ROW_CODES)
+        warns = warns | set(_REC_ROW_CODES)
     infos = {"integrity_not_ok", "hold_overdue", "exit_signal",
-             "integrity_soft_flags"}
+             "integrity_soft_flags", "buy_ready_while_open", "prev_segment",
+             "restricted_rows", "rev_month_old"}
     descriptions = {
         "close_outside_range": "close not within [Low_Today, High_Today]",
         "daily_move_over_limit": "close moved more than 10.5% vs Close_Prev without Recent_Jump",
@@ -854,6 +1234,55 @@ def _check_rows(rows, meta, rep, scan_mode):
         "price_off_tick": "an order level that the exchange does not quote "
                           "(not on the tick ladder, so it cannot be placed)",
         "exit_signal": "rows where the exit stack says the trade is already out",
+        "buy_ready_on_closed_segment": "Buy_Ready on a row whose card shows a "
+                                       "closed trade (exited / exit_today / overdue)",
+        "buy_ready_while_open": "Buy_Ready re-signal while the name's previous "
+                                "trade is still open (buying doubles the position)",
+        "prev_segment_partial": "Prev_* columns set without the rest of their group",
+        "prev_segment_order": "Prev_* dates out of order (signal < entry <= exit "
+                              "<= data date, before the current trade)",
+        "prev_segment_kind": "Prev_* disagrees with Hold_Anchor_Kind (a reentry "
+                             "without its previous trade, or a previous trade "
+                             "on a first/gap anchor)",
+        "prev_segment": "rows whose trade follows an earlier one (re-entry or "
+                        "recommendation anchor)",
+        "rec_segment_mismatch": "the card is not the recommendation's trade "
+                                "(anchor != Recommended_On, Entry_Date != "
+                                "Rec_Valid_Until, or a pending card on an old "
+                                "recommendation)",
+        "rec_state_mismatch": "recommendation status contradicts its card "
+                              "(active but the card's trade exited, or closed "
+                              "without an exit signal)",
+        "rec_vs_card_consistency": "pending card of an active recommendation "
+                                   "whose Plan_Stop is not Initial_Stop_Price",
+        "rec_target_mismatch": "pending card of an active recommendation whose "
+                               "Target_Price is not Initial_Target_Price",
+        "restricted_buy_ready": "Buy_Ready on a row whose Trade_Restriction is "
+                                "in the blocking set",
+        "restricted_block_mismatch": "Buy_Block 'restricted' on a row whose "
+                                     "Trade_Restriction is not blocking",
+        "restriction_until_missing": "disposition without Restriction_Until, or "
+                                     "one that ended before the data date",
+        "restriction_flags_mismatch": "Trade_Restriction is not the most severe "
+                                      "of Restriction_Flags",
+        "restriction_orphan_detail": "disposition period / terms set on a row "
+                                     "without a disposition flag",
+        "limit_lock_mismatch": "close at Close_Prev x 1.10 (ladder) disagrees "
+                               "with the limit_lock flag",
+        "restricted_rows": "rows under a trade restriction (disposition / "
+                           "altered / suspended / limit lock / attention / "
+                           "unknown), shown on the card",
+        "rev_month_format": "Rev_Month is not YYYY-MM",
+        "rev_month_future": "Rev_Month at or after the data month (a month "
+                            "is reported only after it ends)",
+        "rev_fields_without_month": "Rev_* figures without their Rev_Month "
+                                    "label",
+        "ex_fields_without_date": ("Ex_Kind / Ex_Cash_Div without Ex_Date, "
+                                   "or Ex_Date without Ex_Kind"),
+        "ex_date_not_after_session": "Ex_Date on or before the data date "
+                                     "(only upcoming ex-dates are shown)",
+        "rev_month_old": "latest published revenue month is more than two "
+                         "months behind the data month (company late?)",
     }
     for code, n in counters.items():
         level = "error" if code in errors else "warn" if code in warns else "info"
@@ -864,6 +1293,92 @@ def _check_rows(rows, meta, rep, scan_mode):
 # --------------------------------------------------------------------------
 # meta and cross-file checks
 # --------------------------------------------------------------------------
+def _lm_taipei_date(value):
+    """An HTTP Last-Modified ('Wed, 07 Oct 2026 15:30:10 GMT') as the Taipei
+    calendar date, or None."""
+    if _is_null(value):
+        return None
+    try:
+        from datetime import timedelta
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(str(value))
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None) - (dt.utcoffset() or timedelta(0))
+        return (dt + timedelta(hours=8)).strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def _check_restriction_meta(restr, has_rows, data_date, cal, rep):
+    """meta.quality.restrictions (scanner/trade_restrictions.summarize)."""
+    if not isinstance(restr, dict):
+        if has_rows:
+            rep.error("restrictions_unchecked", "meta.quality.restrictions", 1,
+                      "no restriction summary: the scan never read the "
+                      "disposition / attention lists")
+        return
+    boards = restr.get("boards") if isinstance(restr.get("boards"), dict) else {}
+    failed, fallback, stale = [], [], []
+    prev = None
+    if data_date and cal and data_date in cal:
+        i = cal.index(data_date)
+        prev = cal[i - 1] if i > 0 else None
+    for b in MARKETS[::-1]:
+        e = boards.get(b) if isinstance(boards.get(b), dict) else {}
+        if not e.get("ok"):
+            failed.append("{} ({}/{})".format(b, e.get("source"), e.get("error")))
+            continue
+        if e.get("source") == "web":
+            fallback.append(b)
+        # The list a session-D scan should read covers the previous session's
+        # announcements: TPEX publishes it about 23:30 on that session (Taipei
+        # date >= prev), TWSE about 05:30 the next morning (Taipei date >
+        # prev). A TWSE list dated `prev` is the one for the session BEFORE
+        # prev -- a day of announcements behind.
+        lm = _lm_taipei_date(e.get("last_modified"))
+        if lm and prev and (lm < prev or (b == "TSE" and lm == prev)):
+            stale.append("{} {}".format(b, lm))
+    if failed:
+        rep.warn("restrictions_feed_failed", "meta.quality.restrictions", len(failed),
+                 "disposition list unreadable, rows shown as 'unknown': "
+                 + ", ".join(failed))
+    if fallback:
+        rep.info("restrictions_fallback", "meta.quality.restrictions", len(fallback),
+                 "disposition list read from the web bulletin: " + ", ".join(fallback))
+    if stale:
+        rep.warn("restrictions_stale", "meta.quality.restrictions", len(stale),
+                 "disposition list older than the previous session ({}): {}".format(
+                     prev, ", ".join(stale)))
+    for key, code in (("attention_ok", "attention_feed_failed"),
+                      ("altered_ok", "altered_feed_failed")):
+        st = restr.get(key) if isinstance(restr.get(key), dict) else {}
+        bad = [b for b in MARKETS if st.get(b) is False]
+        if bad:
+            rep.info(code, "meta.quality.restrictions." + key, len(bad),
+                     "best-effort list unreadable: " + ", ".join(bad))
+
+
+def _check_list_status(ls, session, rep):
+    """meta.list_status (scanner/list_freeze). Absent is fine (a payload from
+    before the freeze, or one export wrote and nothing checked yet); present,
+    it must describe THIS payload's session and carry a known state."""
+    if ls is None:
+        return
+    if not isinstance(ls, dict):
+        rep.error("list_status_bad_state", "meta.list_status", 1,
+                  "list_status is not an object")
+        return
+    if ls.get("state") not in ("final", "provisional"):
+        rep.error("list_status_bad_state", "meta.list_status.state", 1,
+                  "state {!r} is neither final nor provisional".format(
+                      ls.get("state")))
+    got = str(ls.get("session") or "")[:10]
+    if session and got != session:
+        rep.error("list_status_session_mismatch", "meta.list_status.session", 1,
+                  "list_status describes {} but the payload is {}".format(
+                      got or "no session", session))
+
+
 def _check_meta(payload, rep, expected_session=None):
     meta = payload.get("meta") or {}
     rows = payload.get("rows") or []
@@ -894,6 +1409,12 @@ def _check_meta(payload, rep, expected_session=None):
 
     if meta.get("degraded"):
         rep.warn("feed_degraded", "meta.degraded", 1, str(meta.get("degraded")))
+        rec = meta.get("rec")
+        if isinstance(rec, dict) and (
+                (_num(rec.get("created")) or 0) > 0 or rec.get("writes") is True):
+            rep.error("rec_written_on_degraded_run", "meta.rec", 1,
+                      "a degraded run wrote recommendations (created {}, "
+                      "writes {})".format(rec.get("created"), rec.get("writes")))
     quality = meta.get("quality") or {}
     if quality.get("data_lag"):
         rep.warn("data_lag", "meta.quality.data_lag", 1,
@@ -905,6 +1426,9 @@ def _check_meta(payload, rep, expected_session=None):
                  "data {} but the clock says {}".format(data_date, expected_session))
 
     cal = meta.get("calendar_tail") or []
+    tracked = payload.get("tracked") if isinstance(payload.get("tracked"), list) else []
+    _check_restriction_meta(quality.get("restrictions"), bool(rows or tracked),
+                            data_date, cal, rep)
     if cal and data_date and cal[-1] != data_date:
         rep.warn("calendar_vs_data_date", "meta.calendar_tail", 1,
                  "calendar ends {} data {}".format(cal[-1], data_date))
@@ -912,6 +1436,8 @@ def _check_meta(payload, rep, expected_session=None):
         rep.error("calendar_bad_date", "meta.calendar_tail", 1, "non-date entry")
     if cal != sorted(cal):
         rep.error("calendar_unsorted", "meta.calendar_tail", 1, "not ascending")
+
+    _check_list_status(meta.get("list_status"), session, rep)
 
     reg = meta.get("regime") or {}
     if not reg.get("ok"):
@@ -938,6 +1464,7 @@ def _check_meta(payload, rep, expected_session=None):
         if missing:
             rep.warn("report_missing", "meta.reports", len(missing),
                      "no report for " + ",".join(missing))
+    _check_report_sources(meta.get("report_sources"), reports, rep)
 
     qmeta = meta.get("quotes") or {}
     if data_date and qmeta.get("as_of") and str(qmeta["as_of"])[:10] != data_date:
@@ -1041,27 +1568,192 @@ def _check_quotes(payload, quotes, rep, tracked_ids=None):
 def _check_recommendations(payload, recs, rep):
     if recs is None:
         return
+    meta = payload.get("meta") or {}
     rows = payload.get("rows") or []
     listed = {str(r.get("Stock_ID") or "").strip(): r for r in rows}
+    tracked = payload.get("tracked") if isinstance(payload.get("tracked"), list) else []
+    held = {str(r.get("Stock_ID") or "").strip(): r for r in tracked
+            if isinstance(r, dict)}
     items = recs.get("recommendations") or []
     if recs.get("count") not in (None, len(items)):
         rep.error("rec_count_mismatch", "recommendations.count", 1,
                   "count {} items {}".format(recs.get("count"), len(items)))
-    detached, garbled = [], []
+    session = str(meta.get("session_date") or meta.get("data_date") or "")[:10]
+    version = str(meta.get("strategy_version") or "")
+    cal = [str(d)[:10] for d in (meta.get("calendar_tail") or [])
+           if not session or str(d)[:10] <= session]
+    found = {k: [] for k in (
+        "detached", "detached_tracked", "garbled", "status_unknown",
+        "valid_until_missing", "duplicate_active", "past_horizon",
+        "version_in_window", "terminal_without_reason", "closed_without_outcome")}
+    active_per = {}
     for rec in items:
         sid = str(rec.get("stock_id") or "")
+        rid = str(rec.get("recommendation_id") or sid)
+        st = rec.get("status")
         if _garbled(rec.get("stock_name")):
-            garbled.append(sid)
-        if rec.get("status") == "active" and sid in listed:
-            if _is_null(listed[sid].get("Recommendation_ID")):
-                detached.append(sid)
-    if garbled:
-        rep.error("garbled_text", "recommendations.stock_name", len(garbled),
-                  "name lost encoding", sample=garbled)
-    if detached:
-        rep.error("recommendation_not_attached", "Recommendation_ID", len(detached),
-                  "active recommendation for a listed stock not on its row",
-                  sample=detached)
+            found["garbled"].append(sid)
+        if st not in REC_STATUSES or st == "converted":
+            found["status_unknown"].append(rid)
+        if st == "active":
+            key = (sid, str(rec.get("strategy") or ""))
+            active_per[key] = active_per.get(key, 0) + 1
+            if active_per[key] == 2:
+                found["duplicate_active"].append(sid)
+            if sid in listed and _is_null(listed[sid].get("Recommendation_ID")):
+                found["detached"].append(sid)
+            elif sid in held and _is_null(held[sid].get("Recommendation_ID")):
+                found["detached_tracked"].append(sid)
+            vu = str(rec.get("valid_until_session") or "")[:10]
+            if not vu:
+                found["valid_until_missing"].append(rid)
+            else:
+                if cal and sum(1 for d in cal if d > vu) > REC_HORIZON_SESSIONS:
+                    found["past_horizon"].append(rid)
+                if (session and vu > session and version
+                        and str(rec.get("strategy_version") or "") != version):
+                    found["version_in_window"].append(rid)
+        elif st in REC_TERMINAL:
+            if _is_null(rec.get("status_reason")) or _is_null(rec.get("status_session")):
+                found["terminal_without_reason"].append(rid)
+            if st == "closed" and _is_null(rec.get("outcome")):
+                found["closed_without_outcome"].append(rid)
+    # The lifecycle does not run on a degraded run (P0-3): its own findings
+    # are reported, but must not fail -- and so retry -- that run.
+    life = rep.warn if meta.get("degraded") else rep.error
+    spec = (
+        ("garbled", rep.error, "garbled_text", "recommendations.stock_name",
+         "name lost encoding"),
+        ("detached", rep.error, "recommendation_not_attached", "Recommendation_ID",
+         "active recommendation for a listed stock not on its row"),
+        ("detached_tracked", rep.warn, "recommendation_not_attached",
+         "tracked.Recommendation_ID",
+         "active recommendation for a tracked stock not on its row"),
+        ("status_unknown", rep.error, "rec_status_unknown", "recommendations.status",
+         "status not in {} (or 'converted', which is private)".format(
+             "/".join(s for s in REC_STATUSES if s != "converted"))),
+        ("duplicate_active", rep.error, "rec_duplicate_active",
+         "recommendations.status", "more than one active recommendation for "
+         "one stock and strategy"),
+        ("valid_until_missing", life, "rec_valid_until_missing",
+         "recommendations.valid_until_session",
+         "active recommendation without its entry session"),
+        ("past_horizon", life, "rec_active_past_horizon",
+         "recommendations.status", "active more than {} sessions after its "
+         "entry session (the lifecycle's safety net did not run)".format(
+             REC_HORIZON_SESSIONS)),
+        ("version_in_window", life, "rec_version_in_window",
+         "recommendations.strategy_version",
+         "active, before its entry session, under another strategy version"),
+        ("terminal_without_reason", rep.warn, "rec_terminal_without_reason",
+         "recommendations.status_reason",
+         "ended recommendation without status_reason / status_session"),
+        ("closed_without_outcome", rep.warn, "rec_closed_without_outcome",
+         "recommendations.outcome", "closed recommendation without its trade"),
+    )
+    for key, fn, code, column, detail in spec:
+        if found[key]:
+            fn(code, column, len(found[key]), detail, sample=found[key])
+
+
+def _check_events(payload, meta, rep):
+    """meta.events (ingestion.company_events.meta_block): per-source health
+    of the display-only event columns. Nothing here can fail a scan: a
+    required source that failed or went stale warns, an optional one
+    (mopsov) is information."""
+    ev = meta.get("events")
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    if not isinstance(ev, dict) or not ev:
+        rep.info("events_absent", "meta.events", 1,
+                 "no company-event block (display only)")
+        return
+    if ev.get("carried_forward"):
+        rep.info("events_carried_forward", "meta.events", 1,
+                 "the previous run's block; this run built none")
+    srcs = ev.get("sources") if isinstance(ev.get("sources"), dict) else {}
+    found = {"failed": [], "failed_opt": [], "stale": [], "stale_opt": []}
+    for name in sorted(srcs):
+        h = srcs[name]
+        if not isinstance(h, dict):
+            continue
+        opt = "_opt" if h.get("optional") else ""
+        if not h.get("ok"):
+            found["failed" + opt].append(name)
+        if h.get("stale"):
+            found["stale" + opt].append(name)
+    if found["failed"]:
+        rep.warn("events_source_failed", "meta.events.sources",
+                 len(found["failed"]), "company-event source failed; the "
+                 "last good data is shown", sample=found["failed"])
+    if found["stale"]:
+        rep.warn("events_stale", "meta.events.sources", len(found["stale"]),
+                 "company-event source past its age limit",
+                 sample=found["stale"])
+    if found["failed_opt"]:
+        rep.info("events_optional_source_failed", "meta.events.sources",
+                 len(found["failed_opt"]), "optional (mopsov) source failed",
+                 sample=found["failed_opt"])
+    if found["stale_opt"]:
+        rep.info("events_optional_stale", "meta.events.sources",
+                 len(found["stale_opt"]), "optional (mopsov) source old",
+                 sample=found["stale_opt"])
+    data_date = str(meta.get("data_date") or "")[:10]
+    latest = ev.get("revenue_month_latest")
+    if latest and data_date and str(latest) >= data_date[:7]:
+        rep.warn("events_revenue_month_future",
+                 "meta.events.revenue_month_latest", 1,
+                 "{} at or after the data month".format(latest))
+    rev_rows = sum(int(_num((srcs.get(n) or {}).get("rows")) or 0)
+                   for n in ("revenue_tse", "revenue_otc"))
+    if rows and rev_rows and not ev.get("carried_forward") \
+            and any("Rev_Month" in r for r in rows) \
+            and all(_is_null(r.get("Rev_Month")) for r in rows):
+        rep.warn("events_not_annotated", "Rev_Month", len(rows),
+                 "revenue loaded ({} names) but no listed row carries "
+                 "it".format(rev_rows))
+
+
+def _check_live_record(meta, rep):
+    """meta.live_record.by_sid / bench shape (scanner/live_record). The
+    record is display only, so a malformed block warns."""
+    lr = meta.get("live_record")
+    if not isinstance(lr, dict) or not lr:
+        return
+    by = lr.get("by_sid")
+    bad = []
+    if by is not None and not isinstance(by, dict):
+        bad.append("by_sid")
+    for sid, lst in (by.items() if isinstance(by, dict) else ()):
+        if not isinstance(lst, list) or not lst or len(lst) > BY_SID_MAX \
+                or not all(isinstance(e, dict) for e in lst):
+            bad.append(str(sid))
+            continue
+        sigs = [str(e.get("sig") or "") for e in lst]
+        if sigs != sorted(sigs) or not all(_date_ok(s) for s in sigs) or \
+                any(e.get("bucket") not in LIVE_RECORD_BUCKETS for e in lst):
+            bad.append(str(sid))
+    if bad:
+        rep.warn("live_record_by_sid_shape", "meta.live_record.by_sid",
+                 len(bad), "per-name history entries malformed (sorted by "
+                 "signal date, at most {}, known bucket)".format(BY_SID_MAX),
+                 sample=bad)
+    b = lr.get("bench")
+    if b is None:
+        return
+    ser = b.get("series") if isinstance(b, dict) else None
+    ok = isinstance(ser, list) and len(ser) <= BENCH_MAX_POINTS and all(
+        isinstance(p, list) and len(p) == 3 and _date_ok(str(p[0]))
+        for p in ser)
+    if ok:
+        days = [str(p[0]) for p in ser]
+        ok = days == sorted(days) and (not days or (
+            str(b.get("from") or "") <= days[0]
+            and days[-1] <= str(b.get("to") or "9999")))
+    if not ok:
+        rep.warn("live_record_bench_shape", "meta.live_record.bench", 1,
+                 "benchmark series malformed (dated [date, taiex, otc] "
+                 "points, ascending, inside from..to, at most {})".format(
+                     BENCH_MAX_POINTS))
 
 
 def _check_tracked(payload, meta, rep, scan_mode):
@@ -1109,6 +1801,10 @@ def check_payload(payload, quotes=None, recs=None, tracked_ids=None,
         # visible, but it must not fail -- and so retry -- a scan whose actual
         # recommendation list is sound.
         _check_tracked(payload, meta, rep, scan_mode)
+        # display-only blocks (2026-10-08): company events, the record's
+        # per-name history and benchmark
+        _check_events(payload, meta, rep)
+        _check_live_record(meta, rep)
     except Exception as e:      # the checker must never take the scan down
         rep.error("checker_crash", "", 1, "{}: {}".format(type(e).__name__, e))
 
@@ -1187,6 +1883,44 @@ def _load_json(path):
         return None
 
 
+def _check_report_sources(sources, reports, rep):
+    """meta.report_sources (2026-10-08, plan P1-7): where each AI report came
+    from. A template is INFO, never a warning: AI outages cluster (about a
+    third of calls failed in late September) and a warning would put the
+    orange self-check banner on the phone on half the days for something
+    that is neither a data fault nor a reason to rescan (scan-timer retries
+    only on fail). The phone marks the template itself. Older payloads carry
+    no block and are not judged."""
+    if sources is None:
+        return
+    reports = reports if isinstance(reports, dict) else {}
+    if not isinstance(sources, dict):
+        rep.warn("report_sources_shape", "meta.report_sources", 1,
+                 "not an object")
+        return
+    bad = sorted(str(k) for k, v in sources.items()
+                 if not isinstance(v, dict)
+                 or v.get("source") not in REPORT_SOURCES
+                 or str(k) not in reports)
+    if sources:
+        bad += sorted(str(k) for k in reports if k not in sources)
+    if bad:
+        rep.warn("report_sources_shape", "meta.report_sources", len(bad),
+                 "no valid source for " + ",".join(bad))
+    tmpl = sorted(str(k) for k, v in sources.items()
+                  if isinstance(v, dict) and v.get("source") == "template")
+    if tmpl:
+        rep.info("report_template", "meta.report_sources", len(tmpl),
+                 "local template (AI unavailable) for " + ",".join(tmpl))
+
+
+def _source_names(sources):
+    if not isinstance(sources, dict):
+        return {}
+    return {str(k): v.get("source") for k, v in sources.items()
+            if isinstance(v, dict)}
+
+
 def append_history(history_path, report, meta, keep=HISTORY_KEEP):
     """Rolling history of check outcomes, small enough to commit."""
     hist = _load_json(history_path) or {}
@@ -1206,6 +1940,9 @@ def append_history(history_path, report, meta, keep=HISTORY_KEEP):
         "warnings": report.get("warnings"),
         "codes": sorted({i["code"] for i in report.get("items", [])
                          if i["level"] != "info"}),
+        # where each AI report came from, so the template rate can be counted
+        # from this file (report_template itself is info, not in codes)
+        "report_sources": _source_names(meta.get("report_sources")),
     })
     runs = runs[-keep:]
     with open(history_path, "w", encoding="utf-8") as f:
@@ -1215,10 +1952,18 @@ def append_history(history_path, report, meta, keep=HISTORY_KEEP):
 
 
 def check_files(scan_path, quotes_path=None, recs_path=None, ledger_path=None,
-                history_path=None, write=True, expected_session=None):
+                history_path=None, write=True, expected_session=None,
+                revised_reason=None, list_prev=None, now=None):
     """Audit the published files, write meta.checks back, return the report.
 
-    Idempotent: running twice on the same files yields the same report."""
+    Idempotent: running twice on the same files yields the same report.
+
+    With write=True it also stamps meta.list_status right after meta.checks
+    (scanner/list_freeze.list_status_block, 2026-10-08), so the list's
+    final / provisional state always agrees with the checks in the same file.
+    `list_prev` is the block this publish follows (default: the payload's own
+    stamp); `revised_reason` (force_rescan / pages_behind / restriction_info)
+    bumps its revision. `now` (a datetime) pins checked_at / revised_at."""
     payload = _load_json(scan_path)
     if payload is None:
         return {"version": CHECKS_VERSION, "status": "fail", "errors": 1,
@@ -1235,9 +1980,18 @@ def check_files(scan_path, quotes_path=None, recs_path=None, ledger_path=None,
         tracked = tracked_ids_from_ledger(ledger_path, str(meta.get("mode") or ""),
                                           quotes["sessions"][0])
     report = check_payload(payload, quotes=quotes, recs=recs, tracked_ids=tracked,
-                           expected_session=expected_session)
+                           expected_session=expected_session,
+                           now=now if isinstance(now, datetime) else None)
     if write:
         meta["checks"] = report
+        try:
+            from scanner.list_freeze import list_status_block
+            prev = list_prev if isinstance(list_prev, dict) else meta.get("list_status")
+            meta["list_status"] = list_status_block(
+                meta, prev=prev, revised_reason=revised_reason, now=now)
+        except Exception as e:
+            # the seeded provisional block stays: fails toward a retry
+            print("  [checks] list_status not stamped: {}".format(e))
         payload["meta"] = meta
         with open(scan_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))

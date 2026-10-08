@@ -42,7 +42,18 @@ on:
     - cron: "30 6 * * 1-5"    # 14:30 Taiwan (first same-day scan)
     - cron: "0 9 * * 1-5"     # 17:00 Taiwan
     - cron: "0 10 * * 1-5"    # 18:00 Taiwan
-  workflow_dispatch: {}        # manual run button (also usable from the phone)
+  # Manual run button (also usable from the phone). Once a session's list is
+  # final (scanner/list_freeze, "final-once-v1") every later run of that
+  # session exits 3 without rescanning; force_rescan is the owner's way to
+  # rebuild it anyway (Actions > daily-scan > Run workflow > tick the box).
+  # The rebuilt list carries list_status.revision + 1 and revised_reason
+  # force_rescan. Scheduled runs and the scan-timer never force.
+  workflow_dispatch:
+    inputs:
+      force_rescan:
+        description: "rebuild a session whose list is already final"
+        type: boolean
+        default: false
 
 permissions:
   contents: write              # commit ledger/state back
@@ -58,13 +69,20 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       published: ${{ steps.scan.outputs.published }}
+      frozen: ${{ steps.scan.outputs.frozen }}
     # The scanner decides "is today's close published yet" from local wall time
     # (chip_verifier._latest_trading_day, _EOD_HOUR=14) and stamps scan_time
     # with datetime.now(). GitHub runners default to UTC, where every TW-daytime
     # run reads as before-06:00 -- the 14:30/17:00/18:00 scans would all target
     # YESTERDAY's session and never require the same-day bar. Pin Taiwan time.
+    #
+    # PAGES_URL: the freeze gate reads the published list_status from the live
+    # site (same expression as scan-timer.yml). On scheduled events GitHub can
+    # leave github.event.repository empty; list_freeze.pages_url() then falls
+    # back to GITHUB_REPOSITORY.
     env:
       TZ: Asia/Taipei
+      PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -96,9 +114,14 @@ jobs:
       # Exit codes are meaningful (scan_headless.main): 0 published, including a
       # legitimate day where nothing qualified; 1 the market feed was
       # unreachable so the previous data is deliberately left in place; 2 the
-      # scan crashed. Only 2 should read as a build failure -- a quiet market
-      # and a temporary feed outage are not bugs, and burying them in a red X
-      # trains everyone to ignore the red X.
+      # scan crashed; 3 the session's list is already final, nothing rescanned
+      # or republished (the late crons, every day); 4 frozen too, but the
+      # evening restriction lists changed the published restriction columns
+      # and the amended payload in mobile/ goes out like a 0. Only 2 should
+      # read as a build failure -- a quiet market, a temporary feed outage and
+      # a frozen list are not bugs, and burying them in a red X trains
+      # everyone to ignore the red X. (tools/check_scan_result.py --strict
+      # also exits 3, meaning a failed check; no step here uses --strict.)
       - name: Run scan
         id: scan
         env:
@@ -108,6 +131,8 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          # empty on scheduled runs (no inputs) and on an unticked box
+          YENTOOL_FORCE_RESCAN: ${{ inputs.force_rescan && '1' || '' }}
         run: |
           set +e
           python scan_headless.py mode_prelaunch
@@ -118,6 +143,13 @@ jobs:
             0) echo "published=true"  >> "$GITHUB_OUTPUT" ;;
             1) echo "published=false" >> "$GITHUB_OUTPUT"
                echo "::warning::market feed unreachable; previous data kept" ;;
+            3) echo "published=false" >> "$GITHUB_OUTPUT"
+               echo "frozen=true"     >> "$GITHUB_OUTPUT"
+               echo "::notice::list for this session is already final; nothing republished" ;;
+            4) echo "published=true"  >> "$GITHUB_OUTPUT"
+               echo "frozen=true"     >> "$GITHUB_OUTPUT"
+               echo "amended=true"    >> "$GITHUB_OUTPUT"
+               echo "::notice::list already final; restriction info amended and republished" ;;
             *) echo "::error::scan failed with exit $code"; exit "$code" ;;
           esac
 
@@ -167,8 +199,19 @@ jobs:
           path: mobile
 
       # Persist only the small, accumulating state: forward-performance ledger,
-      # the public recommendations export, name cache, hysteresis held-set, and
-      # the column-check history. Market DBs stay in the cache above.
+      # the public recommendations export, name cache, hysteresis held-set,
+      # the column-check history, and the company-events cache
+      # (data/company_events.json, ingestion/company_events: display-only
+      # revenue / ex-date / conference data; the conference dates are
+      # accumulated from one-day announcement files, so the cache has to
+      # survive between runs). Market DBs stay in the cache above.
+      #
+      # Runs on EVERY non-crash outcome (0/1/3/4) -- deliberately no published
+      # guard: an amend (4) changes the ledger and the recommendations export,
+      # and a frozen run (3) normally has nothing to add, which the
+      # `git diff --cached --quiet` check below turns into a no-op. A frozen
+      # run may still have refreshed the name cache before its gate fired;
+      # that alone is not worth a commit, so it is left unstaged.
       #
       # Two runs can overlap in wall time (scan-timer dispatch + a late cron:
       # the concurrency group serialises the JOBS, but both checked out the
@@ -186,6 +229,13 @@ jobs:
           git add data/recommendations.json 2>/dev/null || true
           # data/* is gitignored; the check history is meant to be committed.
           git add -f data/scan_checks.json 2>/dev/null || true
+          git add -f data/company_events.json 2>/dev/null || true
+          if [ "${{ steps.scan.outputs.frozen }}" = "true" ]; then
+            git restore --staged data/stock_names.json 2>/dev/null || true
+            # a frozen run never refreshes the events (it exits before the
+            # refresh starts); never commit a stray copy either
+            git restore --staged data/company_events.json 2>/dev/null || true
+          fi
           if git diff --cached --quiet; then
             echo "no state changes to commit"
             exit 0
@@ -197,14 +247,16 @@ jobs:
               exit 0
             fi
             echo "push rejected (attempt $attempt); rebasing onto origin/main"
-            git fetch origin main
+            # `run:` is bash -e: an unguarded failed fetch would turn the job
+            # red and skip the Pages deploy (needs: scan) for a state commit
+            git fetch origin main || { echo "::warning::fetch failed (attempt $attempt)"; sleep $(( attempt * 7 )); continue; }
             # The cached market DBs are tracked files restored over the checkout,
             # so the worktree is always dirty here; without autostash the rebase
             # refuses to start (seen 2026-09-14: "You have unstaged changes").
             git -c rebase.autoStash=true rebase -X theirs origin/main || { git rebase --abort; git reset --hard origin/main; echo "::warning::state commit dropped after rebase conflict"; exit 0; }
             sleep $(( attempt * 7 ))
           done
-          echo "::warning::could not push state after 5 attempts; Pages already deployed"
+          echo "::warning::could not push state after 5 attempts; the Pages deploy (a later job) still runs"
 
   deploy:
     needs: scan

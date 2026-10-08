@@ -150,19 +150,30 @@ def simulate_exit(opens, highs, lows, closes, hold_bars=..., stop_pct=...,
 
 def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
                 stop_pct=..., tp_pct=..., arm_pct=..., lock_pct=...,
-                late_from=..., late_gain=..., ride_cap=...):
+                late_from=..., late_gain=..., ride_cap=..., extend_if=None):
     """Replay the exit stack bar by bar and report WHERE the trade stands.
 
     This is simulate_exit with the outcome kept, so the live scan can tell a
     holder what the rule says today (2026-09-14 request: "there is no column
     saying below what price to sell first"). Same event order, same numbers.
 
-    `hold_bars=None` replays every bar given and never books a time exit --
-    the live annotation has its own calendar-based time exit. With an
-    integer, behaves exactly like simulate_exit (time exit on bar N-1's close,
-    or later when `ride_cap` keeps the position: see DEFAULT_RULE["ride_cap"]).
-    A window that runs out while the ride is still on comes back with
-    reason '' and `riding` True -- the trade is open, not finished.
+    `hold_bars=None` replays every bar given and never books a time exit.
+    With an integer, behaves exactly like simulate_exit (time exit on bar
+    N-1's close, or later when `ride_cap` keeps the position: see
+    DEFAULT_RULE["ride_cap"]). A window that runs out while the ride is still
+    on comes back with reason '' and `riding` True -- the trade is open, not
+    finished.
+
+    `extend_if` (2026-10-08) is the MARKET leg of the ride: a callable
+    extend_if(i, date_i) -> bool, asked only on a bar where the time exit
+    would otherwise fire (bar index >= hold_bars - 1, the close NOT above its
+    own 5-bar mean, and the cap not yet reached). True keeps the position
+    riding, still bounded by `ride_cap`. The shipped rule passes "TAIEX on
+    THAT date is below its 20MA but above its 60MA" (scanner.market_leg.
+    make_disturbed_fn), so the tracker, the recommendation lifecycle and
+    live_record replay one rule. None (the default) leaves the output
+    byte-identical to the engine before the hook existed; research sandboxes
+    keep None (the leg is worth about +0.2pp there).
 
     Returns a dict:
       entry       fill (first open) or None
@@ -170,7 +181,8 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
                   | 'na'  ('late' = a profit taken at the open after a late
                   in-profit close; see the block comment on DEFAULT_RULE)
       riding      True when the time exit has passed and the rule is holding
-                  on because the close is above its own 5-bar mean
+                  on because the close is above its own 5-bar mean (or the
+                  market leg, `extend_if`, said so)
       exited      reason is a booked exit
       bar         index of the exit bar (None while open)
       date        dates[bar] when `dates` is given
@@ -289,6 +301,15 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
                     keep = mean5 == mean5 and cl > mean5
                 except (TypeError, ValueError, ZeroDivisionError):
                     keep = False
+                if not keep and extend_if is not None:
+                    # the market leg: a pullback inside an uptrend on THIS
+                    # bar's date keeps the position (see the docstring)
+                    when = (dates[i] if dates is not None and i < len(dates)
+                            else None)
+                    try:
+                        keep = bool(extend_if(i, when))
+                    except Exception:
+                        keep = False
             if not keep:
                 if cl != cl:
                     out["reason"] = "na"

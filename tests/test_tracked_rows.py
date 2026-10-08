@@ -108,6 +108,46 @@ class Annotate(unittest.TestCase):
     def test_empty_input_is_returned_unchanged(self):
         self.assertIsNone(tr.annotate_tracked(None, "mode_prelaunch"))
 
+    def test_tracked_row_does_not_add_todays_bar(self):
+        """A dropped-out name was not on today's list, so today is not one of
+        its appearances: its card keeps the trade it was recommended for
+        instead of re-anchoring on today as a fresh 'pending' signal
+        (2026-10-08, add_own_bar=False)."""
+        from unittest import mock
+        import scanner.holding_tracker as tracker
+        bars = [(100, 101, 99, 100), (100, 101, 99, 100), (100, 100, 70, 75)]
+        bars += [(75, 76, 74, 75)] * (len(DATES) - len(bars))
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "pv.db"
+            conn = sqlite3.connect(db)
+            try:
+                conn.execute("CREATE TABLE data (stock_id TEXT, date TEXT, "
+                             "open REAL, high REAL, low REAL, close REAL)")
+                for d, (o, h, l, c) in zip(DATES, bars):
+                    conn.execute("INSERT INTO data VALUES (?,?,?,?,?,?)",
+                                 ("1111", d, o, h, l, c))
+                conn.commit()
+            finally:
+                conn.close()
+            df = pd.DataFrame([{
+                "Stock_ID": "1111", "Stock_Name": "x", "Market": "OTC",
+                "Data_Date": DATES[-1], "Close_Price": 75.0, "MA10": 80.0,
+                "MA20": 85.0, "Min_Price_3": 74.0}])
+            led = {"1111": [DATES[0]], "9999": DATES[:-1]}
+            with mock.patch.object(tracker, "PRICE_VOLUME_FILE", db), \
+                    mock.patch.object(tracker, "_ledger_bar_dates", lambda m: led), \
+                    mock.patch.object(tracker, "_ledger_buy_flags", lambda m: {}), \
+                    mock.patch.object(tracker, "_disturbed_fn", lambda: None):
+                out = tr.annotate_tracked(df, "mode_prelaunch")
+                listed = tracker.annotate_holding(df, "mode_prelaunch")
+        r = out.iloc[0]
+        self.assertNotEqual(r["Hold_Status"], "pending")
+        self.assertEqual(r["Hold_Status"], "exited")
+        self.assertEqual(r["Entry_Date"], DATES[1])
+        self.assertEqual(r["Exit_Signal"], "stop")
+        # the same row ON the list would be a fresh signal after the stop
+        self.assertEqual(listed["Hold_Status"].iloc[0], "pending")
+
 
 if __name__ == "__main__":
     unittest.main()

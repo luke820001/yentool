@@ -122,22 +122,49 @@ def quarters(a, b):
     return int((qa[idx] >= qb[idx] - 1e-9).sum()), len(idx)
 
 
-def portfolio(df, slots):
+def portfolio(df, slots, loose=False, open_reuse=False):
     """Equity curve with `slots` equal-weight slots, a signal skipped when all
     slots are full (by rank). Returns final multiple, CAGR %, max drawdown %,
-    per-year %, trades taken."""
+    per-year %, trades taken, signals offered and the peak number of
+    positions held at one moment (intraday, see below).
+
+    Same-day slot reuse (fixed 2026-10-08, round 4). Entries fill at the
+    OPEN. run_plan books 'time' exits at the close and stop/lock/tp at their
+    level during the day; only 'late' (and a gap through a level) fills at
+    the open. This loop used to settle every exit dated `day` BEFORE opening
+    that day's entries, so a slot freed at the close paid for a buy made at
+    09:00 the same morning -- the book briefly held more positions than it
+    had slots, and K.1's 3-slot figure (35.8% CAGR) was inflated by it.
+      default (strict): a slot freed on day D is first reusable on the next
+                        session; day-D exits settle after day-D entries.
+      loose=True:       the old behaviour, kept only to reproduce K.1.
+      open_reuse=True:  strict, except an exit that filled AT THE OPEN
+                        (column at_open when present, else why == 'late')
+                        frees its slot for that morning's entries -- both
+                        orders sit in the same opening auction.
+    """
     d = df.sort_values(["entry", "rank"])
     # every slot reserves enough for the plan's largest position, so a trade
     # that never adds earns its return on only part of the slot
     reserve = float(d["mult"].max()) if "mult" in d.columns else 1.0
-    eq, open_, curve, taken = 1.0, [], [], 0
+    if "at_open" in d.columns:
+        opened = d["at_open"].astype(bool).to_numpy()
+    elif "why" in d.columns:
+        opened = (d["why"] == "late").to_numpy()
+    else:
+        opened = np.zeros(len(d), bool)
+    d = d.assign(_at_open=opened)
+    eq, open_, curve, taken, peak = 1.0, [], [], 0, 0
     days = sorted(set(d.entry) | set(d.exit))
     by_entry = {k: v for k, v in d.groupby("entry")}
     for day in days:
-        still = []
+        still, held_at_open = [], 0
         for pos in open_:
-            if pos["exit"] <= day:
+            same_day = pos["exit"] == day
+            if pos["exit"] < day or (same_day and (loose or (open_reuse and pos["at_open"]))):
                 eq += pos["size"] * pos["ret"] / 100
+                if same_day and not pos["at_open"]:
+                    held_at_open += 1      # loose: still held when the buy fills
             else:
                 still.append(pos)
         open_ = still
@@ -145,8 +172,18 @@ def portfolio(df, slots):
             if len(open_) >= slots:
                 continue
             m = float(r.mult) if "mult" in d.columns else 1.0
-            open_.append(dict(exit=r.exit, ret=r.ret * m / reserve, size=eq / slots))
+            open_.append(dict(exit=r.exit, ret=r.ret * m / reserve, size=eq / slots,
+                              at_open=bool(r["_at_open"])))
             taken += 1
+        peak = max(peak, len(open_) + held_at_open)
+        if not loose:
+            still = []
+            for pos in open_:
+                if pos["exit"] <= day:
+                    eq += pos["size"] * pos["ret"] / 100
+                else:
+                    still.append(pos)
+            open_ = still
         curve.append((day, eq))
     c = pd.Series(dict(curve))
     c.index = pd.to_datetime(c.index)
@@ -157,6 +194,7 @@ def portfolio(df, slots):
     yearly = ye.pct_change()
     yearly.iloc[0] = ye.iloc[0] - 1
     return dict(final=c.iloc[-1], cagr=100 * cagr, mdd=100 * mdd, taken=taken,
+                offered=len(d), peak=peak,
                 yearly={str(k.year): 100 * v for k, v in yearly.items()})
 
 

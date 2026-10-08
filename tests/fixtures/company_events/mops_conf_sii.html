@@ -1,0 +1,129 @@
+
+
+
+<html>
+<head>
+	<title>公開資訊觀測站</title>
+	
+	
+	<link href="css/css2.css" rel="stylesheet" type="text/css" Media="Screen"/> 
+	
+	<script type="text/javascript" src="js/mops2.js"></script>
+	
+	<script src='js/outerScript/t100sb02_1_j.js'></script>
+	
+</head>
+
+<body>
+
+
+<div id="div01" >
+<form action='/mops/web/ajax_t100sb02_1' method='post' onsubmit='return false;' name='fm'>
+<input type='hidden' name='firstin' value='true'>
+<input type='hidden' name='step' value='10'>
+<input type='hidden' name='filename' value='t100sb02_1_20261008_010135174.csv'>
+<button style='background-color:transparent;border:0;cursor:pointer;text-decoration:underline;' onclick="action='/server-java/t105sb02';submit();"><img src='images/bu_03.gif' hspace='3' ></button>
+</form>
+<form action = '/server-java/FileDownLoad' method = 'post' id='fm_fileDownload' name='fm_fileDownload'>
+<input type = 'hidden' name = 'step' id = 'step' value = '9'/>
+<input type = 'hidden' name = 'filePath' id = 'filePath' value = '/home/html/nas/STR/'/>
+<input type = 'hidden' name = 'fileName' id = 'fileName' value = ''/>
+<input type = 'hidden' name = 'functionName' id = 'functionName' value = 't100sb02_1'/>
+</form>
+<form name='form_t100sb02_1' action='/mops/web/ajax_t100sb02_1' method='post' onsubmit='return false;'>
+<input type='hidden' name='step' value='0'>
+<input type='hidden' name='firstin' value='true'>
+<input type='hidden' name='TYPEK' value='sii'>
+<input type='hidden' name='colorchg' value=''>
+<input type='hidden' name='co_id'>
+<input type='hidden' id='URL' name='URL'>
+<input type='hidden' id='from' name='from'>
+<input type='hidden' id='COMPANY_ID' name='COMPANY_ID'>
+<input type='hidden' id='SEQ_NO' name='SEQ_NO'>
+<div class='sortBlock'>
+<span>請選擇排列方式：
+<input type='radio' id='sortMyTable1' name='sortMyTable' value='1' onclick='ChangeSortTable(0);' checked />證券代號
+<input type='radio' id='sortMyTable2' name='sortMyTable' value='2' onclick='ChangeSortTable(2);' />召開法人說明會日期
+</span>
+<br>
+<span>請選擇排列順序：
+<input type='hidden' id='changeAsc' value='1' />
+<input type='radio' id='seq1' name='seq' value='1' onclick='sortTable(0,"");' checked />資料由小到大/舊到新
+<input type='radio' id='seq2' name='seq' value='2' onclick='sortTable(0,1);' />資料由大到小/新到舊
+</span>
+</div>
+<table id='myTable' class='hasBorder'>
+<thead style='position:relative;top:0px;'><tr class='tblHead'><th class='tblHead' nowrap rowspan='2'><b>公司代號</b></th><th class='tblHead' nowrap rowspan='2'><b>公司名稱</b></th><th class='tblHead' nowrap rowspan='2' data-type='date'><b>召開法人說明會日期</b></th><th class='tblHead' nowrap rowspan='2'><b>召開法人說明會時間</b></th><th class='tblHead' nowrap rowspan='2'><b>召開法人說明會地點</b></th><th class='tblHead' nowrap rowspan='2'><b>法人說明會擇要訊息</b></th><th class='tblHead' nowrap colspan='2'><b>法人說明會簡報內容</b></th><th class='tblHead' nowrap rowspan='2'><b>公司網站是否提供法人說明會相關資訊</b></th><th class='tblHead' nowrap rowspan='2'><b>影音連結資訊</b></th><th class='tblHead' nowrap rowspan='2'><b>其他應敘明事項</b></th><th class='tblHead' nowrap rowspan='2'><b>歷年法人說明會</b></th></tr><tr><th class='tblHead' nowrap><b>中文檔案</b></th><th class='tblHead' nowrap><b>英文檔案</b></th></tr></thead>
+<tr class='even' data-type='body' >
+<td style='text-align:left !important;'>1338</td><td>廣華-KY</td>
+<td align='center'>115/10/01</td>
+<td align='center'>14:00</td>
+<td style='text-align:left !important;'>統一證券B2-203會議室(台北市東興路8號B2)</td>
+<td style='text-align:left !important;'>本公司受邀參加統一證券與IR Trust共同舉辦之廣華(1338)法說會，有意報名者請洽統一證券 李小姐，Email: maggie.lee@uni-psg.com</td>
+<td style='text-align:left !important;'><a href='#' onclick='document.fm_fileDownload.fileName.value="133820261001M001.pdf";document.fm_fileDownload.submit();'><font color='blue'><u>133820261001M001.pdf</u></font></a></td>
+<td style='text-align:left !important;'><a href='#' onclick='document.fm_fileDownload.fileName.value="133820261001E001.pdf";document.fm_fileDownload.submit();'><font color='blue'><u>133820261001E001.pdf</u></font></a></td>
+<td style='text-align:left !important;'>無</td><td style='text-align:left !important;'>
+影音資訊網址：
+<a target='_blank' href='http://irconference.twse.com.tw/1338_40_20261001_ch.mp4'><font color=blue><u>http://irconference.twse.com.tw/1338_40_20261001_ch.mp4</u></font></a>
+<br>
+</td>
+<td style='text-align:left !important;'>完整財務業務資訊請至公開資訊觀測站之法人說明會一覽表或法說會項目下查閱。</td>
+<td align='center'><input type='button' value='查詢' onclick='document.form_t100sb02_1.co_id.value="1338";openWindow(this.form ,"");'>
+</td>
+</tr>
+<tr class='odd' data-type='body' >
+<td style='text-align:left !important;'>2408</td><td>南亞科</td>
+<td align='center'>115/10/12</td>
+<td align='center'>15:00</td>
+<td style='text-align:left !important;'>線上法說會</td>
+<td style='text-align:left !important;'>(1)2026年第3季營運狀況說明
+(2)參加方式：請參見 https://www.nanya.com/tw/IR/13/Investor Calendar</td>
+<td style='text-align:left !important;'>內容檔案於當日會後公告於公開資訊觀測站</td>
+<td style='text-align:left !important;'>內容檔案於當日會後公告於公開資訊觀測站</td>
+<td style='text-align:left !important;'><a href='https://www.nanya.com/tw/' target='_blink'><font color='blue'><u>https://www.nanya.com/tw/</u></font></a></td>
+<td style='text-align:left !important;'>
+影音資訊網址：
+<a target='_blank' href='https://www.nanya.com/tw/IR/13/Investor Calendar?Year=2026'><font color=blue><u>https://www.nanya.com/tw/IR/13/Investor Calendar?Year=2026</u></font></a>
+<br>
+</td>
+<td style='text-align:left !important;'>無</td>
+<td align='center'><input type='button' value='查詢' onclick='document.form_t100sb02_1.co_id.value="2408";openWindow(this.form ,"");'>
+</td>
+</tr>
+<tr class='odd' data-type='body' >
+<td style='text-align:left !important;'>2603</td><td>長榮</td>
+<td align='center'>115/10/08</td>
+<td align='center'>15:00</td>
+<td style='text-align:left !important;'>張榮發基金會國際會議中心11樓(台北市中正區中山南路11號11樓)</td>
+<td style='text-align:left !important;'>受邀參加永豐金證券舉辦之法說會，說明本公司之營運概況。</td>
+<td style='text-align:left !important;'>內容檔案於當日會後公告於公開資訊觀測站</td>
+<td style='text-align:left !important;'>內容檔案於當日會後公告於公開資訊觀測站</td>
+<td style='text-align:left !important;'><a href='https://www.evergreen-marine.com/emc/financial/jsp/EMC_InvestorConference.jsp?lang=zh-tw' target='_blink'><font color='blue'><u>https://www.evergreen-marine.com/emc/financial/jsp/EMC_InvestorConference.jsp?lang=zh-tw</u></font></a></td>
+<td style='text-align:left !important;'>
+影音資訊網址：
+未輸
+<br>
+</td>
+<td style='text-align:left !important;'>欲參加者需事先報名，請洽永豐金鄒小姐 (02)23828166或E-MAIL: ECM@sinopac.com</td>
+<td align='center'><input type='button' value='查詢' onclick='document.form_t100sb02_1.co_id.value="2603";openWindow(this.form ,"");'>
+</td>
+</tr>
+<tr class='even' data-type='body' >
+<td style='text-align:left !important;'>3008</td><td>大立光</td>
+<td align='center'>115/10/08</td>
+<td align='center'>14:30</td>
+<td style='text-align:left !important;'>線上法說會</td>
+<td style='text-align:left !important;'>115年第三季營運報告及說明115年第四季營運展望</td>
+<td style='text-align:left !important;'>內容檔案於當日會後公告於公開資訊觀測站</td>
+<td style='text-align:left !important;'>內容檔案於當日會後公告於公開資訊觀測站</td>
+<td style='text-align:left !important;'><a href='http://www.largan.com.tw/tw/investor/shareholder' target='_blink'><font color='blue'><u>http://www.largan.com.tw/tw/investor/shareholder</u></font></a></td>
+<td style='text-align:left !important;'>
+影音資訊網址：
+未輸
+<br>
+</td>
+<td style='text-align:left !important;'>無</td>
+<td align='center'><input type='button' value='查詢' onclick='document.form_t100sb02_1.co_id.value="3008";openWindow(this.form ,"");'>
+</td>
+</tr>
+</table></body></html>

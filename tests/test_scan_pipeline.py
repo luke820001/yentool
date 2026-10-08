@@ -579,3 +579,293 @@ class TestFirstDayIsAFreshSignal(GateCase):
                                "rows": [row]})["items"]
         self.assertFalse(any(i["code"] == "buy_ready_violates_gate" for i in items),
                          [i for i in items if i["code"] == "buy_ready_violates_gate"])
+
+
+class TestReentryCardIsTheNewTrade(GateCase):
+    """2026-10-08 (the 8227 shape of 2026-10-07). A name whose previous
+    segment was not a signal and whose hypothetical trade already hit the
+    target comes back as a first-day signal. The Buy_Ready set is unchanged
+    (it is a valid signal under the validated rule); what changes is that its
+    card is the NEW trade -- pending, no exit -- not the closed old one."""
+
+    def _annotate(self):
+        from unittest import mock
+        import scanner.holding_tracker as tracker
+        from datetime import date, timedelta
+        cal, d = [], date(2026, 8, 24)
+        while len(cal) < 13:
+            if d.weekday() < 5:
+                cal.append(d.isoformat())
+            d += timedelta(days=1)
+        self.assertEqual(cal[-1], TODAY)
+        bars = ([(100, 101, 99, 100)] * 3 + [(100, 121, 99, 118)]
+                + [(118, 119, 117, 118)] * 9)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "pv.db"
+            conn = sqlite3.connect(db)
+            try:
+                conn.execute("CREATE TABLE data (stock_id TEXT, date TEXT, "
+                             "open REAL, high REAL, low REAL, close REAL)")
+                for day, (o, h, l, c) in zip(cal, bars):
+                    conn.execute("INSERT INTO data VALUES (?,?,?,?,?,?)",
+                                 ("8069", day, o, h, l, c))
+                conn.commit()
+            finally:
+                conn.close()
+            led = {"8069": cal[:6], "9999": cal[:-1]}
+            flags = {"8069": {cal[0]: 0}}
+            df = frame(Close_Price=118.0, Suggested_Buy_Price=118.0,
+                       Strict_Stop_Loss=94.4, Target_Price=142.0)
+            df = df.drop(columns=["Hold_Status"])
+            with mock.patch.object(tracker, "PRICE_VOLUME_FILE", db), \
+                    mock.patch.object(tracker, "_ledger_bar_dates", lambda m: led), \
+                    mock.patch.object(tracker, "_ledger_buy_flags", lambda m: flags), \
+                    mock.patch.object(tracker, "_disturbed_fn", lambda: None):
+                out = tracker.annotate_holding(df, MODE)
+        return cal, mark_buy_ready(out, MODE, session_date=TODAY)
+
+    def test_the_buy_ready_row_shows_the_new_pending_trade(self):
+        cal, out = self._annotate()
+        r = out.iloc[0]
+        self.assertTrue(bool(r["Buy_Ready"]))
+        self.assertTrue(bool(r["First_Day"]))
+        self.assertEqual(r["Hold_Status"], "pending")
+        self.assertEqual(r["Exit_Signal"], "")
+        self.assertAlmostEqual(r["Plan_Stop"], 94.4)
+        self.assertEqual(r["Prev_Signal_Date"], cal[0])
+        self.assertEqual(r["Prev_Exit_Signal"], "tp")
+        self.assertEqual(r["Sessions_Since_Prev_Exit"], 9)
+
+    def test_the_payload_check_accepts_it(self):
+        from scanner.result_checks import check_payload
+        _, out = self._annotate()
+        row = out.iloc[0].to_dict()
+        items = check_payload({"meta": {"mode": MODE, "data_date": TODAY,
+                                        "session_date": TODAY},
+                               "rows": [row]})["items"]
+        codes = {i["code"] for i in items}
+        self.assertNotIn("buy_ready_on_closed_segment", codes)
+        self.assertNotIn("buy_ready_violates_gate", codes)
+        # the minimal fixture lacks most scan columns (column_missing etc.)
+        # and meta.quality (restrictions_unchecked); what matters is that no
+        # holding / plan / Prev_* identity fails
+        row_errors = [i for i in items if i["level"] == "error"
+                      and i["code"] not in ("column_missing", "core_plus_mismatch",
+                                            "count_mismatch",
+                                            "restrictions_unchecked")]
+        self.assertFalse(row_errors, row_errors)
+
+    def test_a_buy_ready_row_on_a_closed_trade_is_an_error(self):
+        """What the 2026-10-07 payload carried (8227: exited + Buy_Ready),
+        which meta.checks did not catch."""
+        from scanner.result_checks import check_payload
+        out = mark_buy_ready(frame(Hold_Status="exited", First_Day=True), MODE,
+                             session_date=TODAY)
+        self.assertTrue(bool(out["Buy_Ready"].iloc[0]))   # the set is unchanged
+        items = check_payload({"meta": {"mode": MODE, "data_date": TODAY,
+                                        "session_date": TODAY},
+                               "rows": [out.iloc[0].to_dict()]})["items"]
+        hit = [i for i in items if i["code"] == "buy_ready_on_closed_segment"]
+        self.assertTrue(hit)
+        self.assertEqual(hit[0]["level"], "error")
+
+
+# --------------------------------------------------------------------------
+# 2026-10-08: the recommendation lifecycle inside the scan (P0-3 / P0-4)
+# --------------------------------------------------------------------------
+class TestDegradedRunWritesNoRecommendation(GateCase):
+    """The 2026-09-17 20:00 run was degraded (OTC feed down) and still wrote
+    rec 5274 -- a name the recovered feed never listed. A degraded run now
+    attaches what exists and creates, retracts and exports nothing."""
+
+    def setUp(self):
+        super(TestDegradedRunWritesNoRecommendation, self).setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ledger = Path(self.tmp.name) / "portfolio_ledger.db"
+        self.export = Path(self.tmp.name) / "recommendations.json"
+
+    def tearDown(self):
+        super(TestDegradedRunWritesNoRecommendation, self).tearDown()
+        self.tmp.cleanup()
+
+    def count(self):
+        if not self.ledger.exists():
+            return 0
+        conn = sqlite3.connect(self.ledger)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_degraded_run_creates_nothing(self):
+        from portfolio.sync import REC_COLUMNS
+        df = mark_buy_ready(frame(), MODE, session_date=TODAY)
+        self.assertTrue(bool(df["Buy_Ready"].iloc[0]))
+        out, stats = attach_recommendations(df, MODE, STRATEGY_VERSION, self.ledger,
+                                            session_date=TODAY, allow_writes=False)
+        self.assertEqual((stats["created"], stats["writes"]), (0, False))
+        self.assertEqual(self.count(), 0)
+        self.assertEqual(len(REC_COLUMNS), 8)
+        for col in REC_COLUMNS:
+            self.assertIn(col, out.columns)
+            self.assertIsNone(out[col].iloc[0], col)
+
+    def test_degraded_run_still_attaches_existing(self):
+        df = mark_buy_ready(frame(), MODE, session_date=TODAY)
+        out, _ = attach_recommendations(df, MODE, STRATEGY_VERSION, self.ledger,
+                                        session_date=TODAY)
+        later = frame(Data_Date="2026-09-10", Hold_Status="holding")
+        out2, stats = attach_recommendations(later, MODE, STRATEGY_VERSION,
+                                             self.ledger, session_date="2026-09-10",
+                                             allow_writes=False)
+        self.assertEqual(stats["attached"], 1)
+        self.assertEqual(out2["Recommendation_ID"].iloc[0],
+                         out["Recommendation_ID"].iloc[0])
+        self.assertEqual(self.count(), 1)
+
+    def test_next_session_is_stored(self):
+        df = mark_buy_ready(frame(), MODE, session_date=TODAY)
+        out, _ = attach_recommendations(df, MODE, STRATEGY_VERSION, self.ledger,
+                                        session_date=TODAY,
+                                        next_session="2026-09-10")
+        self.assertEqual(out["Rec_Valid_Until"].iloc[0], "2026-09-10")
+        conn = sqlite3.connect(self.ledger)
+        try:
+            vu = conn.execute(
+                "SELECT valid_until_session FROM recommendations").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(vu, "2026-09-10")
+
+    def _helpers(self, degraded):
+        """scan_headless's three recommendation steps on temp files, with the
+        lifecycle and the card drawing stubbed out."""
+        from unittest import mock
+        import scan_headless as sh
+        import scanner.market_calendar as mc
+        adv = mock.Mock(return_value={"backfilled": 0, "moved": 0, "closed": 0,
+                                      "expired": 0, "superseded": 0,
+                                      "error": None, "transitions": []})
+        drawn = []
+
+        def annotate(df, mode, rec_anchors=None, **kw):
+            drawn.append(dict(rec_anchors or {}))
+            return df
+        with mock.patch.object(sh, "PORTFOLIO_LEDGER_FILE", self.ledger), \
+                mock.patch.object(sh, "RECOMMENDATIONS_EXPORT_FILE", self.export), \
+                mock.patch.object(sh, "advance_recommendations", adv), \
+                mock.patch.object(sh, "annotate_holding", annotate), \
+                mock.patch.object(mc, "entry_session_after",
+                                  lambda day, **kw: "2026-09-10"):
+            anchors, adv_stats = sh._prepare_recommendations(MODE, TODAY, degraded)
+            df = mark_buy_ready(frame(), MODE, session_date=TODAY)
+            df, anchors, stats = sh._create_recommendations(
+                df, MODE, TODAY, degraded, anchors)
+            sh._finish_recommendations(None, MODE, TODAY, degraded)
+        return adv, adv_stats, df, stats, drawn
+
+    def test_degraded_helpers_write_nothing(self):
+        self.export.write_bytes(b'{"count": 0, "recommendations": []}')
+        before = self.export.read_bytes()
+        adv, adv_stats, df, stats, drawn = self._helpers("feed degraded: OTC")
+        adv.assert_not_called()
+        self.assertIsNone(adv_stats)
+        self.assertEqual(stats["created"], 0)
+        self.assertFalse(stats["writes"])
+        self.assertEqual(self.count(), 0)
+        self.assertEqual(self.export.read_bytes(), before)
+        self.assertEqual(drawn, [])                  # nothing to re-anchor
+        self.assertIsNone(df["Recommendation_ID"].iloc[0])
+
+    def test_clean_run_creates_reanchors_and_exports(self):
+        adv, adv_stats, df, stats, drawn = self._helpers(None)
+        adv.assert_called_once()
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(df["Rec_Valid_Until"].iloc[0], "2026-09-10")
+        self.assertEqual(len(drawn), 1)
+        self.assertEqual(drawn[0]["8069"]["anchor"], TODAY)
+        doc = json.loads(self.export.read_text(encoding="utf-8"))
+        self.assertEqual([r["stock_id"] for r in doc["recommendations"]], ["8069"])
+        self.assertEqual(doc["recommendations"][0]["valid_until_session"],
+                         "2026-09-10")
+
+    def test_run_scan_order(self):
+        """recs.md: anchors before the cards, the buy gate, then the freeze
+        and the re-anchor, the chip verdict on the final card, the tracked
+        rows, the export, and record_picks only on a clean run."""
+        import inspect
+        import scan_headless as sh
+        src = inspect.getsource(sh.run_scan)
+        steps = ["_prepare_recommendations(", "annotate_holding(result_df",
+                 "mark_buy_ready(result_df", "_create_recommendations(",
+                 "annotate_chip_action(result_df", "split_tracked(",
+                 "_finish_recommendations(", "record_picks(result_df"]
+        at = [src.find(s) for s in steps]
+        self.assertTrue(all(i >= 0 for i in at), dict(zip(steps, at)))
+        self.assertEqual(at, sorted(at), dict(zip(steps, at)))
+        guard = src[:at[-1]].rsplit("if ", 1)[-1]
+        self.assertTrue(guard.startswith("degraded is None"), guard)
+        self.assertEqual(src.count("rec_stats=rec_meta(rec_attach, rec_advance)"), 2)
+
+
+class TestNewRecommendationCard(GateCase):
+    """A recommendation created in this run is drawn as ITS trade: pending,
+    anchored on today, with the recommendation's own stop."""
+
+    def test_new_recommendation_card_is_pending(self):
+        from contextlib import ExitStack
+        from datetime import date, timedelta
+        from unittest import mock
+        import scan_headless as sh
+        import scanner.holding_tracker as tracker
+        import scanner.market_calendar as mc
+        cal, d = [], date(2026, 8, 24)
+        while len(cal) < 13:
+            if d.weekday() < 5:
+                cal.append(d.isoformat())
+            d += timedelta(days=1)
+        self.assertEqual(cal[-1], TODAY)
+        bars = ([(100, 101, 99, 100)] * 3 + [(100, 121, 99, 118)]
+                + [(118, 119, 117, 118)] * 9)
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            db = Path(tmp) / "pv.db"
+            conn = sqlite3.connect(db)
+            try:
+                conn.execute("CREATE TABLE data (stock_id TEXT, date TEXT, "
+                             "open REAL, high REAL, low REAL, close REAL)")
+                for day, (o, h, l, c) in zip(cal, bars):
+                    conn.execute("INSERT INTO data VALUES (?,?,?,?,?,?)",
+                                 ("8069", day, o, h, l, c))
+                conn.commit()
+            finally:
+                conn.close()
+            led = {"8069": cal[:6], "9999": cal[:-1]}
+            flags = {"8069": {cal[0]: 0}}
+            ledger = Path(tmp) / "portfolio_ledger.db"
+            for target, name, value in (
+                    (tracker, "PRICE_VOLUME_FILE", db),
+                    (tracker, "_ledger_bar_dates", lambda m: led),
+                    (tracker, "_ledger_buy_flags", lambda m: flags),
+                    (tracker, "_disturbed_fn", lambda: None),
+                    (sh, "PORTFOLIO_LEDGER_FILE", ledger),
+                    (mc, "entry_session_after", lambda day, **kw: "2026-09-10")):
+                stack.enter_context(mock.patch.object(target, name, value))
+            df = frame(Close_Price=118.0, Suggested_Buy_Price=118.0,
+                       Strict_Stop_Loss=94.4, Target_Price=142.0)
+            df = df.drop(columns=["Hold_Status"])
+            df = tracker.annotate_holding(df, MODE, rec_anchors={})
+            df = mark_buy_ready(df, MODE, session_date=TODAY)
+            self.assertTrue(bool(df["Buy_Ready"].iloc[0]))
+            out, anchors, stats = sh._create_recommendations(
+                df, MODE, TODAY, None, {})
+        self.assertEqual(stats["created"], 1)
+        r = out.iloc[0]
+        self.assertEqual(r["Hold_Anchor_Kind"], "rec")
+        self.assertEqual(r["Hold_Anchor"], TODAY)
+        self.assertEqual(r["Hold_Status"], "pending")
+        self.assertEqual(r["Exit_Signal"], "")
+        self.assertEqual(r["Recommended_On"], TODAY)
+        self.assertAlmostEqual(r["Plan_Stop"], r["Initial_Stop_Price"])
+        self.assertAlmostEqual(r["Plan_Stop"], 94.4)
+        self.assertTrue(bool(r["Buy_Ready"]))         # the verdict is untouched
+        self.assertEqual(anchors["8069"]["rec_id"], r["Recommendation_ID"])

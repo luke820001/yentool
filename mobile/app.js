@@ -79,7 +79,7 @@ const MODE_CARDS = {
       "兩種買法擇一，出場價位完全相同（都以第一筆成交價計算）：一次買滿；或先買一半、跌到成交價 -10% 再補另一半。\n" +
       "出場計畫：災難停損 -20% · 收盤站上 +2.5% 後隔一個交易日起停損上調到 +2% · 目標 +20% · 第 8 天起收盤仍有實質獲利（+1% 以上）就隔日開盤收下 · 基本抱 10 個交易日，第 10 天收盤若仍站上自己的 5 日均價就續抱，最晚第 20 天。\n" +
       "回測（2017-2026，556 筆，近 3 年，含手續費與證交稅）：70.8% 勝、每筆平均 +1.95%；更早的資料 69.5% / +2.04%。19 個有效季度裡沒有一季低於 60%。歷史統計，不是未來勝率。\n" +
-      "這 +1.95% 是怎麼來的（2026-09-23 拆解）：獲利有 4 成來自 17% 碰到 +20% 停利的交易；鎖利出場（36%）平均只有 +1.2%；時間出場（20%）平均 −9.9%、停損（6%）−20.5%。所以勝率高不代表一直在賺——沒有大波段的那幾個月，合計就是負的（2022 年全年 −6.6%、2026-07~09 實際訊號合計為負）。固定資金 10 格、有訊號就買的話，六年半年化約 +18%、最大回撤約 −12%；5 格則是 +25% / −26%。看下面「帳本實際」那一行，那才是你這段時間真的會拿到的數字。\n" +
+      "這 +1.95% 是怎麼來的（2026-09-23 拆解）：獲利有 4 成來自 17% 碰到 +20% 停利的交易；鎖利出場（36%）平均只有 +1.2%；時間出場（20%）平均 −9.9%、停損（6%）−20.5%。所以勝率高不代表一直在賺——沒有大波段的那幾個月，合計就是負的（2022 年全年 −6.6%、2026-07~09 實際訊號合計為負）。固定資金分 5～8 個等權格、有訊號就買的話，到 2025 年底每年約 +12%（研究樣本）～+17%（線上訊號頻率），格數越多回撤越淺，2026 年至今是離群的一年；避開 1～3 格（BACKTEST_LOG M.4 嚴格格數；舊版引用的格數年化讓出場當天騰出的格子當天就重用，偏高，已更正）。看下面「帳本實際」那一行，那才是你這段時間真的會拿到的數字。\n" +
       "「勝」在這裡指「有賺錢」。若改用「至少賺 25% 才算贏」，這套規則只有 2.3%，因為 +20% 就停利了。那個目標有另一套規則（見回測登錄簿 G 節）可達 37.6%，但只有 54.9% 的交易賺錢、資金要卡 16 天。兩者已完整比較過，你選擇維持這一套。\n" +
       "2026-09-21 程式碼稽核修正（與規則無關，但會改變畫面上的數字）：① ETF 的升降單位跟個股不同（50 元以上跳 0.05 而不是 0.50），舊版把 0050 的鎖利價算成 108.50、比規則更寬，已修。②「後段獲利了結」這一行早了一天，正確是第 8 天，不是第 7 天。③價格出場之後不再繼續數持有天數。\n" +
       "2026-09-21 修正：鎖利原本「當天盤中觸及 +6%」就算數，但你是收盤後才看到、隔天才下得了單。改成收盤判定、隔日生效後重算同一批交易，舊規則真實勝率 63.0%、新規則 67.1%——先前畫面上的約 70% 有一大半是模擬器產生的。\n" +
@@ -122,17 +122,84 @@ const SORTS = [
 
 // Buy_Block reason codes from scanner/scan_mode.mark_buy_ready(). "unknown"
 // and "no_rule" must read as REFUSALS: report section 8, "未知不能當通過".
+// Every code in scanner/result_checks.BUY_BLOCKS needs a label here
+// (tests/test_mobile_picks_ui.py); the wording follows config/report_text.json
+// block_label, which the AI report and the desktop use. 2026-10-08: "held"
+// used to read 已進場, but it only means "on the list the session before" --
+// the rule may never have bought it (that day could have been blocked too).
 const BLOCK_TEXT = {
   regime: "大盤未站上20/60MA",
   regime_stale: "大盤資料尚未更新到今天，本次不判定順風",
   stale: "資料非當日，需重新確認",
   integrity: "資料完整性未通過",
   rank: "非前20名",
-  market: "非上櫃",
-  quality: "未過品質閘門",
-  held: "已進場·非新訊號",
+  market: "上市股·規則只買上櫃",
+  quality: "未過 CORE+ 時機門檻",
+  held: "非新訊號·前日已在清單",
   unknown: "後端未提供買進判定（不視為可買）",
   no_rule: "此模式未定義買進規則",
+  dropped: "已掉出清單·僅追蹤出場",
+  restricted: "交易受限·無法下單",
+};
+
+// Trade_Restriction kinds (scanner/trade_restrictions.RESTRICTION_KINDS) and
+// the display-only flag limit_down. Labels mirror config/report_text.json
+// restriction_label. Only "suspended" blocks a buy (BLOCKING_RESTRICTIONS);
+// the rest are ORDER GUIDANCE, never "cannot buy": signals that entered
+// during a disposition were the best bucket in the backtest (BACKTEST_LOG M.1).
+const RESTRICT_TEXT = {
+  suspended: "暫停交易",
+  disposition: "處置股",
+  altered: "變更交易方法",
+  limit_lock: "漲停鎖住",
+  attention: "注意股",
+  unknown: "限制資料未取得",
+  limit_down: "跌停",
+};
+const RESTRICT_TONE = {
+  suspended: "err", disposition: "warn", altered: "warn", limit_lock: "warn",
+  unknown: "warn", attention: "info", limit_down: "info",
+};
+// Sentences, same templates as config/report_text.json restriction_note
+// (config/ is not deployed to Pages, so the phone carries its own copy;
+// tests/test_mobile_probe.py checks the two agree). {match} and {prepay} are
+// built from the PARSED Restriction_Match_Min / Restriction_Prepay -- the
+// minutes are never written here (TPEX has mostly matched every ~2 minutes
+// since 2026-08-10, not the 5 the old rules of thumb say).
+const RESTRICT_NOTE = {
+  suspended: "暫停交易中，無法下單",
+  disposition: "處置股{until}{match}{prepay}；不影響規則買進判定，但開盤委託依分盤集合競價撮合，停損、鎖利等出場也可能延後成交",
+  altered: "變更交易方法（如全額交割）：買進需先預收款項、撮合較慢；不影響規則買進判定，但出場也可能延後成交",
+  limit_lock: "今日收盤漲停鎖住：隔日開盤可能跳空或買不到，進場以實際成交價為準；不影響規則買進判定",
+  unknown: "交易限制資料本次未取得，下單前請自行確認是否為處置或注意股",
+  attention: "注意股（交易所提醒，非處置）：不影響規則買進判定；若後續轉為處置股，撮合與預收方式會改變",
+  blocking: "{label}{until}{match}{prepay}：屬規則的封鎖類別，規則不買",
+  until: "（至 {until}）",
+  match: "，約每 {min} 分鐘撮合一次",
+  prepay_all: "，每筆委託都需全額預收款券",
+  prepay_threshold: "，單筆 10 張或當日累計 30 張以上需預收款券",
+  // phone-only: a disposition row whose interval was not parsed
+  match_unknown: "，撮合間隔以交易所公告為準",
+  limit_down: "今日收盤跌停（僅供參考，不影響規則判定）",
+};
+
+// Order mechanics, dated. These are exchange RULES, not strategy numbers, and
+// they change (the odd-lot session has been re-timed before), so they live in
+// one dated block and the card prints the date. Sources: TWSE / TPEx trading
+// rules as checked 2026-10-08; the odd-lot cost figures are BACKTEST_LOG M.7
+// (information only, they passed no gate).
+const ORDER_RULES = {
+  as_of: "2026-10-08",
+  source: "證交所／櫃買中心交易制度，2026-10-08 查核，以交易所公告為準",
+  auction: "08:30–09:00 開盤集合競價只收限價（ROD），成交價是競價結果，不一定是你掛的價",
+  odd_first: "09:10",
+  odd_interval_sec: 5,
+  odd_note: "盤中零股 09:10 第一次撮合，之後約每 5 秒撮合一次，只收限價",
+  odd_cost: "研究（BACKTEST_LOG M.7）：零股 09:10 第一次撮合平均比整股開盤貴約 +0.2%～+0.3%，中位數 0，約八成落在 -1.7%～+2.9%",
+  odd_no_open_limit: "不要把零股限價單剛好掛在整股開盤價：常常買不到，錯過的正是漲最多的那些",
+  odd_min_fee: "每筆至少約 NT$14,035 才不會被 NT$20 最低手續費墊高成本；零股最低手續費依券商而定",
+  anchor_note: "卡片上的停損、鎖利、停利以整股開盤價（Entry_Open）計算；「持倉」頁改以你登錄的第一筆成交價計算，兩者可能不同",
+  odd_change_note: "交易所已預告零股撮合時間將調整，實施日以證交所公告為準",
 };
 
 const DATA_STATUS_TEXT = {
@@ -347,22 +414,64 @@ function schedule(version) {
   return FEE_SCHEDULES[version] || FEE_SCHEDULES[DEFAULT_SCHEDULE];
 }
 
+// Integer floor division (Decimal ROUND_DOWN on the non-negative amounts it
+// is used for). A BigInt operand -- see mulExact -- is divided exactly.
+// Positive denominators only.
+function divFloor(numerator, denominator) {
+  if (typeof numerator === "bigint" || typeof denominator === "bigint") {
+    const n = BigInt(numerator), d = BigInt(denominator), zero = BigInt(0);
+    let q = n / d;                              // BigInt division truncates
+    if (n % d !== zero && n < zero) q -= BigInt(1);
+    return Number(q);
+  }
+  let q = Math.floor(numerator / denominator);
+  let r = numerator - q * denominator;
+  while (r < 0) { q -= 1; r += denominator; }
+  while (r >= denominator) { q += 1; r -= denominator; }
+  return q;
+}
+
+// a x b x c for non-negative integers, exactly: a Number while the product
+// is a safe integer, a BigInt beyond that.
+function mulExact(a, b, c) {
+  const k = c === undefined ? 1 : c;
+  const p = a * b * k;
+  if (Number.isSafeInteger(p)) return p;
+  return BigInt(a) * BigInt(b) * BigInt(k);
+}
+
+// portfolio/money.py FeeSchedule._fee: consideration x rate x discount,
+// TRUNCATED to the dollar straight from the exact product, then the minimum.
+// 2026-10-08: this used to round to the cent first and truncate after, which
+// turns NT$20,350 x 0.1425% = 28.99875 into 29.00 -> 29 where the broker and
+// money.py charge 28 (and 10.10 x 99 shares' tax 2.9997 into 3, not 2).
 function feeFor(sched, considerationCents) {
+  if (sched.roundToDollar) {
+    let fee = divFloor(mulExact(considerationCents, sched.feeNum, sched.discNum),
+                       sched.feeDen * sched.discDen * 100) * 100;
+    if (fee < sched.minFeeCents) fee = sched.minFeeCents;
+    return fee;
+  }
   let fee = divRound(considerationCents * sched.feeNum * sched.discNum,
                      sched.feeDen * sched.discDen);
-  if (sched.roundToDollar) {
-    fee = Math.floor(fee / 100) * 100;             // brokers truncate to the dollar
-    if (fee < sched.minFeeCents) fee = sched.minFeeCents;
-  } else if (sched.minFeeCents > 0 && fee < sched.minFeeCents) {
-    fee = sched.minFeeCents;
-  }
+  if (sched.minFeeCents > 0 && fee < sched.minFeeCents) fee = sched.minFeeCents;
   return fee;
 }
 
 function taxFor(sched, considerationCents) {
-  let tax = divRound(considerationCents * sched.taxNum, sched.taxDen);
-  if (sched.roundToDollar) tax = Math.floor(tax / 100) * 100;
-  return tax;
+  if (sched.roundToDollar) {
+    return divFloor(mulExact(considerationCents, sched.taxNum), sched.taxDen * 100) * 100;
+  }
+  return divRound(considerationCents * sched.taxNum, sched.taxDen);
+}
+
+// True when the minimum fee, not the rate, sets the fee on this consideration
+// (below about NT$14,035 at 0.1425% and NT$20).
+function feeBindsMin(sched, considerationCents) {
+  if (!(sched.minFeeCents > 0)) return false;
+  const raw = mulExact(considerationCents, sched.feeNum, sched.discNum);
+  const lim = sched.minFeeCents * sched.feeDen * sched.discDen;
+  return typeof raw === "bigint" ? raw < BigInt(lim) : raw < lim;
 }
 
 // What liquidating `shares` at `price` would cost. Kept separate because the
@@ -1341,6 +1450,8 @@ const STATE = {
   market: "ALL",
   sortIndex: 0,
   query: "",
+  refOpen: false,          // the 參考 group's <details>, kept across re-renders
+  orderOpen: {},           // {stock_id: false} for an order guide the user closed
   loadedAt: "",
 };
 
@@ -1931,6 +2042,24 @@ function renderNotices() {
   } else if (chk && chk.status === "warn") {
     out.push(noticeHtml("warn", `⚠ 欄位自我檢測 ${chk.warnings} 項警告（${checkCodes(chk)}）· 明細見「研究」頁`));
   }
+  // List freeze (scanner/list_freeze.py). A provisional list can still change;
+  // a revised final one says why it changed.
+  const ls = listStatus();
+  if (ls && ls.state === "provisional") {
+    out.push(noticeHtml("warn", `⏳ 名單${listStatusText(ls)}`));
+  } else if (ls && ls.state === "final" && (Number(ls.revision) || 1) > 1) {
+    out.push(noticeHtml("info", `ℹ 名單${listStatusText(ls)}`));
+  }
+  const rq = m.quality && m.quality.restrictions;
+  if (rq && typeof rq === "object" && rq.ok === false) {
+    out.push(noticeHtml("warn", "⚠ 處置／注意股名單本次未取得：卡片上的交易限制可能不完整，下單前請在券商 App 確認"));
+  }
+  // Worst first (errors, then warnings, then info): the notices live in the
+  // sticky top bar and are height-capped there (styles.css .notices), so the
+  // ones that fit must be the ones that matter. Array.sort is stable.
+  const tone = (h) => (h.startsWith('<div class="notice err"') ? 0
+    : h.startsWith('<div class="notice warn"') ? 1 : 2);
+  out.sort((a, b) => tone(a) - tone(b));
   $("#notices").innerHTML = out.join("");
 }
 
@@ -1953,7 +2082,7 @@ function render() {
   renderNotices();
   $("#tabs").innerHTML = tabBar();
   const dd = effectiveDataDate();
-  $("#asof").textContent = dd ? `行情截至 ${dd} 收盤` : "尚無行情日期";
+  $("#asof").textContent = (dd ? `行情截至 ${dd} 收盤` : "尚無行情日期") + listAsofSuffix();
   for (const [id] of PAGES) {
     const el = document.getElementById("page-" + id);
     el.hidden = id !== STATE.page;
@@ -1981,6 +2110,7 @@ function renderToday() {
     <div class="asof-block">
       <div class="asof-line"><span>行情截至</span><b>${esc(effectiveDataDate() || "未知")} 收盤</b></div>
       <div class="asof-line"><span>最近成功更新</span><b>${esc(String(m.scan_time || "未知"))}</b></div>
+      <div class="asof-line"><span>清單狀態</span><b>${esc(listStatusText(listStatus()))}</b></div>
       <div class="asof-line"><span>資料完整度</span><b>${esc(dataCompletenessText())}</b></div>
       <div class="asof-line"><span>估值日期</span><b>${esc(s.valuation_date || "尚無估值")}${s.valuation_complete ? "" : " · 估值不完整"}</b></div>
     </div>`;
@@ -2004,7 +2134,7 @@ function renderToday() {
   const chips = `
     <div class="chip-row">
       <button type="button" class="stat ${pending.length ? "alert" : ""}" data-act="page" data-page="positions">待處理 ${pending.length}</button>
-      <button type="button" class="stat" data-act="page" data-page="picks">今日新建議 ${picks.length}</button>
+      <button type="button" class="stat" data-act="page" data-page="picks">今日可買 ${picks.length}</button>
       <button type="button" class="stat" data-act="page" data-page="positions">持倉 ${s.open_positions}</button>
       <button type="button" class="stat ${d10 ? "alert" : ""}" data-act="page" data-page="positions">D${horizon}到期 ${d10}</button>
     </div>`;
@@ -2085,12 +2215,1043 @@ function strategyCardHtml() {
   </details>`;
 }
 
+/* ============================================================================
+ * 10b. Investor views (2026-10-08): picks groups, list status, investor info,
+ *      sizing, order guide, system record, per-name history, events
+ *
+ * Everything below READS backend columns and meta and degrades to nothing,
+ * or to an honest "not provided", when a field is absent: an older payload
+ * (no meta.list_status / report_sources / events, no Prev_* / restriction /
+ * event columns, a live_record without by_sid / bench / dates) renders as
+ * before, minus the new lines. None of it changes what is buyable:
+ * buyVerdict() is still the only gate, and it only ever downgrades.
+ * ==========================================================================*/
+
+const mmdd = (d) => String(d || "").slice(5, 10);
+const hhmm = (ts) => String(ts || "").slice(11, 16);
+const N_ENTER_UI = 20;      // scanner/scan_mode.N_ENTER (display only)
+
+// Days since the epoch for a YYYY-MM-DD string (null when it is not one).
+function dayNum(d) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d || ""));
+  if (!m) return null;
+  return Math.round(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 86400000);
+}
+
+function fillTpl(tpl, vals) {
+  return String(tpl).replace(/\{(\w+)\}/g, (all, k) =>
+    (vals[k] === undefined || vals[k] === null ? "" : String(vals[k])));
+}
+
+// Money in NT$ (not cents) as 億 / 萬, for turnover-sized numbers.
+function fmtBigNtd(ntd) {
+  const n = num(ntd);
+  if (n === null) return "-";
+  if (Math.abs(n) >= 1e8) return (n / 1e8).toFixed(2) + " 億";
+  if (Math.abs(n) >= 1e4) return Math.round(n / 1e4).toLocaleString("en-US") + " 萬";
+  return Math.round(n).toLocaleString("en-US") + " 元";
+}
+
+// --- groups (P1-1) -----------------------------------------------------------
+// buy  = the backend says Buy_Ready and nothing downgraded it;
+// hold = the owner holds it, an active recommendation follows it, or the
+//        OTC simulation is holding it / exits it today. Tracked rows join
+//        here only, de-duplicated by stock id with the list row winning;
+// ref  = everything else (every TSE row, OTC rows that exited earlier).
+const HOLD_ACTIVE = new Set(["holding", "delay", "exit_today", "overdue"]);
+const HOLD_TEXT = {
+  pending: "待進場", holding: "模擬持有中", delay: "續抱中",
+  exit_today: "今日出場", overdue: "資料缺漏（逾期）", exited: "已出場",
+};
+
+function heldIds() {
+  return new Set(STATE.positions.filter((p) => p.status === "open")
+    .map((p) => String(p.stock_id)));
+}
+
+function exitIsToday(r) {
+  const xd = String(r.Exit_Signal_Date || "").slice(0, 10);
+  return !!(r.Exit_Signal && xd && xd === effectiveDataDate());
+}
+
+function pickGroup(r, held) {
+  if (buyVerdict(r).ok) return "buy";
+  const sid = String(r.Stock_ID);
+  if (held && held.has(sid)) return "hold";
+  const rs = String(r.Rec_Status || "");
+  if (r.Recommendation_ID && (rs === "active" || rs === "converted")) return "hold";
+  if (String(r.Market || "") === "OTC") {
+    if (HOLD_ACTIVE.has(String(r.Hold_Status || ""))) return "hold";
+    if (exitIsToday(r)) return "hold";
+  }
+  return "ref";
+}
+
+function pickGroups() {
+  const held = heldIds();
+  const out = { buy: [], hold: [], ref: [] };
+  const seen = new Set();
+  for (const r of STATE.rows) {
+    seen.add(String(r.Stock_ID));
+    out[pickGroup(r, held)].push(r);
+  }
+  for (const r of STATE.tracked) {
+    const sid = String(r.Stock_ID);
+    if (seen.has(sid)) continue;
+    seen.add(sid);
+    if (pickGroup(r, held) === "hold") out.hold.push(r);
+  }
+  return out;
+}
+
+// Today's actions first: exits due, then the extended holds, then the rest.
+function holdPriority(r) {
+  const st = String(r.Hold_Status || "");
+  if (st === "exit_today" || st === "overdue" || exitIsToday(r)) return 0;
+  if (st === "delay") return 1;
+  if (st === "holding") return 2;
+  if (st === "pending" || !st) return 3;
+  return 4;
+}
+
+// The one-line funnel, from Buy_Block and the list order only.
+function picksSummaryText(groups) {
+  const g = groups || pickGroups();
+  const rows = STATE.rows;
+  const buy = g.buy.length;
+  if (!rows.length) return `今日可買 ${buy}｜今日 0 檔入選`;
+  const reg = regimeView();
+  const gate = rows.find((r) => r.Buy_Block === "regime" || r.Buy_Block === "regime_stale");
+  if (!reg.enterOk || gate) {
+    return `今日可買 ${buy}｜${!reg.enterOk ? reg.text : BLOCK_TEXT[gate.Buy_Block]}`;
+  }
+  const top = rows.filter((r) => r._rank && r._rank <= N_ENTER_UI);
+  const otc = top.filter((r) => String(r.Market) === "OTC");
+  const coreOk = (r) => (typeof r.Core_Plus === "boolean" ? r.Core_Plus
+    : ["", "held", "restricted", "unknown"].includes(String(r.Buy_Block || "")));
+  const core = otc.filter(coreOk).length;
+  const held = otc.filter((r) => r.Buy_Block === "held").length;
+  const tse = top.filter((r) => String(r.Market) === "TSE").length;
+  let s = `今日可買 ${buy}｜上櫃前${N_ENTER_UI} ${otc.length}（CORE+ ${core}，非新訊號 ${held}）｜上市 ${tse}（僅參考）`;
+  const restricted = rows.filter((r) => r.Buy_Block === "restricted").length;
+  if (restricted) s += `｜交易受限 ${restricted}`;
+  const disp = top.filter((r) => r.Trade_Restriction === "disposition").length;
+  if (disp) s += `｜處置 ${disp}`;
+  return s;
+}
+
+// --- list status (P1-9, scanner/list_freeze.py meta.list_status) ------------
+const LIST_REASON_TEXT = {
+  data_lag: "資料尚未更新到今天",
+  degraded: "資料源異常",
+  unchecked: "尚未完成欄位自檢",
+  checks_fail: "欄位自檢未通過",
+  regime_stale: "大盤資料尚未更新",
+  regime_unknown: "大盤狀態無法判讀",
+  empty_unflagged: "零檔但未標示為正常空結果",
+  too_early: "15:00 前的執行",
+};
+const LIST_REVISED_TEXT = {
+  force_rescan: "手動強制重建",
+  pages_behind: "上次發布未成功，重新發布",
+  restriction_info: "晚間處置／注意股名單補充，只改限制欄位",
+};
+
+function listStatus() {
+  const ls = STATE.meta && STATE.meta.list_status;
+  return ls && typeof ls === "object" && ls.state ? ls : null;
+}
+
+// One sentence about how final this list is. An old payload has no
+// list_status: then only the time of day is known, and it is never "final".
+function listStatusText(ls) {
+  if (!ls) {
+    const h = hhmm(STATE.meta && STATE.meta.scan_time);
+    if (!/^\d{2}:\d{2}$/.test(h)) return "產生時間未知";
+    const mins = Number(h.slice(0, 2)) * 60 + Number(h.slice(3, 5));
+    if (mins < 15 * 60) return `產生於 ${h}（15:00 前的版本）`;
+    if (mins >= 18 * 60) return `產生於 ${h}（晚間重跑版本，名單可能與下午不同）`;
+    return `產生於 ${h}`;
+  }
+  const first = hhmm(ls.first_published_at || ls.published_at);
+  if (ls.state === "final") {
+    const rev = Number(ls.revision) || 1;
+    if (rev > 1) {
+      const why = LIST_REVISED_TEXT[ls.revised_reason] || ls.revised_reason || "修訂";
+      return `已定案・第 ${rev} 版（${why}${ls.revised_at ? "，" + hhmm(ls.revised_at) : ""}；首次發布 ${first}）`;
+    }
+    return `已定案（${first} 發布，今晚重跑不會改名單）`;
+  }
+  const why = (Array.isArray(ls.reasons) ? ls.reasons : [])
+    .map((c) => LIST_REASON_TEXT[c] || c).join("、");
+  return `暫定版（${hhmm(ls.published_at) || "?"} 產生${why ? "；原因：" + why : ""}；雲端會繼續重試，名單可能變動）`;
+}
+
+function listStampHtml() {
+  const ls = listStatus();
+  const dd = effectiveDataDate();
+  const head = `名單資料日 ${dd ? mmdd(dd) : "未知"}（盤後）`;
+  const final1 = !!(ls && ls.state === "final" && (Number(ls.revision) || 1) === 1);
+  const state = final1
+    ? `本日清單已凍結・${hhmm(ls.first_published_at || ls.published_at)} 定案，今晚重跑不會改名單`
+    : listStatusText(ls);
+  const cls = ls ? (ls.state === "final" ? "final" : "prov") : "";
+  return `<div class="list-state ${cls}">${esc(head)} · ${esc(state)}</div>`;
+}
+
+function listAsofSuffix() {
+  const ls = listStatus();
+  if (!ls) return "";
+  if (ls.state === "final") return ` · 清單 ${hhmm(ls.first_published_at || ls.published_at)} 已定案`;
+  return " · 暫定版";
+}
+
+// --- restrictions (P0-1 phone half) ------------------------------------------
+function restrictionInfo(r) {
+  const kind = String(r.Trade_Restriction || "");
+  const flags = String(r.Restriction_Flags || "").split(",").map((s) => s.trim()).filter(Boolean);
+  return {
+    kind: kind === "none" ? "" : kind,
+    flags,
+    since: String(r.Restriction_Since || "").slice(0, 10),
+    until: String(r.Restriction_Until || "").slice(0, 10),
+    match: num(r.Restriction_Match_Min),
+    prepay: String(r.Restriction_Prepay || ""),
+    limitDown: flags.includes("limit_down"),
+  };
+}
+
+function restrictionNote(r) {
+  const x = restrictionInfo(r);
+  if (!x.kind) return x.limitDown ? RESTRICT_NOTE.limit_down : "";
+  const parts = {
+    until: x.until ? fillTpl(RESTRICT_NOTE.until, { until: x.until }) : "",
+    match: x.match !== null ? fillTpl(RESTRICT_NOTE.match, { min: x.match })
+      : (x.kind === "disposition" ? RESTRICT_NOTE.match_unknown : ""),
+    prepay: x.prepay === "all" ? RESTRICT_NOTE.prepay_all
+      : x.prepay === "threshold" ? RESTRICT_NOTE.prepay_threshold : "",
+    label: RESTRICT_TEXT[x.kind] || x.kind,
+  };
+  const tpl = String(r.Buy_Block || "") === "restricted"
+    ? RESTRICT_NOTE.blocking : (RESTRICT_NOTE[x.kind] || parts.label);
+  return fillTpl(tpl, parts);
+}
+
+function restrictionBadge(r) {
+  const x = restrictionInfo(r);
+  const out = [];
+  if (x.kind) {
+    out.push(`<span class="tag ${RESTRICT_TONE[x.kind] || "info"}">${esc(RESTRICT_TEXT[x.kind] || x.kind)}${
+      x.until ? esc(` 至 ${mmdd(x.until)}`) : ""}</span>`);
+  }
+  if (x.limitDown) out.push(`<span class="tag info">${esc(RESTRICT_TEXT.limit_down)}</span>`);
+  return out.join("");
+}
+
+// The order-side explanation for a restricted name. It explains EXECUTION
+// (periodic call auction, prepayment, exits that may fill late) and never
+// discourages the trade: disposition-entry signals were the best bucket
+// (BACKTEST_LOG M.1). Minutes and prepayment come from the parsed columns.
+function restrictionGuidance(r) {
+  const x = restrictionInfo(r);
+  const note = restrictionNote(r);
+  if (!note) return "";
+  let extra = "";
+  if (x.kind === "disposition") {
+    extra = "撮合間隔與預收方式取自交易所公告；回測中處置期間進場的訊號並沒有比較差（BACKTEST_LOG M.1），這裡只說明下單方式。";
+  } else if (x.kind === "unknown") {
+    extra = "名單讀取失敗不代表沒有限制。";
+  }
+  return noticeHtml(RESTRICT_TONE[x.kind] || "info", note) +
+    (extra ? `<div class="hint">${esc(extra)}</div>` : "");
+}
+
+// --- events (P1-6 phone half; ingestion/company_events.py) -------------------
+// Display only. The revenue month is always labelled and never coloured as
+// good or bad (BACKTEST_LOG M.6: as a filter every grouping was rejected).
+const EX_KIND_TEXT = { div: "除息", right: "除權", both: "除權息" };
+
+function eventsLine(r) {
+  const parts = [];
+  const rm = String(r.Rev_Month || "");
+  if (/^\d{4}-\d{2}$/.test(rm)) {
+    const bits = [];
+    if (num(r.Rev_YoY_Pct) !== null) bits.push(`年增 ${fmtSigned(r.Rev_YoY_Pct, 1)}%`);
+    if (num(r.Rev_MoM_Pct) !== null) bits.push(`月增 ${fmtSigned(r.Rev_MoM_Pct, 1)}%`);
+    if (num(r.Rev_Cum_YoY_Pct) !== null) bits.push(`累計年增 ${fmtSigned(r.Rev_Cum_YoY_Pct, 1)}%`);
+    parts.push(`${rm.slice(0, 4)} 年 ${Number(rm.slice(5, 7))} 月營收${bits.length ? " " + bits.join("、") : ""}`);
+  }
+  const ex = String(r.Ex_Date || "").slice(0, 10);
+  if (ex) {
+    const cash = num(r.Ex_Cash_Div);
+    parts.push(`${EX_KIND_TEXT[r.Ex_Kind] || "除權息"} ${mmdd(ex)}${cash !== null && cash > 0 ? `（現金 ${fmt(cash, 2)} 元）` : ""}`);
+  }
+  const cf = String(r.Conf_Date || "").slice(0, 10);
+  if (cf) parts.push(`法說會 ${mmdd(cf)}`);
+  return parts.join("｜");
+}
+
+// A badge when an ex-date or an investor conference is within a week.
+function eventBadge(r) {
+  const base = dayNum(effectiveDataDate());
+  if (base === null) return "";
+  const out = [];
+  const ex = dayNum(r.Ex_Date);
+  if (ex !== null && ex - base >= 0 && ex - base <= 7) {
+    out.push(`<span class="tag info">${esc((EX_KIND_TEXT[r.Ex_Kind] || "除權息") + " " + mmdd(r.Ex_Date))}</span>`);
+  }
+  const cf = dayNum(r.Conf_Date);
+  if (cf !== null && cf - base >= 0 && cf - base <= 7) {
+    out.push(`<span class="tag info">${esc("法說 " + mmdd(r.Conf_Date))}</span>`);
+  }
+  return out.join("");
+}
+
+// --- per-name history (P1-8; meta.live_record.by_sid, else its trades) -------
+const EXIT_REASON_TEXT = {
+  tp: "停利", stop: "停損", lock: "鎖利", late: "後期收下", time: "期滿", "": "進行中",
+};
+
+// null when the payload has no record at all; [] when it has one and this
+// name has no signal in it. Oldest first.
+function nameHistory(sid) {
+  const rec = STATE.meta && STATE.meta.live_record;
+  if (!rec) return null;
+  const id = String(sid);
+  // live_record ships {sid: [entries]}; a flat [entries with sid] list is
+  // read too, so a reshaped payload degrades to "no history", never to a
+  // wrong name's history.
+  if (Array.isArray(rec.by_sid)) {
+    return rec.by_sid.filter((e) => e && typeof e === "object" && String(e.sid) === id)
+      .sort((a, b) => String(a.sig).localeCompare(String(b.sig)));
+  }
+  if (rec.by_sid && typeof rec.by_sid === "object") {
+    return (Array.isArray(rec.by_sid[id]) ? rec.by_sid[id] : [])
+      .filter((e) => e && typeof e === "object");
+  }
+  const trades = (rec.tradable && Array.isArray(rec.tradable.trades)) ? rec.tradable.trades : [];
+  return trades.filter((t) => String(t.sid) === id)
+    .map((t) => Object.assign({ bucket: "tradable" }, t))
+    .sort((a, b) => String(a.sig).localeCompare(String(b.sig)));
+}
+
+function historyEntryText(e) {
+  const out = num(e.ret) !== null
+    ? `${EXIT_REASON_TEXT[e.exit] || e.exit || "出場"} ${fmtSigned(e.ret, 2)}%${num(e.bars) !== null ? `（${e.bars} 日）` : ""}`
+    : "進行中";
+  const bucket = e.bucket === "not_core" ? "（非核心，未計入）"
+    : e.bucket === "regime_closed" ? "（大盤未順風，未計入）" : "";
+  return `${mmdd(e.sig)} 訊號 → ${out}${bucket}`;
+}
+
+// The latest signal BEFORE today's (today's own signal is the card itself).
+function lastSignalText(sid) {
+  const h = nameHistory(sid);
+  if (h === null) return "";
+  const today = effectiveDataDate();
+  const prev = h.filter((e) => String(e.sig || "") < today);
+  return prev.length ? historyEntryText(prev[prev.length - 1]) : "首次";
+}
+
+function nameHistoryLine(sid) {
+  const h = nameHistory(sid);
+  if (h === null) return "";
+  if (!h.length) return `<div class="hint">系統紀錄：近期無系統訊號紀錄</div>`;
+  return `<div class="hint">系統紀錄：${esc(h.slice(-3).map(historyEntryText).join("；"))}</div>`;
+}
+
+// --- investor info (P1-2) ----------------------------------------------------
+function investorInfoHtml(r) {
+  const dist = num(r.Dist_52W_High_Pct);
+  const vt = num(r.Vol_Today), vm = num(r.Vol_MA20), close = num(r.Close_Price);
+  const ratio = vt !== null && vm ? vt / vm : null;
+  const x = restrictionInfo(r);
+  const rnote = restrictionNote(r);
+  const last = lastSignalText(r.Stock_ID);
+  const ev = eventsLine(r);
+  const rlabel = x.kind ? (RESTRICT_TEXT[x.kind] || x.kind)
+    : x.limitDown ? RESTRICT_TEXT.limit_down
+    : (r.Trade_Restriction !== undefined ? "無" : "未提供");
+  const cells =
+    kv("近20日漲幅", esc(fmtSigned(r.Gain_1M_Pct, 1, "%")), "", "約 20 個交易日") +
+    kv("距近一年最高收盤", dist === null ? "-" : dist === 0 ? "在高點" : esc(`-${fmt(Math.abs(dist), 1)}%`), "",
+       "近一年收盤最高，不是盤中") +
+    kv("今日量/20日均量", ratio === null ? "-" : esc(ratio.toFixed(2) + "×"), ratio !== null && ratio < 0.5 ? "warn" : "",
+       vt === null ? "" : `今日 ${vt.toLocaleString("en-US")} 張`) +
+    kv("成交金額約", vt !== null && close !== null ? esc(fmtBigNtd(close * vt * 1000)) : "-", "",
+       "收盤價 × 成交量估算") +
+    kv("交易限制", esc(rlabel), x.kind ? "warn" : "", rnote) +
+    (last ? kv("上次系統訊號", esc(last), "", "") : "");
+  return `<div class="kv2 info">${cells}</div>` +
+    (ev ? `<div class="hint">${esc(ev)}（月營收為最新已公布月份，不代表好壞）</div>` : "");
+}
+
+// --- recommendation view (P0-2 / P0-6 phone half) ----------------------------
+const REC_STATUS_TEXT = {
+  active: "有效", expired: "已失效", converted: "已轉為持倉", cancelled: "已取消",
+  closed: "已結案", superseded: "已撤回",
+};
+const REC_REASON_TEXT = {
+  time: "期滿出場", stop: "停損", lock: "鎖利", tp: "停利", late: "後期收下",
+  no_fill: "進場日未成交", horizon_elapsed: "逾時未結案", rule_version: "規則版本更新",
+  degraded_run: "由資料源異常的掃描建立", off_list: "已掉出清單",
+};
+
+function recReasonText(reason) {
+  const s = String(reason || "");
+  if (!s) return "";
+  if (s.startsWith("retracted:")) {
+    const code = s.slice("retracted:".length);
+    return "撤回：" + (REC_REASON_TEXT[code] || BLOCK_TEXT[code] || code);
+  }
+  return REC_REASON_TEXT[s] || s;
+}
+
+// A time exit dated after the regime's own date is waiting for the index:
+// the backend keeps such a recommendation active until the market leg of the
+// ride can be judged (portfolio/sync.py "exit_deferred").
+function provisionalTimeExit(r) {
+  const reg = (STATE.meta && STATE.meta.regime) || {};
+  const asOf = String(reg.as_of_date || "").slice(0, 10);
+  const xd = String(r.Exit_Signal_Date || "").slice(0, 10);
+  return String(r.Rec_Status || "") === "active" && r.Exit_Signal === "time" &&
+    !!xd && !!asOf && xd > asOf;
+}
+
+function recView(r, group) {
+  const rs = String(r.Rec_Status || "");
+  const st = String(r.Hold_Status || "");
+  const valid = String(r.Rec_Valid_Until || "").slice(0, 10);
+  const stop = cents(r.Initial_Stop_Price), target = cents(r.Initial_Target_Price);
+  const waiting = !!r.Recommendation_ID && rs === "active" && (group === "buy" || !st || st === "pending");
+  // Still "pending" although the entry session is already in the data (an
+  // older recommendation on a row the tracker re-anchored, e.g. 1815 on
+  // 10-07: recommended 09-09, pending, dropped). Never "enter at the next
+  // open" -- the rule only enters at the first open after its signal.
+  const on = String(r.Recommended_On || "").slice(0, 10);
+  const today = effectiveDataDate();
+  const missed = waiting && group !== "buy" && !!today &&
+    (valid ? valid <= today : (!!on && on < today));
+  let label = "";
+  if (r.Recommendation_ID) {
+    if (rs === "active") {
+      label = missed ? `有效・${on ? mmdd(on) + " 建議，" : ""}進場日已過但沒有模擬進場紀錄（不是今天的買點）`
+        : waiting ? (valid ? `有效・${mmdd(valid)} 開盤進場` : "有效・下一個交易日開盤進場")
+        : "已進場（模擬）";
+      if (provisionalTimeExit(r)) label += "・期滿出場待大盤資料確認";
+    } else if (rs === "closed") {
+      label = `已結案・${recReasonText(r.Rec_Status_Reason) || "原因未提供"}`;
+    } else {
+      label = (REC_STATUS_TEXT[rs] || rs || "狀態未提供") +
+        (r.Rec_Status_Reason ? `・${recReasonText(r.Rec_Status_Reason)}` : "");
+    }
+  }
+  return { pending: waiting && !missed && stop !== null, missed, stop, target, label, status: rs };
+}
+
+// An exit signal that belongs to an OLDER trade than the card is about: a
+// buy-group row exited on an earlier date, or an active recommendation newer
+// than the exit. Older payloads ship the tracker's old streak on such rows
+// (8227 on 10-07: tp 09-29 beside a new buy signal).
+function staleExit(r, group) {
+  if (!r.Exit_Signal) return false;
+  const xd = String(r.Exit_Signal_Date || "").slice(0, 10);
+  if (!xd) return false;
+  if (group === "buy" && xd < effectiveDataDate()) return true;
+  const on = String(r.Recommended_On || "").slice(0, 10);
+  return String(r.Rec_Status || "") === "active" && !!on && xd < on;
+}
+
+// The previous trade, from the Prev_* columns (holding_tracker.PREV_COLUMNS).
+function prevSegmentHtml(r) {
+  const psd = String(r.Prev_Signal_Date || "").slice(0, 10);
+  if (!psd) return "";
+  const ped = String(r.Prev_Entry_Date || "").slice(0, 10);
+  const sig = String(r.Prev_Exit_Signal || "");
+  const parts = [`${mmdd(psd)} 訊號${r.Prev_Was_Signal === false ? "（當時不是買訊）" : ""}`];
+  if (ped) parts.push(`${mmdd(ped)} 開盤 ${fmtPrice(cents(r.Prev_Entry_Open))} 進場`);
+  let tail = "";
+  if (sig) {
+    const px = cents(r.Prev_Exit_Signal_Price);
+    const ret = num(r.Prev_Exit_Ret_Pct);
+    parts.push(`${mmdd(r.Prev_Exit_Signal_Date)} ${EXIT_REASON_TEXT[sig] || sig}${px !== null ? " @" + fmtPrice(px) : ""}${
+      ret !== null ? `，淨 ${fmtSigned(ret, 2)}%` : ""}`);
+    const n = num(r.Sessions_Since_Prev_Exit);
+    if (n !== null) tail = `（距今 ${n} 個交易日）`;
+  } else {
+    parts.push("尚未出場就又出現訊號");
+  }
+  return `<div class="prev-seg">上一段模擬：${esc(parts.join(" → ") + tail)}</div>`;
+}
+
+// Old payloads only: the old streak's exit, shown as history, not as a badge.
+function staleExitHtml(r) {
+  const ed = String(r.Entry_Date || "").slice(0, 10);
+  const fill = cents(r.Entry_Open), px = cents(r.Exit_Signal_Price);
+  const pct = fill && px !== null ? pctOf(px - fill, fill) : null;
+  const sig = String(r.Exit_Signal || "");
+  return `<div class="prev-seg">上一段模擬：${esc(`${ed ? mmdd(ed) + " 進場" : "進場日未知"} → ${
+    mmdd(r.Exit_Signal_Date)} ${EXIT_REASON_TEXT[sig] || sig}${pct !== null ? " " + fmtPct(pct) + "（未扣費稅）" : ""}`)}</div>`;
+}
+
+// --- sizing and fees (P1-3) --------------------------------------------------
+// The durable copy is IndexedDB meta "sizing" = {capital_cents, max_slots,
+// risk_pct}, beside "settings": exportBackup exports every non-private meta
+// row, so the three numbers travel with a backup and runImport validates them.
+// localStorage keeps a second copy (a DB-less private window still remembers
+// them for the session). Every access is wrapped -- a private window or
+// blocked storage throws -- and the in-memory copy, loaded from the DB at
+// boot and replaced on save / import, wins over localStorage.
+const SIZING_KEY = "yt_sizing_v1";
+const SIZING_META = "sizing";
+const SIZING_DEFAULTS = { slots: 8, risk_pct: 1 };
+let SIZING_MEM = null;
+const SIZING_CAPTION = "依你設定的資金與風險自動換算，非投資建議";
+// BACKTEST_LOG M.4. Deliberately no single-slot-count CAGR: the few-slot
+// figures are concentration, not edge.
+const SLOT_GUIDANCE =
+  "格數：建議 5～8 個等權格（預設 8），同一檔只持有一個部位，今天騰出的格子下一個交易日再用；" +
+  "格數越多回撤越淺，避免 1～3 格。NT$20 最低手續費在 5 格約需 NT$70k、8 格約需 NT$112k 資金才不再墊高成本。" +
+  "到 2025 年底這本帳每年約 12%（研究樣本）～17%（線上訊號頻率），2026 年至今是離群的一年，不要拿它當預期（BACKTEST_LOG M.4）。";
+
+function validateSizing(input) {
+  const v = input || {};
+  const errs = {};
+  const str = (x) => (x === null || x === undefined ? "" : String(x)).replace(/,/g, "").trim();
+  const capRaw = str(v.capital), slotsRaw = str(v.slots), riskRaw = str(v.risk_pct);
+  let capital = null, slots = null, risk = null;
+  if (!/^\d{1,9}$/.test(capRaw)) errs.capital = "請填整數金額（新台幣元）";
+  else {
+    capital = Number(capRaw);
+    if (capital < 10000 || capital > 100000000) errs.capital = "資金需介於 10,000 與 100,000,000 元";
+  }
+  if (!/^\d{1,2}$/.test(slotsRaw)) errs.slots = "請填 1～20 的整數";
+  else {
+    slots = Number(slotsRaw);
+    if (slots < 1 || slots > 20) errs.slots = "格數需介於 1 與 20";
+  }
+  if (!/^\d{1,2}(\.\d{1,2})?$/.test(riskRaw)) errs.risk_pct = "請填 0.1～5 的數字（最多兩位小數）";
+  else {
+    risk = Number(riskRaw);
+    if (risk < 0.1 || risk > 5) errs.risk_pct = "單筆風險需介於 0.1% 與 5%";
+  }
+  if (Object.keys(errs).length) return { ok: false, errs };
+  return { ok: true, value: { capital, slots, risk_pct: risk } };
+}
+
+// {capital, slots, risk_pct} <-> the meta row {capital_cents, max_slots,
+// risk_pct}. fromMeta returns null for anything validateSizing refuses.
+function sizingToMeta(v) {
+  return { capital_cents: v.capital * 100, max_slots: v.slots, risk_pct: v.risk_pct };
+}
+
+function sizingFromMeta(m) {
+  if (!m || typeof m !== "object") return null;
+  const cc = Number(m.capital_cents);
+  if (!Number.isInteger(cc) || cc % 100 !== 0) return null;
+  const v = validateSizing({ capital: String(cc / 100), slots: String(m.max_slots), risk_pct: String(m.risk_pct) });
+  return v.ok ? v.value : null;
+}
+
+function loadSizing() {
+  if (SIZING_MEM) {
+    const m = validateSizing(SIZING_MEM);
+    if (m.ok) return m.value;
+  }
+  let obj = null;
+  try {
+    const raw = localStorage.getItem(SIZING_KEY);
+    if (raw) obj = JSON.parse(raw);
+  } catch (e) { obj = null; }
+  if (!obj) return null;
+  const v = validateSizing(obj);
+  return v.ok ? v.value : null;
+}
+
+// true when at least one durable copy was written (IndexedDB is async: its
+// write is started here and a failure only costs the backup copy).
+function saveSizing(value) {
+  SIZING_MEM = value;
+  let kept = false;
+  try {
+    localStorage.setItem(SIZING_KEY, JSON.stringify(value));
+    kept = true;
+  } catch (e) { /* blocked storage: the DB copy below, or memory only */ }
+  if (DB_OK) {
+    try {
+      metaSet(SIZING_META, sizingToMeta(value)).catch(() => {});
+      kept = true;
+    } catch (e) { /* openDB refused synchronously */ }
+  }
+  return kept;
+}
+
+// Shares for one slot: the largest n whose cost fits the slot budget, and the
+// largest whose loss at the stop (price gap + both fees + tax) fits the risk
+// budget; the smaller one wins. Fees step, so each is a binary search over a
+// monotone test rather than a division. Pure: no STATE.
+function sizePosition(priceCents, stopCents, sizing, sched, opts) {
+  const o = opts || {};
+  const capCents = sizing.capital * 100;
+  const slots = sizing.slots;
+  const budgetCents = Math.floor(capCents / slots);
+  const riskCents = Math.floor(capCents * Math.round(sizing.risk_pct * 100) / 10000);
+  const P = priceCents, S = stopCents;
+  const out = {
+    shares: 0, lots: 0, odd: 0, budgetShares: 0, riskShares: 0,
+    buyFeeCents: 0, rtPct: null, minFeeBinds: false, maxLossCents: null,
+    budgetCents, riskCents, slots,
+    slotsFree: Math.max(slots - (o.openCount || 0), 0),
+    held: !!o.held, limit: "", reason: "",
+  };
+  if (!P || P <= 0) { out.limit = "price"; out.reason = out.held ? "held" : "price"; return out; }
+  const largest = (hi, ok) => {
+    let lo = 0;
+    let top = Math.max(hi, 0);
+    while (lo < top) {
+      const mid = Math.floor((lo + top + 1) / 2);
+      if (ok(mid)) lo = mid; else top = mid - 1;
+    }
+    return lo;
+  };
+  out.budgetShares = largest(Math.floor(budgetCents / P),
+    (n) => n * P + feeFor(sched, n * P) <= budgetCents);
+  const stopOk = S !== null && S !== undefined && S > 0 && S < P;
+  if (stopOk) {
+    const lossAt = (n) => n * (P - S) + feeFor(sched, n * P) + feeFor(sched, n * S) + taxFor(sched, n * S);
+    out.riskShares = largest(Math.floor(riskCents / (P - S)), (n) => lossAt(n) <= riskCents);
+  }
+  out.shares = Math.min(out.budgetShares, out.riskShares);
+  if (!stopOk) out.limit = "stop";
+  else if (out.shares === 0) out.limit = out.budgetShares === 0 ? "price" : "risk";
+  else out.limit = out.riskShares < out.budgetShares ? "risk" : "budget";
+  out.lots = Math.floor(out.shares / 1000);
+  out.odd = out.shares % 1000;
+  if (out.shares > 0) {
+    const cons = out.shares * P;
+    out.buyFeeCents = feeFor(sched, cons);
+    out.rtPct = divRound((2 * out.buyFeeCents + taxFor(sched, cons)) * 100000, cons) / 1000;
+    out.minFeeBinds = feeBindsMin(sched, cons);
+    out.maxLossCents = out.shares * (P - S) + out.buyFeeCents +
+      feeFor(sched, out.shares * S) + taxFor(sched, out.shares * S);
+  }
+  out.reason = out.held ? "held" : out.slotsFree <= 0 ? "slots" : out.limit;
+  return out;
+}
+
+// The stop sizing assumes: the recommendation's when there is an active one,
+// else the card's plan stop before entry, else the rule's -20% off the price.
+function sizingStop(r, P) {
+  const init = cents(r.Initial_Stop_Price);
+  if (r.Recommendation_ID && init !== null && String(r.Rec_Status || "") === "active") return init;
+  const st = String(r.Hold_Status || "");
+  const plan = cents(r.Plan_Stop);
+  if (plan !== null && (!st || st === "pending")) return plan;
+  return tickRound(divRound(P * (100 + STRATEGY.stopPct), 100), "down", r.Stock_ID);
+}
+
+function sizingFor(r) {
+  const sz = loadSizing();
+  if (!sz) return null;
+  const init = cents(r.Initial_Buy_Price);
+  const P = init !== null ? init : cents(r.Close_Price);
+  if (!P) return null;
+  const S = sizingStop(r, P);
+  const held = heldIds();
+  const res = sizePosition(P, S, sz, schedule(STATE.settings.fee_schedule),
+    { held: held.has(String(r.Stock_ID)), openCount: held.size });
+  return Object.assign({ sizing: sz, priceCents: P, stopCents: S }, res);
+}
+
+const SIZE_LIMIT_TEXT = { budget: "每格資金", risk: "單筆風險", price: "每格資金", stop: "停損價" };
+
+function sizingHtml(r, s) {
+  if (!s) {
+    return `<div class="sizing hint">尚未設定資金：設定後會換算建議股數（${esc(SIZING_CAPTION)}）。` +
+      `<div class="btns">${btn("sizing", "設定資金與格數", "")}</div></div>`;
+  }
+  const sz = s.sizing;
+  const lines = [];
+  if (s.shares > 0) {
+    lines.push(`<b>建議股數 ${s.shares.toLocaleString("en-US")} 股</b>（${s.lots} 張 + ${s.odd} 股零股）`);
+  } else if (s.limit === "stop") {
+    lines.push("<b>停損價不低於參考價，無法換算股數</b>");
+  } else if (s.limit === "price") {
+    lines.push(`<b>每格資金 NT$${esc(fmtCents(s.budgetCents))} 買不起 1 股</b>`);
+  } else {
+    lines.push(`<b>單筆風險上限 NT$${esc(fmtCents(s.riskCents))} 連 1 股都不夠</b>（每股到停損約 NT$${esc(fmtCents(s.priceCents - s.stopCents))}）`);
+  }
+  lines.push(`以參考價 ${esc(fmtPrice(s.priceCents))}、停損 ${esc(fmtPrice(s.stopCents))} 估算；每格 NT$${esc(fmtCents(s.budgetCents))}（資金 ÷ ${sz.slots} 格）、單筆風險上限 ${esc(String(sz.risk_pct))}%＝NT$${esc(fmtCents(s.riskCents))}，取較小者（${esc(SIZE_LIMIT_TEXT[s.limit] || s.limit)}限制）`);
+  if (s.rtPct !== null) {
+    lines.push(`手續費＋稅 來回約 ${esc(s.rtPct.toFixed(3))}%（回測假設 0.585%）`);
+  }
+  if (s.minFeeBinds) {
+    lines.push(`<span class="warn">買進金額低於約 NT$14,035，NT$20 最低手續費會墊高成本</span>`);
+  }
+  if (s.maxLossCents !== null) {
+    lines.push(`觸停損最大虧損 約 NT$${esc(fmtCents(s.maxLossCents))}（含費稅，跳空跌破時會更多）`);
+  }
+  if (s.held) lines.push(`<span class="warn">你已持有此檔：同一檔只持有一個部位</span>`);
+  else if (s.slotsFree <= 0) lines.push(`<span class="warn">${sz.slots} 格已滿：騰出的格子下一個交易日再用</span>`);
+  else lines.push(`可用倉位 ${s.slotsFree}/${sz.slots}`);
+  return `<div class="sizing plan">${lines.join("<br>")}` +
+    `<div class="hint">${esc(SIZING_CAPTION)}；實際成交價是隔日開盤，股數請自行填寫。</div>` +
+    `<div class="btns">${btn("sizing", "調整資金設定", "")}</div></div>`;
+}
+
+function openSizingForm() {
+  const cur = loadSizing();
+  const body =
+    `<div class="hint">${esc(SIZING_CAPTION)}。設定只存在這支手機，會跟著「匯出備份」一起帶走，不會上傳。</div>` +
+    field("capital", "投入這套規則的資金（新台幣元）", cur ? cur.capital : "",
+      { inputmode: "numeric", hint: "整數，10,000～100,000,000" }) +
+    field("slots", "格數（同時最多持有幾檔）", cur ? cur.slots : SIZING_DEFAULTS.slots,
+      { inputmode: "numeric", hint: "1～20，預設 8；建議 5～8" }) +
+    field("risk_pct", "單筆觸停損時最多虧損資金的 %", cur ? cur.risk_pct : SIZING_DEFAULTS.risk_pct,
+      { inputmode: "decimal", hint: "0.1～5，預設 1" }) +
+    `<div class="plan">${esc(SLOT_GUIDANCE)}</div>`;
+  openModal("資金設定", body, { submit: "sizing-save", submitLabel: "儲存" });
+}
+
+function saveSizingForm() {
+  const modal = $("#modal");
+  const chk = validateSizing(readForm(modal));
+  if (!chk.ok) {
+    showErrors(modal, chk.errs);
+    toast("資金設定有誤，未儲存");
+    return;
+  }
+  const kept = saveSizing(chk.value);
+  closeModal();
+  toast(kept ? "已儲存資金設定" : "已套用；這個瀏覽器無法永久保存，下次開啟需重設");
+  render();
+}
+
+function sizingSummaryText() {
+  const sz = loadSizing();
+  if (!sz) return "尚未設定";
+  return `資金 NT$${sz.capital.toLocaleString("en-US")}｜${sz.slots} 格｜單筆風險 ${sz.risk_pct}%`;
+}
+
+// --- order guide (P1-4) ------------------------------------------------------
+function limitUpCents(r) {
+  const c = cents(r.Close_Price);
+  if (!c) return null;
+  return tickRound(divFloor(c * 110, 100), "down", r.Stock_ID);
+}
+
+function exitReminderText(r, rv) {
+  const stop = rv && rv.pending ? rv.stop : cents(r.Plan_Stop);
+  const fillTarget = cents(r.Fill_Target_Price);
+  const target = rv && rv.pending ? rv.target
+    : (fillTarget !== null ? fillTarget : cents(r.Target_Price));
+  return `停損 ${stop !== null ? fmtPrice(stop) : "-"} 跌破先出、停利 ${target !== null ? fmtPrice(target) : "-"}（+${STRATEGY.targetPct}%）；` +
+    `收盤站上 +${STRATEGY.armPct}% 後，隔一個交易日起停損上調到 +${STRATEGY.lockPct}%；` +
+    `第 ${STRATEGY.lateFrom} 天起收盤仍有 +${STRATEGY.lateGainPct}% 以上就隔日開盤收下；` +
+    `基本抱 ${STRATEGY.horizon} 個交易日，第 ${STRATEGY.horizon} 天收盤再判斷是否續抱（最晚第 ${STRATEGY.cap} 天）。賣出一律掛限價`;
+}
+
+function orderGuideHtml(r, size, rv) {
+  const sid = String(r.Stock_ID);
+  const valid = String(r.Rec_Valid_Until || "").slice(0, 10);
+  const when = valid ? `${valid}（下一個交易日）開盤前` : "下一個交易日開盤前";
+  const lu = limitUpCents(r);
+  const known = !!(size && size.shares > 0);
+  const steps = [];
+  steps.push(`<li>時間：${esc(when)}。規則假設以隔日開盤價進場。</li>`);
+  if (!known || size.lots > 0) {
+    steps.push(`<li class="ord-lot">整股${known ? ` ${size.lots} 張` : "（1 張 = 1,000 股）"}：${esc(ORDER_RULES.auction)}。` +
+      `要確保開盤成交，限價可掛到你願意付的上限${lu ? esc(`（漲停價約 ${fmtPrice(lu)}）`) : ""}；` +
+      `掛在收盤價附近或以下，開高時就買不到。</li>`);
+  }
+  if (!known || size.odd > 0) {
+    steps.push(`<li class="ord-odd">零股${known ? ` ${size.odd} 股` : ""}：${esc(ORDER_RULES.odd_note)}，與整股分開下單。` +
+      `${esc(ORDER_RULES.odd_cost)}。${esc(ORDER_RULES.odd_no_open_limit)}。${esc(ORDER_RULES.odd_min_fee)}。</li>`);
+  }
+  const rg = restrictionGuidance(r);
+  if (rg) steps.push(`<li class="ord-restrict">${rg}</li>`);
+  steps.push(`<li>出場：${esc(exitReminderText(r, rv))}。</li>`);
+  const open = STATE.orderOpen[sid] !== false;
+  return `<details class="order" data-order="${esc(sid)}"${open ? " open" : ""}>
+    <summary>下單步驟（制度資料 ${esc(ORDER_RULES.as_of)}）</summary>
+    <ol class="steps">${steps.join("")}</ol>
+    <div class="hint">${esc(ORDER_RULES.anchor_note)}。處置／注意股名單約在前一晚（上櫃約 23:30、上市約隔日清晨）才公告，下午的清單看不到隔天才開始的處置，下單前請在券商 App 確認。${esc(ORDER_RULES.odd_change_note)}；${esc(ORDER_RULES.source)}。</div>
+  </details>`;
+}
+
+// Hold-group cards: only the exit side -- today's action.
+function exitGuideHtml(r) {
+  const st = String(r.Hold_Status || "");
+  const sig = String(r.Exit_Signal || "");
+  let head = "";
+  if (st === "exit_today" || exitIsToday(r)) {
+    head = `今天的動作：已觸發「${EXIT_REASON_TEXT[sig] || "出場"}」，下一個交易日開盤以限價賣出（要確保成交可掛低一點，成交價是開盤競價結果）`;
+    if (provisionalTimeExit(r)) {
+      const asOf = String(((STATE.meta && STATE.meta.regime) || {}).as_of_date || "").slice(0, 10);
+      head += `。這筆期滿出場是暫定的：大盤資料只到 ${mmdd(asOf)}，若 ${mmdd(r.Exit_Signal_Date)} 大盤屬於「跌破 20 日均線、仍站上 60 日均線」的多頭回檔，規則會改為續抱；下一次掃描會確認，確認前照期滿處理`;
+    }
+  } else if (st === "overdue") {
+    head = `資料缺漏：超過 ${STRATEGY.cap} 天上限仍無出場紀錄，請以「持倉」頁與券商成交為準`;
+  } else if (st === "delay") {
+    head = `續抱中（第 ${STRATEGY.horizon} 天後延長）：每天收盤檢查，最晚第 ${STRATEGY.cap} 天出場`;
+  } else if (st === "holding") {
+    const stop = cents(r.Plan_Stop);
+    head = `續抱：停損 ${stop !== null ? fmtPrice(stop) : "-"}，跌破先出（下一個交易日開盤以限價處理）`;
+  } else if (st === "pending" || !st) {
+    const v = buyVerdict(r);
+    const rv = recView(r, "hold");
+    head = rv.missed
+      ? "沒有模擬進場紀錄：建議的進場日已過，規則不會補買；若你自己有買，以「持倉」頁為準"
+      : v.ok ? "待進場：下一個交易日開盤照規則進場"
+      : `尚未進場，今天不是買點（${v.text}）：規則只在可買訊號後的第一個開盤進場，不要自行補買；若你自己有買，以「持倉」頁為準`;
+  } else if (st === "exited") {
+    head = "這筆模擬交易已出場";
+  }
+  const rn = restrictionNote(r);
+  return `<div class="plan exit-guide">${esc(head)}${rn ? `<br><span class="hint">${esc(rn)}</span>` : ""}` +
+    `<br><span class="hint">賣出一律掛限價；卡片價位以整股開盤價計算，你自己的持倉以「持倉」頁為準。</span></div>`;
+}
+
+// --- AI report marker (P1-7 phone half) --------------------------------------
+// meta.report_sources[market].source says where the text came from; an older
+// payload has only the text, whose template header is recognisable.
+function aiReportView(market) {
+  const reports = STATE.reports || {};
+  const sources = (STATE.meta && STATE.meta.report_sources) || {};
+  const key = reports[market] ? market : (reports.ALL ? "ALL" : market);
+  const text = String(reports[key] || "");
+  // {market: {source, model, ...}} (result_export._report_sources); a bare
+  // {market: "template"} string is read the same way.
+  const raw = sources && typeof sources === "object" ? sources[key] : null;
+  const srcObj = typeof raw === "string" ? { source: raw } : (raw && typeof raw === "object" ? raw : null);
+  const source = srcObj && srcObj.source ? String(srcObj.source) : "";
+  const template = source ? source === "template" : /^\s*【(模板|本地)報告/.test(text);
+  return { key, text, template, fellBack: key !== market, source,
+           model: srcObj && srcObj.model ? String(srcObj.model) : "" };
+}
+
+// --- system record (P1-5; meta.live_record) ----------------------------------
+function bucketLine(b) {
+  if (!b || !b.closed) return `0 筆已結束${b && b.open ? `，進行中 ${b.open} 筆` : ""}`;
+  return `${b.closed} 筆已結束 · 勝率 ${fmt(b.win_pct, 1)}% · 平均 ${fmtSigned(b.mean_pct, 2)}% · 合計 ${fmtSigned(b.sum_pct, 1)}%${
+    b.open ? `；進行中 ${b.open} 筆` : ""}`;
+}
+
+function closedStats(list) {
+  const c = list.filter((t) => num(t.ret) !== null);
+  const sum = c.reduce((a, t) => a + num(t.ret), 0);
+  return {
+    n: c.length,
+    win: c.length ? 100 * c.filter((t) => num(t.ret) > 0).length / c.length : null,
+    mean: c.length ? sum / c.length : null,
+    sum,
+  };
+}
+
+// Cumulative return of equal-sized trades, in %, with the two indices when
+// the record carries a benchmark. x is the exit DATE when every trade has
+// one (and the index lines can share the axis), else the trade's order.
+function equitySvg(rec, capped) {
+  const closed = ((rec.tradable && rec.tradable.trades) || []).filter((t) => num(t.ret) !== null);
+  if (!closed.length) return "";
+  const dated = closed.every((t) => dayNum(t.exit_date) !== null);
+  const list = closed.slice().sort((a, b) => (dated
+    ? String(a.exit_date).localeCompare(String(b.exit_date)) || String(a.sig).localeCompare(String(b.sig))
+    : String(a.sig).localeCompare(String(b.sig))));
+  const pts = [];
+  let cum = 0;
+  if (dated) {
+    const x0 = dayNum(rec.since);
+    pts.push({ x: x0 !== null ? x0 : dayNum(list[0].exit_date), y: 0 });
+    for (const t of list) { cum += num(t.ret); pts.push({ x: dayNum(t.exit_date), y: cum }); }
+  } else {
+    pts.push({ x: 0, y: 0 });
+    list.forEach((t, i) => { cum += num(t.ret); pts.push({ x: i + 1, y: cum }); });
+  }
+  const lines = [{ cls: "eq-line", pts }];
+  const series = rec.bench && Array.isArray(rec.bench.series) ? rec.bench.series : null;
+  if (dated && series && series.length > 1) {
+    [[1, "eq-taiex"], [2, "eq-otc"]].forEach(([col, cls]) => {
+      const vals = series.filter((p) => Array.isArray(p) && num(p[col]) !== null && dayNum(p[0]) !== null);
+      if (vals.length < 2) return;
+      const base = num(vals[0][col]);
+      if (!base) return;
+      lines.push({ cls, pts: vals.map((p) => ({ x: dayNum(p[0]), y: (num(p[col]) / base - 1) * 100 })) });
+    });
+  }
+  let xmin = Infinity, xmax = -Infinity, ymin = 0, ymax = 0;
+  for (const ln of lines) {
+    for (const p of ln.pts) {
+      xmin = Math.min(xmin, p.x); xmax = Math.max(xmax, p.x);
+      ymin = Math.min(ymin, p.y); ymax = Math.max(ymax, p.y);
+    }
+  }
+  if (!(xmax > xmin)) xmax = xmin + 1;
+  if (!(ymax > ymin)) ymax = ymin + 1;
+  const W = 320, H = 140, pad = 6;
+  const sx = (x) => (pad + (x - xmin) / (xmax - xmin) * (W - 2 * pad)).toFixed(1);
+  const sy = (y) => (H - pad - (y - ymin) / (ymax - ymin) * (H - 2 * pad)).toFixed(1);
+  const poly = lines.map((ln) =>
+    `<polyline class="${ln.cls}" points="${ln.pts.map((p) => sx(p.x) + "," + sy(p.y)).join(" ")}" />`).join("");
+  const legend = [`<span class="lg eq-line">系統（${capped ? `只含保留的最近 ${list.length} 筆已結束，` : ""}每筆等額累計 ${esc(fmtSigned(cum, 1))}%）</span>`];
+  if (lines.some((l) => l.cls === "eq-taiex")) legend.push(`<span class="lg eq-taiex">加權指數</span>`);
+  if (lines.some((l) => l.cls === "eq-otc")) legend.push(`<span class="lg eq-otc">櫃買指數</span>`);
+  return `<svg class="eq" viewBox="0 0 ${W} ${H}" data-n="${list.length}" role="img" aria-label="系統訊號累計報酬">` +
+    `<line class="eq-zero" x1="${pad}" x2="${W - pad}" y1="${sy(0)}" y2="${sy(0)}" />${poly}</svg>` +
+    `<div class="legend">${legend.join("")}<span class="lg-note">${dated ? "橫軸：出場日" : "橫軸：交易順序"}；單位 %，每筆等額、不複利</span></div>`;
+}
+
+function benchHtml(b) {
+  if (!b || typeof b !== "object") return "";
+  const parts = [];
+  if (num(b.taiex_pct) !== null) {
+    parts.push(`加權指數 ${fmtSigned(b.taiex_pct, 2)}%（${mmdd(b.taiex_from_date)}→${mmdd(b.taiex_to_date)}）`);
+  }
+  if (num(b.otc_pct) !== null) {
+    parts.push(`櫃買指數 ${fmtSigned(b.otc_pct, 2)}%（${mmdd(b.otc_from_date)}→${mmdd(b.otc_to_date)}）`);
+  }
+  const w = b.windows || {};
+  const cmp = [];
+  for (const [key, label] of [["otc", "櫃買"], ["taiex", "加權"]]) {
+    const n = num(w[key + "_n"]);
+    if (!n) continue;
+    cmp.push(`${label}：同樣 ${n} 筆的持有期間，系統平均 ${fmtSigned(w[key + "_trade_mean_pct"], 2)}%、指數平均 ${fmtSigned(w[key + "_mean_pct"], 2)}%`);
+  }
+  if (!parts.length && !cmp.length) return "";
+  return `<div class="hint">同期指數：${esc(parts.join("；") || "無資料")}${
+    cmp.length ? "<br>" + esc(cmp.join("；")) : ""}<br>指數是收盤價、不含股息；每筆期間從訊號日收盤到出場日收盤。</div>`;
+}
+
+function systemRecordHtml() {
+  const rec = STATE.meta && STATE.meta.live_record;
+  const head = `<div class="sec sysrec"><h2>系統訊號紀錄（非你的實際損益）</h2>`;
+  if (!rec || !rec.tradable) {
+    return head + `<div class="hint">本次掃描沒有附系統訊號紀錄（meta.live_record）。</div></div>`;
+  }
+  const t = rec.tradable;
+  const trades = Array.isArray(t.trades) ? t.trades : [];
+  const since = String(rec.since || "");
+  const headline = `上線以來（${mmdd(since) || "?"} 起，到 ${mmdd(rec.through) || "?"}）符合完整買進規則：${bucketLine(t)}`;
+  // live_record.TRADES_KEPT: the payload lists only the most recent trades.
+  // Everything computed from the list (curve, batch exclusion, reasons) then
+  // covers those alone and says so; the headline is the backend's full count.
+  const total = (num(t.closed) || 0) + (num(t.open) || 0);
+  const capped = trades.length < total;
+  const keptNote = capped ? `逐筆只保留最近 ${trades.length} 筆（全部 ${total} 筆），下面的曲線、排除批次與出場原因只就這 ${trades.length} 筆計算` : "";
+  const batch = since ? trades.filter((x) => String(x.sig || "") === since) : [];
+  let batchLine = "";
+  if (batch.length) {
+    const rest = closedStats(trades.filter((x) => String(x.sig || "") !== since));
+    batchLine = `起始日（${mmdd(since)}）批次 ${batch.length} 筆是上線當天一次列入的訊號；排除後${capped ? `（保留的 ${trades.length} 筆內）` : ""}：${rest.n} 筆已結束` +
+      (rest.n ? `，勝率 ${fmt(rest.win, 1)}%，平均 ${fmtSigned(rest.mean, 2)}%，合計 ${fmtSigned(rest.sum, 2)}%` : "");
+  }
+  const byReason = {};
+  for (const x of trades) {
+    const k = num(x.ret) === null ? "" : String(x.exit || "");
+    (byReason[k] = byReason[k] || []).push(x);
+  }
+  const order = ["tp", "lock", "late", "time", "stop", ""];
+  for (const k of Object.keys(byReason)) if (!order.includes(k)) order.splice(order.length - 1, 0, k);
+  const reasonRows = order.filter((k) => byReason[k]).map((k) => {
+    const s = closedStats(byReason[k]);
+    return `<tr><td>${esc(EXIT_REASON_TEXT[k] || k)}</td><td>${byReason[k].length}</td>` +
+      `<td>${s.n ? esc(fmtSigned(s.mean, 2)) + "%" : "-"}</td><td>${s.n ? esc(fmtSigned(s.sum, 2)) + "%" : "-"}</td></tr>`;
+  }).join("");
+  const reasonTbl = reasonRows
+    ? `<table class="tbl reasons"><thead><tr><th>出場原因${capped ? `（最近 ${trades.length} 筆）` : ""}</th><th>筆數</th><th>平均</th><th>合計</th></tr></thead><tbody>${reasonRows}</tbody></table>`
+    : "";
+  const tradeRows = trades.slice().sort((a, b) => String(b.sig).localeCompare(String(a.sig))).map((x) => {
+    const tags = (since && String(x.sig || "") === since ? `<span class="tag">起始日批次</span>` : "") +
+      (x.restriction && x.restriction !== "none" && RESTRICT_TEXT[x.restriction]
+        ? `<span class="tag warn">${esc(RESTRICT_TEXT[x.restriction])}</span>` : "");
+    const res = num(x.ret) === null ? "進行中"
+      : `${EXIT_REASON_TEXT[x.exit] || x.exit || "出場"} ${fmtSigned(x.ret, 2)}%`;
+    return `<tr><td>${esc(mmdd(x.sig))} ${esc(x.sid)} ${esc(x.name || stockName(x.sid) || "")}${tags}</td>` +
+      `<td class="${signClass(x.ret)}">${esc(res)}</td><td>${num(x.bars) === null ? "-" : esc(String(x.bars)) + " 日"}</td></tr>`;
+  }).join("");
+  const byR = rec.by_restriction && typeof rec.by_restriction === "object"
+    ? Object.entries(rec.by_restriction).filter(([, b]) => b && (b.closed || b.open)) : [];
+  const byRLine = byR.some(([k]) => k !== "unrecorded" && k !== "none")
+    ? `<div class="hint">依進場時的交易限制：${esc(byR.map(([k, b]) =>
+        `${k === "unrecorded" ? "未記錄" : k === "none" ? "無限制" : RESTRICT_TEXT[k] || k} ${bucketLine(b)}`).join("；"))}</div>` : "";
+  return head +
+    `<div class="plan">${esc(headline)}${rec.built_at ? `<br><span class="hint">計算於 ${esc(rec.built_at)}${rec.carried_forward ? "，沿用上一次掃描" : ""}</span>` : ""}</div>` +
+    (keptNote ? `<div class="hint" data-capped="${trades.length}">${esc(keptNote)}</div>` : "") +
+    (batchLine ? `<div class="hint">${esc(batchLine)}</div>` : "") +
+    equitySvg(rec, capped) +
+    benchHtml(rec.bench) +
+    reasonTbl +
+    `<div class="hint">名單上但未過 CORE+（未計入）：${esc(bucketLine(rec.not_core))}<br>CORE+ 但大盤未順風（未計入）：${esc(bucketLine(rec.regime_closed))}</div>` +
+    byRLine +
+    (tradeRows ? `<details class="strategy dim"><summary>逐筆 ${trades.length} 筆${capped ? "（只列最近的）" : ""}</summary>` +
+      `<table class="tbl"><tbody>${tradeRows}</tbody></table></details>` : "") +
+    `<div class="hint">這是規則在這支掃描器發出的訊號上的模擬：隔日開盤進場、同一套出場、含手續費與證交稅；不是你的帳本。你自己的成交與損益在下方。</div>` +
+    `</div>`;
+}
+
+// --- research-page lines for the new meta blocks ----------------------------
+function recMetaText(rec) {
+  if (!rec || typeof rec !== "object") return "本次掃描未提供";
+  if (rec.error) return "錯誤：" + rec.error;
+  const n = (k) => Number(rec[k]) || 0;
+  return `新建 ${n("created")}、附上 ${n("attached")}、結案 ${n("closed")}、失效 ${n("expired")}、撤回 ${n("superseded")}` +
+    (n("deferred") ? `、延後結案 ${n("deferred")}` : "") +
+    (n("backfilled") ? `、補建 ${n("backfilled")}` : "");
+}
+
+function eventsMetaText(ev) {
+  if (!ev || typeof ev !== "object") return "本次掃描未提供";
+  const parts = [];
+  parts.push(ev.ok === false ? "部分來源未取得" : "正常");
+  if (ev.revenue_month_latest) parts.push(`最新營收月份 ${ev.revenue_month_latest}`);
+  if (ev.next_revenue_deadline) parts.push(`下次月營收截止 ${ev.next_revenue_deadline}`);
+  const rd = ev.next_report_deadline;
+  if (rd && rd.date) parts.push(`財報截止 ${rd.date}${rd.what ? "（" + rd.what + (rd.approximate ? "，約略" : "") + "）" : ""}`);
+  const c = ev.coverage;
+  if (c && typeof c === "object" && c.rows) {
+    parts.push(`涵蓋 ${c.rows} 列：營收 ${c.revenue || 0}、除權息 ${c.exdiv || 0}、法說 ${c.conf || 0}`);
+  }
+  if (ev.updated_at) parts.push(`更新 ${ev.updated_at}`);
+  return parts.join("｜");
+}
+
+function reportSourcesText(rs) {
+  if (!rs || typeof rs !== "object" || !Object.keys(rs).length) return "未提供（舊版掃描，模板以內文開頭辨識）";
+  const label = { gemini: "Gemini", groq: "Groq", template: "模板（非 AI）" };
+  return Object.entries(rs).map(([k, v]) => {
+    const s = typeof v === "string" ? { source: v } : (v && typeof v === "object" ? v : {});
+    return `${k}：${label[s.source] || s.source || "?"}${s.model ? " " + s.model : ""}${s.error ? "（" + s.error + "）" : ""}`;
+  }).join("｜");
+}
+
+// The buy form's share hint: the suggestion, never a pre-filled value.
+function buyQtyHint(row) {
+  const base = "1 張 = 1,000 股；零股請直接填股數";
+  if (!row) return base;
+  const s = sizingFor(row);
+  if (!s || !(s.shares > 0)) return base;
+  return `${base}。依你的資金設定建議 ${s.shares.toLocaleString("en-US")} 股（${s.lots} 張 + ${s.odd} 股），請填實際成交股數`;
+}
+
+// openDetail's per-name history block.
+function nameHistoryDetail(sid) {
+  const h = nameHistory(sid);
+  if (h === null) return `<div class="hint">本次掃描沒有附系統訊號紀錄。</div>`;
+  if (!h.length) return `<div class="hint">近期無系統訊號紀錄</div>`;
+  return `<ul class="hist">${h.slice().reverse().map((e) => `<li>${esc(historyEntryText(e))}</li>`).join("")}</ul>` +
+    `<div class="hint">系統模擬（隔日開盤進場、同一套出場、含費稅），最多列最近 5 次；不是你的成交。</div>`;
+}
+
 // --- 11.2 今日建議 -----------------------------------------------------------
 function renderPicks() {
-  const rows = filteredRows();
-  const ready = rows.filter((r) => buyVerdict(r).ok);
-  const others = rows.filter((r) => !buyVerdict(r).ok);
+  const g = pickGroups();
   const reg = regimeView();
+  const buy = viewRows(g.buy);
+  // Hold: today's actions first; the chosen sort orders within each tier.
+  const hold = viewRows(g.hold).map((r, i) => [holdPriority(r), i, r])
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]);
+  const ref = viewRows(g.ref);
+  const shown = buy.length + hold.length + ref.length;
 
   const controls = `
     <div class="controls">
@@ -2098,29 +3259,44 @@ function renderPicks() {
         `<button type="button" class="chip ${STATE.market === k ? "on" : ""}" data-act="market" data-market="${k}">${k === "ALL" ? "全部" : k}</button>`).join("")}</div>
       <select class="sort" data-act="sort">${SORTS.map(([label], i) =>
         `<option value="${i}"${i === STATE.sortIndex ? " selected" : ""}>${esc(label)}</option>`).join("")}</select>
-      <span class="count">${rows.length} 檔</span>
+      <span class="count">${shown} 檔</span>
     </div>
     <input id="search" class="search" type="search" placeholder="搜尋代號 / 名稱" value="${esc(STATE.query)}" data-act="search" />`;
 
-  const banner = `<div class="notice ${reg.enterOk ? "ok" : "warn"}">${esc(reg.text)}${
-    reg.asOf ? esc(` · 判定資料日 ${reg.asOf}`) : ""}</div>` +
-    exitSignalSummary(rows) +
+  const banner = listStampHtml() +
+    `<div class="funnel">${esc(picksSummaryText(g))}</div>` +
+    `<div class="notice ${reg.enterOk ? "ok" : "warn"}">${esc(reg.text)}${
+      reg.asOf ? esc(` · 判定資料日 ${reg.asOf}`) : ""}</div>` +
     `<div class="hint">買進資格由後端 Buy_Ready / Buy_Block 決定，本畫面只會把過期資料降級，不會把「不可買」改成「可買」。每張卡片的「停損（跌破先出）」是唯一要盯的價位。</div>`;
 
-  const readyHtml = ready.length
-    ? ready.map(pickCard).join("")
-    : `<div class="empty-inline">今日 0 檔符合完整買進規則${reg.enterOk ? "（資料源正常，屬正常空手日）" : "（原因：" + esc(reg.text) + "）"}。</div>`;
+  const ai = aiReportView(STATE.market);
+  const aiHtml = `<details class="strategy dim"><summary>AI 報告${ai.key === "ALL" ? "" : "（" + esc(ai.key) + "）"}${
+      ai.template ? ` <span class="tag warn">模板·非 AI</span>` : ""}</summary>` +
+    `<div class="strategy-body">${esc(ai.text || "（本次掃描沒有 AI 報告；於雲端設定 API 金鑰後即會出現）")}</div>` +
+    (ai.template ? `<div class="hint">這段是 AI 服務無法使用時由程式套版產生的摘要，不是 AI 的判讀。</div>` : "") +
+    (ai.fellBack && ai.text ? `<div class="hint">這個市場沒有單獨的報告，顯示的是全市場版本。</div>` : "") +
+    `</details>`;
 
-  const aiText = STATE.reports[STATE.market] || STATE.reports.ALL || "";
-  const ai = `<details class="strategy dim"><summary>AI 報告${STATE.market === "ALL" ? "" : "（" + esc(STATE.market) + "）"}</summary>` +
-    `<div class="strategy-body">${esc(aiText || "（本次掃描沒有 AI 報告；於雲端設定 API 金鑰後即會出現）")}</div></details>`;
+  const buyHtml = buy.length
+    ? buy.map((r) => pickCard(r, "buy")).join("")
+    : `<div class="empty-inline">今日 0 檔符合完整買進規則${reg.enterOk ? "（資料源正常，屬正常空手日）" : "（原因：" + esc(reg.text) + "）"}。</div>`;
+  const holdLive = hold.filter((r) => !staleExit(r, "hold"));
+  const holdHtml = hold.length
+    ? exitSignalSummary(holdLive) + hold.map((r) => pickCard(r, "hold")).join("")
+    : `<div class="empty-inline">目前沒有模擬持有中、待進場或你已持有的名單股。</div>`;
+  // Forced open while searching or filtering to TSE: the result is in here.
+  const forced = ref.length > 0 && (!!STATE.query.trim() || STATE.market === "TSE");
+  const refOpen = STATE.refOpen || forced;
 
   document.getElementById("page-picks").innerHTML =
-    banner + controls +
-    `<div class="sec"><h2>符合買進規則 ${ready.length}</h2>${readyHtml}</div>` +
-    `<div class="sec"><h2>其他候選 ${others.length}（附不成立原因）</h2>${
-      others.length ? others.map(pickCard).join("") : `<div class="empty-inline">沒有其他候選。</div>`}</div>` +
-    ai;
+    banner + aiHtml + controls +
+    `<section class="sec" data-group="buy"><h2>今日可買 ${buy.length}</h2>${buyHtml}</section>` +
+    `<section class="sec" data-group="hold"><h2>模擬持有中（今天動作） ${hold.length}</h2>${holdHtml}</section>` +
+    `<details class="grp" data-group="ref"${refOpen ? " open" : ""}${forced ? " data-forced" : ""}>` +
+      `<summary>參考（上市、不可買，${ref.length} 檔）</summary>` +
+      `<div class="hint">規則只買上櫃前 ${N_ENTER_UI} 名且過 CORE+ 的新訊號；這裡是名單上其他的股票，每張卡片附不成立原因。</div>` +
+      (ref.length ? ref.map((r) => pickCard(r, "ref")).join("") : `<div class="empty-inline">沒有其他候選。</div>`) +
+    `</details>`;
 
   const box = document.getElementById("search");
   if (box) {
@@ -2129,8 +3305,10 @@ function renderPicks() {
   }
 }
 
-function filteredRows() {
-  let rows = STATE.rows;
+// The market filter, the search box and the chosen sort, over any list.
+// Sorting changes the view, never the recommendation (report 7.4).
+function viewRows(list) {
+  let rows = list || [];
   if (STATE.market !== "ALL") rows = rows.filter((r) => String(r.Market) === STATE.market);
   const q = STATE.query.trim().toLowerCase();
   if (q) {
@@ -2139,13 +3317,25 @@ function filteredRows() {
   }
   const [, key, dir] = SORTS[STATE.sortIndex];
   return rows.slice().sort((a, b) => {
-    if (key === "rank") return a._rank - b._rank;
+    if (key === "rank") return (a._rank || 9999) - (b._rank || 9999);
     const av = num(a[key]), bv = num(b[key]);
     if (av === null && bv === null) return 0;
     if (av === null) return 1;
     if (bv === null) return -1;
     return dir === "asc" ? av - bv : bv - av;
   });
+}
+
+function filteredRows() {
+  return viewRows(STATE.rows);
+}
+
+// A row from today's list or the tracked set -- never the whole-market file,
+// whose rows carry no recommendation and no plan.
+function listRowFor(stockId) {
+  const id = String(stockId);
+  return STATE.rows.find((x) => String(x.Stock_ID) === id) ||
+         STATE.tracked.find((x) => String(x.Stock_ID) === id) || null;
 }
 
 // --- exit plan columns (scanner/holding_tracker.py, 2026-09-14) -------------
@@ -2320,11 +3510,15 @@ function exitSignalSummary(rows) {
     `⚠ ${hit.length} 檔已觸發出場訊號（停損/鎖利 ${stops}、目標/期滿 ${hit.length - stops}）· 若持有請先出場，卡片上有日期與價位`);
 }
 
-function pickCard(r) {
+function pickCard(r, group) {
+  const grp = group || pickGroup(r, heldIds());
   const v = buyVerdict(r);
   const sc = rankScore();
   const held = STATE.positions.some((p) =>
     p.stock_id === String(r.Stock_ID) && p.status === "open");
+  const rv = recView(r, grp);
+  const stale = staleExit(r, grp);
+  const st = String(r.Hold_Status || "");
 
   // Report section 8 / 5.1: the FIXED first-day price and today's recomputed
   // reference are two different facts and must never share a column name.
@@ -2333,9 +3527,28 @@ function pickCard(r) {
   const close = cents(r.Close_Price);
   const dataDate = String(r.Data_Date || "").slice(0, 10);
 
+  // Which levels the card prints. A recommendation still waiting for its
+  // entry -- or a row whose plan columns still describe an OLDER trade --
+  // shows the recommendation's own fixed stop and target; an entered row
+  // shows the fill-based ones.
+  const useRec = rv.stop !== null && (rv.pending || (stale && rv.status === "active"));
+  const entered = !stale && ["holding", "delay", "exit_today", "overdue", "exited"].includes(st);
+  const fillTarget = cents(r.Fill_Target_Price);
+  const stopKv = useRec
+    ? kv("停損（跌破先出）", esc(fmtPrice(rv.stop)), "",
+         "建議當日固定；成交後改以成交價 × 0.80 為準，只升不降")
+    : planStopKv(r);
+  const targetKv = useRec && rv.target !== null
+    ? kv("停利目標", esc(fmtPrice(rv.target)), "gold", `建議當日固定（+${STRATEGY.targetPct}%）；成交後改以成交價計算`)
+    : entered && fillTarget !== null
+      ? kv("停利目標", esc(fmtPrice(fillTarget)), "gold", `推估成交價 ${fmtPrice(cents(r.Entry_Open))} +${STRATEGY.targetPct}%`)
+      : kv("參考停利目標", esc(fmtPrice(cents(r.Target_Price))), "gold", "條件價，不代表已達成");
+
   const badge = v.ok
     ? `<span class="verdict ok">可買</span>`
     : `<span class="verdict no">不可買 · ${esc(v.text)}</span>`;
+  const holdChip = grp === "hold" && HOLD_TEXT[st] && !stale
+    ? `<span class="verdict held">${esc(HOLD_TEXT[st])}</span>` : "";
 
   const grid =
     kv("最新收盤價", esc(fmtPrice(close)), "", dataDate ? `資料日 ${dataDate}` : "") +
@@ -2344,34 +3557,62 @@ function pickCard(r) {
       : kv("首日建議價", "-", "", "後端尚未提供固定首日價")) +
     kv("最新觀察參考", esc(fmtPrice(latestRef)), "", "每次掃描重算，非新的買進指令") +
     kv("停損距離%", esc(fmt(r.Risk_Pct, 1, "%")), "", "價格到停損的距離，不是虧損機率") +
-    planStopKv(r) +
-    planAddKv(r) +
-    kv("參考停利目標", esc(fmtPrice(cents(r.Target_Price))), "gold", "條件價，不代表已達成") +
-    (cents(r.Scale_Out_Price) === null ? "" :
+    stopKv +
+    (stale || useRec ? "" : planAddKv(r)) +
+    targetKv +
+    (stale || useRec || cents(r.Scale_Out_Price) === null ? "" :
       kv("可賣一半（選用）", esc(fmtPrice(cents(r.Scale_Out_Price))), "",
          "成交後改以成交價 +15% 為準；選用，會降低平均報酬")) +
     kv(sc.label, esc(fmt(r[sc.key], 1)), "", "規則分數，不是上漲機率") +
     chipKv(r);
 
-  const valid = String(r.Rec_Valid_Until || "").slice(0, 10);
   const recLine = r.Recommendation_ID
-    ? `<div class="hint">建議編號 ${esc(r.Recommendation_ID)}｜狀態 ${esc(r.Rec_Status || "未提供")}${valid ? `｜有效至 ${esc(valid)}` : ""}</div>`
+    ? `<div class="hint">建議編號 ${esc(r.Recommendation_ID)}｜${esc(rv.label)}</div>`
     : `<div class="hint">此列尚無固定建議編號（後端未建立 recommendation）。</div>`;
 
-  return `<article class="card pick ${scoreTier(r)} ${v.ok ? "state-buy" : ""}">
+  // The previous trade: the backend's Prev_* columns when present; on an
+  // older payload, the stale exit itself, as history rather than a badge.
+  const prev = prevSegmentHtml(r) || (stale ? staleExitHtml(r) : "");
+  // A reference row (non-held TSE, or any row that is neither a buy nor a
+  // position) is never the owner's trade: its tracker exit is a simulated
+  // trade of the past. Show it as the muted history line, not as the
+  // red/orange "exit today" badge the hold group uses -- thirty of those in
+  // one collapsed list read as thirty pending sell orders.
+  const refExit = grp === "ref" && !stale && !!r.Exit_Signal;
+  const refHist = refExit ? staleExitHtml(r) : "";
+
+  let extra = "";
+  let size = null;
+  if (grp === "buy") {
+    size = sizingFor(r);
+    extra = `<div class="sub-h">投資人資訊</div>${investorInfoHtml(r)}` +
+      `<div class="sub-h">股數與費用</div>${sizingHtml(r, size)}` +
+      orderGuideHtml(r, size, rv) + nameHistoryLine(r.Stock_ID);
+  } else if (grp === "hold") {
+    extra = exitGuideHtml(r) + nameHistoryLine(r.Stock_ID);
+  } else {
+    const rn = restrictionNote(r);
+    if (rn) extra = `<div class="hint">${esc(rn)}</div>`;
+  }
+
+  return `<article class="card pick ${scoreTier(r)} ${v.ok ? "state-buy" : ""}" data-sid="${esc(r.Stock_ID)}" data-group="${esc(grp)}">
     <div class="card-head">
-      <span class="rank">${r._rank}</span>
+      <span class="rank">${r._rank || "–"}</span>
       <span class="name">${esc(r.Stock_Name || r.Stock_ID)}</span>
       <span class="code">${esc(r.Stock_ID)}</span>
       <span class="market">${esc(r.Market || "")}</span>
+      ${r._tracked ? '<span class="tag">追蹤</span>' : ""}
     </div>
-    <div class="badges">${badge}${held ? '<span class="verdict held">已有持倉</span>' : ""}${
-      r.Integrity_OK === false ? '<span class="verdict no">資料完整性未通過</span>' : ""}${exitSignalBadge(r)}</div>
+    <div class="badges">${badge}${holdChip}${held ? '<span class="verdict held">已有持倉</span>' : ""}${
+      r.Integrity_OK === false ? '<span class="verdict no">資料完整性未通過</span>' : ""}${
+      stale || refExit ? "" : exitSignalBadge(r)}${restrictionBadge(r)}${eventBadge(r)}</div>
     ${recLine}
-    ${held && r.Exit_Signal ? `<div class="hint">這個出場訊號算的是<b>系統假設的進場</b>（${esc(String(r.Entry_Date || "").slice(0, 10) || "進場日未知")} 開盤 ${esc(fmtPrice(cents(r.Entry_Open)))}）。你的持倉以<b>你登錄的成交價</b>另外計算，請以「持倉」頁的建議為準。</div>` : ""}
+    ${prev}${refHist}
+    ${held && r.Exit_Signal && !stale ? `<div class="hint">這個出場訊號算的是<b>系統假設的進場</b>（${esc(String(r.Entry_Date || "").slice(0, 10) || "進場日未知")} 開盤 ${esc(fmtPrice(cents(r.Entry_Open)))}）。你的持倉以<b>你登錄的成交價</b>另外計算，請以「持倉」頁的建議為準。</div>` : ""}
     <div class="kv2">${grid}</div>
+    ${extra}
     <div class="btns">
-      ${btn("buy", "登錄買入", "primary", { id: r.Stock_ID })}
+      ${btn("buy", "登錄買入", grp === "buy" ? "primary" : "", { id: r.Stock_ID })}
       ${btn("detail", "指標詳情", "", { id: r.Stock_ID })}
     </div>
   </article>`;
@@ -2635,6 +3876,7 @@ function renderPerf() {
         `${x.pos.stock_id}${x.as_of ? "（沿用 " + x.as_of + "）" : "（無估值）"}`).join("、"))}</div>`;
 
   document.getElementById("page-perf").innerHTML =
+    systemRecordHtml() +
     gapNote +
     `<div class="sec"><h2>已凍結的十日成果</h2>${cycleRows}</div>` +
     `<div class="sec"><h2>已平倉／封存</h2>${closedRows}` +
@@ -2955,6 +4197,10 @@ function renderResearch() {
       drow("交易日 session", esc(m.session_date || "未知")) +
       drow("入選檔數", esc(String(m.count === undefined ? STATE.rows.length : m.count))) +
       drow("資料源異常", esc(m.degraded || "無")) +
+      drow("清單狀態", esc(listStatusText(listStatus()))) +
+      drow("建議紀錄（meta.rec）", esc(recMetaText(m.rec))) +
+      drow("營收／除權息資料", esc(eventsMetaText(m.events))) +
+      drow("AI 報告來源", esc(reportSourcesText(m.report_sources))) +
       quotesBlock +
     `</div>` +
     `<div class="sec"><h2>大盤判定</h2>` +
@@ -2972,6 +4218,8 @@ function renderResearch() {
       <div class="btns">${btn("export", "匯出備份 JSON", "primary")}${btn("import", "匯入備份", "")}</div>
       <div class="hint">費率設定：${esc(schedule(STATE.settings.fee_schedule).label)}</div>
       <div class="btns">${btn("fees", "切換費率版本", "")}</div>
+      <div class="hint">資金設定（換算建議股數用）：${esc(sizingSummaryText())}</div>
+      <div class="btns">${btn("sizing", "資金與格數設定", "")}</div>
     </div>` +
     `<div class="sec"><h2>欄位含義（報告第 8 節）</h2>${glossary}</div>` +
     strategyCardHtml() +
@@ -3081,7 +4329,7 @@ async function openExecutionForm(cfg) {
       hint: dateNote || "沒有成交日就無法放上損益時間軸" })}
     ${field("price", isBuy ? "實際成交價" : "實際賣出價", defPrice, { inputmode: "decimal", hint: "必填。輸入非數字或 0 會被拒絕，不會用參考價代替" })}
     ${field("shares", "股數", defShares, { inputmode: "numeric",
-      hint: isBuy ? "1 張 = 1,000 股；零股請直接填股數"
+      hint: isBuy ? buyQtyHint(row)
         : editing ? `這筆成交當下可賣 ${held.toLocaleString("en-US")} 股（已扣除原紀錄）`
                   : `目前持有 ${held.toLocaleString("en-US")} 股，可部分賣出` })}
     ${field("fee", "手續費（留空＝依費率自動計算）", editing ? (editing.fee_cents / 100).toFixed(2) : "", { inputmode: "decimal" })}
@@ -3158,7 +4406,7 @@ async function saveExecution(data) {
   const modal = $("#modal");
   const v = readForm(modal);
   let pos = data.pos ? await dbGet("positions", data.pos) : null;
-  const row = data.row ? STATE.rows.find((r) => String(r.Stock_ID) === data.row) : null;
+  const row = data.row ? listRowFor(data.row) : null;
 
   // A manual entry needs a stock id before anything else can be validated.
   if (!pos && !row) {
@@ -3337,7 +4585,14 @@ function openDetail(stockId) {
   const grp = (title, body) => `<div class="sec-title">${esc(title)}</div>${body}`;
   const lgrp = (title, chips) => `<div class="sec-title">${esc(title)}</div><div class="lights">${chips}</div>`;
 
+  const evLine = eventsLine(r);
   const body =
+    grp("投資人資訊", investorInfoHtml(r)) +
+    (restrictionNote(r) ? grp("交易限制", restrictionGuidance(r)) : "") +
+    grp("營收／除權息／法說",
+      (evLine ? `<div class="plan">${esc(evLine)}</div>` : `<div class="hint">本次掃描未提供營收／除權息／法說資料。</div>`) +
+      `<div class="hint">月營收是掃描當時最新已公布的月份（每月 10 日前公布上月），只供參考、不代表好壞；回測中用營收分組篩選訊號都沒有改善（BACKTEST_LOG M.6）。</div>`) +
+    grp("系統訊號紀錄（同名）", nameHistoryDetail(r.Stock_ID)) +
     grp("規則分數（皆為規則計算，不是機率）",
       drow("起漲條件分" + (sc.key === "Launch_Score" ? "（本模式排序依據）" : ""), esc(fmt(r.Launch_Score, 1))) +
       drow("動能分" + (sc.key === "Surge_Score" ? "（本模式排序依據）" : ""), esc(fmt(r.Surge_Score, 1))) +
@@ -3502,10 +4757,17 @@ async function runImport() {
       return;
     }
   }
+  const sizingRow = (data.meta || []).find((m) => m && m.key === SIZING_META);
+  const importedSizing = sizingRow ? sizingFromMeta(sizingRow.value) : null;
+  if (sizingRow && !importedSizing) { err.textContent = "備份裡的資金設定格式錯誤（資金、格數或風險 % 超出範圍）"; return; }
   await dbPutMany("positions", data.positions);
   await dbPutMany("executions", data.executions || []);
   for (const m of (data.meta || [])) {
     if (m && m.key && !PRIVATE_META.has(m.key)) await dbPut("meta", m);
+  }
+  if (importedSizing) {
+    SIZING_MEM = importedSizing;
+    try { localStorage.setItem(SIZING_KEY, JSON.stringify(importedSizing)); } catch (e) { /* memory + DB */ }
   }
   closeModal();
   toast(`已匯入 ${data.positions.length} 筆持倉`);
@@ -3593,6 +4855,8 @@ document.addEventListener("click", async (ev) => {
     if (act === "cycle") { await openCycleDetail(d.pos); return; }
     if (act === "execs") { await openExecutionList(d.pos); return; }
     if (act === "fees") { await toggleFees(); return; }
+    if (act === "sizing") { openSizingForm(); return; }
+    if (act === "sizing-save") { saveSizingForm(); return; }
     if (act === "cloud-refresh") { await cloudRefresh(true); return; }
     if (act === "token-set") { openTokenForm(); return; }
     if (act === "token-save") { await saveToken(); return; }
@@ -3600,7 +4864,7 @@ document.addEventListener("click", async (ev) => {
 
     if (act === "buy") {
       const pos = d.pos ? await dbGet("positions", d.pos) : null;
-      const row = d.id ? STATE.rows.find((r) => String(r.Stock_ID) === d.id) : null;
+      const row = d.id ? listRowFor(d.id) : null;
       await openExecutionForm({ side: "BUY", position: pos, row });
       return;
     }
@@ -3685,6 +4949,19 @@ document.addEventListener("change", (ev) => {
   renderPicks();
 });
 
+// <details> open state across re-renders. "toggle" does not bubble, hence the
+// capture phase. A group forced open by a search is not the user's choice and
+// is not remembered.
+document.addEventListener("toggle", (ev) => {
+  const el = ev.target;
+  if (!el || !el.matches) return;
+  if (el.matches("details.grp[data-group='ref']")) {
+    if (!el.hasAttribute("data-forced")) STATE.refOpen = el.open;
+  } else if (el.matches("details.order[data-order]")) {
+    STATE.orderOpen[el.getAttribute("data-order")] = el.open;
+  }
+}, true);
+
 async function toggleFees() {
   const next = STATE.settings.fee_schedule === "tw-equity-v1" ? "tw-equity-exact" : "tw-equity-v1";
   STATE.settings.fee_schedule = next;
@@ -3743,6 +5020,8 @@ async function boot() {
   try {
     await openDB();
     STATE.settings = Object.assign(STATE.settings, await metaGet("settings", {}));
+    const sz = sizingFromMeta(await metaGet(SIZING_META, null));
+    if (sz) SIZING_MEM = sz;
     REFRESH.hasToken = !!(await metaGet(GH_TOKEN_KEY, ""));
     await loadLedger();
     const migrated = await migrateLegacy();
@@ -3777,4 +5056,12 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
 window.YT = {
   STATE, selfTest, buildMarks, replay, cents, fmtCents, pctOf, feeFor, taxFor,
   buyVerdict, portfolioSummary, pendingItems, tickRound, taipeiDate, load,
+  // 2026-10-08 investor views (tests/mobile_probe.js drives these)
+  pickGroup, pickGroups, picksSummaryText, holdPriority, listStatus, listStatusText,
+  restrictionInfo, restrictionNote, recView, staleExit, sizePosition, sizingFor,
+  validateSizing, loadSizing, saveSizing, sizingToMeta, sizingFromMeta, schedule, feeBindsMin, nameHistory, historyEntryText,
+  eventsLine, aiReportView, systemRecordHtml, equitySvg, pickCard, render, renderPicks,
+  renderToday, renderPerf, renderResearch, openDetail, listRowFor,
+  exitGuideHtml, reportSourcesText, provisionalTimeExit,
+  BLOCK_TEXT, RESTRICT_TEXT, RESTRICT_NOTE, ORDER_RULES, STRATEGY, SLOT_GUIDANCE,
 };

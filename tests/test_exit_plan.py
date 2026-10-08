@@ -187,8 +187,14 @@ class LateProfit(unittest.TestCase):
         self.assertAlmostEqual(p["exit_price"], STOP - 2)
 
 
-class TrackerColumns(unittest.TestCase):
-    """Drive annotate_holding against a tiny price store."""
+class _TrackerHarness:
+    """Drive annotate_holding against a tiny price store.
+
+    `series` maps a stock id to bars (open, high, low, close) on CAL in
+    order; a None entry leaves that session without a bar for the stock. The
+    ledger's buy_ready flags ({sid: {date: 1|0|None}}) and the market leg's
+    disturbed dates are injected, so nothing reads the real ledger or index.
+    """
 
     CAL = ["2026-09-%02d" % d for d in (1, 2, 3, 4, 7, 8, 9, 10, 11, 14)]
 
@@ -199,7 +205,10 @@ class TrackerColumns(unittest.TestCase):
             conn.execute("CREATE TABLE data (stock_id TEXT, date TEXT, open REAL, "
                          "high REAL, low REAL, close REAL)")
             for sid, rows in series.items():
-                for d, (o, h, l, c) in zip(self.CAL, rows):
+                for d, row in zip(self.CAL, rows):
+                    if row is None:
+                        continue
+                    o, h, l, c = row
                     conn.execute("INSERT INTO data VALUES (?,?,?,?,?,?)",
                                  (sid, d, o, h, l, c))
             conn.commit()
@@ -207,22 +216,36 @@ class TrackerColumns(unittest.TestCase):
             conn.close()
         return db
 
-    def _run(self, series, ledger_dates, today="2026-09-14"):
+    def _run(self, series, ledger_dates, today="2026-09-14", flags=None,
+             rec_anchors=None, add_own_bar=True, disturbed=()):
+        def close_on(rows):
+            row = rows[self.CAL.index(today)] if len(rows) > self.CAL.index(today) else None
+            return row[3] if row is not None else 100.0
         with tempfile.TemporaryDirectory() as tmp:
             db = self._store(tmp, series)
             df = pd.DataFrame([{"Stock_ID": sid, "Data_Date": today,
-                                "Close_Price": rows[self.CAL.index(today)][3],
+                                "Close_Price": close_on(rows),
                                 "Strict_Stop_Loss": round(
-                                    rows[self.CAL.index(today)][3] * (1 - tracker.STOP_PCT), 2),
+                                    close_on(rows) * (1 - tracker.STOP_PCT), 2),
                                 "Add_Price": round(
-                                    rows[self.CAL.index(today)][3] * (1 - tracker.ADD_PCT), 2)}
+                                    close_on(rows) * (1 - tracker.ADD_PCT), 2)}
                                for sid, rows in series.items()])
+            marks = set(disturbed)
+
+            def make_fn():
+                return lambda i, d: d in marks
             with mock.patch.object(tracker, "PRICE_VOLUME_FILE", db), \
                     mock.patch.object(tracker, "_ledger_bar_dates",
                                       lambda mode: ledger_dates), \
-                    mock.patch("scanner.market_regime.get_market_regime",
-                               lambda: {"ok": True, "above20": True, "risk_on": True}):
-                return tracker.annotate_holding(df, "mode_prelaunch")
+                    mock.patch.object(tracker, "_ledger_buy_flags",
+                                      lambda mode: flags or {}), \
+                    mock.patch.object(tracker, "_disturbed_fn", make_fn):
+                return tracker.annotate_holding(df, "mode_prelaunch",
+                                                rec_anchors=rec_anchors,
+                                                add_own_bar=add_own_bar)
+
+
+class TrackerColumns(_TrackerHarness, unittest.TestCase):
 
     def test_stop_hit_is_reported_with_date_and_price(self):
         flat = [(100, 101, 99, 100)] * 10
@@ -315,7 +338,12 @@ class TrackerColumns(unittest.TestCase):
                 mock.patch.dict(tracker.EXIT_DELAY_CAP_BY_MODE, {"mode_prelaunch": 5}):
             out = self._run({"5555": rows}, {"5555": list(cal)})
         r = out.iloc[0]
-        self.assertEqual(r["Hold_Status"], "overdue")
+        # 2026-10-08: the canonical replay booked the time exit on cal[5],
+        # before today, so the trade is closed -- "overdue" now means past
+        # the cap with no exit in the store (missing bars), not this.
+        self.assertEqual(r["Hold_Status"], "exited")
+        self.assertEqual(r["Hold_Day"], 5)
+        self.assertEqual(r["Hold_Remaining"], 0)
         self.assertEqual(r["Exit_Signal"], "time")
         self.assertEqual(r["Exit_Signal_Date"], cal[5])
         self.assertAlmostEqual(r["Exit_Signal_Price"], 100.0)
@@ -418,3 +446,417 @@ class FirstDayColumn(TrackerColumns):
         flat = [(100, 101, 99, 100)] * 10
         out = self._run({"A": flat}, {})
         self.assertTrue(bool(out["First_Day"].iloc[0]))
+
+
+# --------------------------------------------------------------------------
+# 2026-10-08: canonical replay, segments and Prev_* (DECISIONS "Canonical rule
+# replay" / "Segments / anchors"). The calendar is long enough for a full
+# ride; a filler name listed on every session before today stands in for the
+# rest of the list, so the ledger has sessions on which the name was absent.
+# --------------------------------------------------------------------------
+def _weekdays(start, n):
+    from datetime import date, timedelta
+    d, out = date.fromisoformat(start), []
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d.isoformat())
+        d += timedelta(days=1)
+    return out
+
+
+LONG = _weekdays("2026-08-03", 40)
+FLAT = (100, 101, 99, 100)
+FILLER = "9999"
+# signal d0, entry d1 @100, flat; the day-10 close (d10) of 97 is under its
+# 5-bar mean (99.4), so the rule's time exit books d10 @97.
+TIME_EXIT = [FLAT] * 10 + [(100, 100.5, 96.5, 97)] + [(97, 98, 96, 97)] * 29
+
+
+class _LongHarness(_TrackerHarness):
+    CAL = LONG
+
+    def led(self, own, today_i, extra=None):
+        out = {"A": [self.CAL[i] for i in own],
+               FILLER: list(self.CAL[:today_i])}
+        out.update(extra or {})
+        return out
+
+    def run_a(self, rows, own, today_i, **kw):
+        out = self._run({"A": rows[:today_i + 1]}, self.led(own, today_i),
+                        today=self.CAL[today_i], **kw)
+        return out.set_index("Stock_ID").loc["A"]
+
+
+class PathDependentExit(_LongHarness, unittest.TestCase):
+    """The rule decides the ride at the day-10 close, not at today's (the
+    3498 shape: 09-15 close under its 5-bar mean, later closes above it)."""
+
+    def test_a_later_strong_close_does_not_undo_the_time_exit(self):
+        rows = TIME_EXIT[:11] + [(97, 99, 96.5, 98.5), (98.5, 100.5, 98, 100.4)]
+        r = self.run_a(rows, range(12), 12)
+        self.assertEqual(r["Hold_Status"], "exited")
+        self.assertEqual(r["Exit_Signal"], "time")
+        self.assertEqual(r["Exit_Signal_Date"], LONG[10])
+        self.assertAlmostEqual(r["Exit_Signal_Price"], 97.0)
+        self.assertEqual(r["Hold_Day"], 10)
+        self.assertEqual(r["Hold_Remaining"], 0)
+
+    def test_exit_on_todays_bar_is_exit_today(self):
+        r = self.run_a(TIME_EXIT, range(10), 10)
+        self.assertEqual(r["Hold_Status"], "exit_today")
+        self.assertEqual(r["Exit_Signal"], "time")
+        self.assertEqual(r["Exit_Signal_Date"], LONG[10])
+        self.assertEqual(r["Hold_Remaining"], 0)
+
+    def test_the_market_leg_rides_on_a_disturbed_day(self):
+        r = self.run_a(TIME_EXIT, range(10), 10, disturbed={LONG[10]})
+        self.assertEqual(r["Hold_Status"], "delay")
+        self.assertEqual(r["Exit_Signal"], "")
+        self.assertIn("TAIEX", r["Hold_Note"])
+        # the next close is not disturbed and still under its mean: out
+        rows = TIME_EXIT[:11] + [(97, 98, 96, 96.5), (96.5, 97, 96, 96.5)]
+        r = self.run_a(rows, range(12), 12, disturbed={LONG[10]})
+        self.assertEqual(r["Hold_Status"], "exited")
+        self.assertEqual(r["Exit_Signal"], "time")
+        self.assertEqual(r["Exit_Signal_Date"], LONG[11])
+        self.assertAlmostEqual(r["Exit_Signal_Price"], 96.5)
+
+    def test_the_stock_leg_rides_while_the_close_beats_its_mean(self):
+        rows = ([FLAT, (100, 100.5, 96.5, 97)] + [(97, 97.5, 96.5, 97)] * 4
+                + [(97, 97, 95.5, 96)] * 2 + [(96, 97.5, 95.5, 97),
+                                               (97, 98.5, 96.5, 98),
+                                               (98, 99.5, 97.5, 99),
+                                               (99, 100.5, 98.5, 100)])
+        r = self.run_a(rows, range(11), 11)
+        self.assertEqual(r["Hold_Status"], "delay")
+        self.assertEqual(r["Exit_Signal"], "")
+        self.assertIn("5-bar mean", r["Hold_Note"])
+        self.assertEqual(r["Hold_Day"], 11)
+        self.assertEqual(r["Hold_Day"] + r["Hold_Remaining"], 10)
+
+    def test_past_the_cap_without_bars_is_overdue(self):
+        a = [FLAT] * 4 + [None] * 18
+        series = {"A": a, "F": [FLAT] * 22}
+        out = self._run(series, self.led(range(21), 21), today=LONG[21])
+        r = out.set_index("Stock_ID").loc["A"]
+        self.assertEqual(r["Hold_Status"], "overdue")
+        self.assertEqual(r["Exit_Signal"], "")
+
+    def test_a_name_with_no_bars_since_entry_is_judged_by_the_calendar(self):
+        """T5: calendar_status (holding / exit_today / overdue) had no test.
+        The name has one bar (the signal day) and nothing after it, so the
+        entry has no fill: the status can only come from the trading
+        calendar, which the filler name keeps moving."""
+        want = {5: ("holding", "held 5/10, exit in 5 trading day(s)"),
+                9: ("holding", "held 9/10, exit in 1 trading day(s)"),
+                10: ("exit_today", "exit at close"),
+                11: ("overdue", "no result in the price store"),
+                14: ("overdue", "no result in the price store")}
+        for today_i, (status, note) in want.items():
+            with self.subTest(today=LONG[today_i]):
+                series = {"A": [FLAT], FILLER: [FLAT] * (today_i + 1)}
+                out = self._run(series, self.led(range(today_i + 1), today_i),
+                                today=LONG[today_i])
+                r = out.set_index("Stock_ID").loc["A"]
+                self.assertEqual(r["Hold_Status"], status)
+                self.assertIn(note, r["Hold_Note"])
+                self.assertEqual(r["Entry_Date"], LONG[1])
+                self.assertEqual(r["Exit_Signal"], "")
+                self.assertEqual(r["Exit_Note"], "no bars since entry yet")
+                self.assertTrue(pd.isna(r["Entry_Open"]))
+                self.assertEqual(r["Hold_Day"], today_i)
+                self.assertEqual(r["Hold_Remaining"], 10 - today_i)
+
+    def test_the_tracker_books_what_live_record_books(self):
+        """Parity: the card and the live record replay one rule."""
+        import random
+        from scanner.live_record import replay_trade
+        marks = {LONG[11], LONG[12], LONG[15]}
+        for seed in range(40):
+            rng = random.Random(seed)
+            rows, px = [], 100.0
+            for _ in range(26):
+                op = round(px * (1 + rng.uniform(-0.03, 0.03)), 2)
+                cl = round(op * (1 + rng.uniform(-0.05, 0.05)), 2)
+                hi = round(max(op, cl) * (1 + rng.uniform(0, 0.03)), 2)
+                lo = round(min(op, cl) * (1 - rng.uniform(0, 0.03)), 2)
+                rows.append((op, hi, lo, cl))
+                px = cl
+            with self.subTest(seed=seed):
+                r = self.run_a(rows, range(25), 25, disturbed=marks)
+                fwd = pd.DataFrame([dict(date=d, open=o, high=h, low=l, close=c)
+                                    for d, (o, h, l, c) in zip(LONG[1:26], rows[1:26])])
+                t = replay_trade(fwd, extend_if=lambda i, d: d in marks)
+                if t["exited"]:
+                    self.assertEqual(r["Exit_Signal"], t["reason"])
+                    self.assertEqual(r["Exit_Signal_Date"], t["exit_date"])
+                    self.assertAlmostEqual(r["Exit_Signal_Price"],
+                                           round(t["exit_price"], 2))
+                    self.assertIn(r["Hold_Status"], ("exited", "exit_today"))
+                else:
+                    self.assertEqual(r["Exit_Signal"], "")
+
+
+class ReentrySegment(_LongHarness, unittest.TestCase):
+    """A fresh signal after the old trade closed is a NEW segment: the card
+    shows the new trade and Prev_* the old one (8227 / 3498, 2026-10-07)."""
+
+    def test_reentry_after_a_closed_trade_is_pending(self):
+        from scanner.live_record import net_pct, replay_trade
+        r = self.run_a(TIME_EXIT, list(range(11)), 14,
+                       flags={"A": {LONG[0]: 1}})
+        self.assertTrue(bool(r["First_Day"]))
+        self.assertEqual(r["Hold_Status"], "pending")
+        self.assertEqual(r["Entry_Date"], "")
+        self.assertEqual(r["Exit_Signal"], "")
+        self.assertEqual(r["Hold_Anchor"], LONG[14])
+        self.assertEqual(r["Hold_Anchor_Kind"], "reentry")
+        self.assertEqual(r["Prev_Signal_Date"], LONG[0])
+        self.assertEqual(r["Prev_Was_Signal"], True)
+        self.assertEqual(r["Prev_Entry_Date"], LONG[1])
+        self.assertAlmostEqual(r["Prev_Entry_Open"], 100.0)
+        self.assertEqual(r["Prev_Exit_Signal"], "time")
+        self.assertEqual(r["Prev_Exit_Signal_Date"], LONG[10])
+        self.assertAlmostEqual(r["Prev_Exit_Signal_Price"], 97.0)
+        self.assertEqual(r["Sessions_Since_Prev_Exit"], 4)
+        # (g) the net return is live_record's, for the same bars
+        self.assertAlmostEqual(r["Prev_Exit_Ret_Pct"], round(net_pct(-3.0), 2))
+        fwd = pd.DataFrame([dict(date=d, open=o, high=h, low=l, close=c)
+                            for d, (o, h, l, c) in zip(LONG[1:15], TIME_EXIT[1:15])])
+        self.assertAlmostEqual(r["Prev_Exit_Ret_Pct"],
+                               round(replay_trade(fwd)["ret_net_pct"], 2))
+
+    def test_the_session_after_is_day_one_of_the_new_trade(self):
+        r = self.run_a(TIME_EXIT, list(range(11)) + [14], 15,
+                       flags={"A": {LONG[0]: 1, LONG[14]: 1}})
+        self.assertEqual(r["Hold_Status"], "holding")
+        self.assertEqual(r["Hold_Day"], 1)
+        self.assertEqual(r["Entry_Date"], LONG[15])
+        self.assertAlmostEqual(r["Entry_Open"], 97.0)
+        self.assertAlmostEqual(r["Plan_Stop"],
+                               tracker._lvl(97.0, -tracker.STOP_PCT, "down", "A"))
+        self.assertEqual(r["Exit_Signal"], "")
+        self.assertEqual(r["Prev_Signal_Date"], LONG[0])
+        self.assertEqual(r["Prev_Exit_Signal"], "time")
+
+    def test_a_resignal_inside_an_open_trade_keeps_the_calendar(self):
+        for flag in (None, 1):
+            with self.subTest(flag=flag):
+                r = self.run_a([FLAT] * 9, range(6), 8,
+                               flags={"A": {LONG[0]: flag}})
+                self.assertTrue(bool(r["First_Day"]))
+                self.assertEqual(r["Entry_Date"], LONG[1])
+                self.assertEqual(r["Hold_Status"], "holding")
+                self.assertEqual(r["Hold_Anchor_Kind"], "first")
+                for col in tracker.PREV_COLUMNS:
+                    self.assertIsNone(r[col], col)
+
+    def test_a_non_signal_anchor_reanchors_on_reentry(self):
+        """8227: the 09-16 anchor was not a signal (buy_ready 0); its
+        hypothetical trade hit the target, and 10-07 is a fresh signal."""
+        rows = [FLAT] * 3 + [(100, 121, 99, 118)] + [(118, 119, 117, 118)] * 10
+        r = self.run_a(rows, range(6), 9, flags={"A": {LONG[0]: 0}})
+        self.assertEqual(r["Hold_Status"], "pending")
+        self.assertEqual(r["Hold_Anchor_Kind"], "reentry")
+        self.assertEqual(r["Prev_Was_Signal"], False)
+        self.assertEqual(r["Prev_Exit_Signal"], "tp")
+        self.assertEqual(r["Prev_Exit_Signal_Date"], LONG[3])
+        self.assertAlmostEqual(r["Prev_Exit_Signal_Price"], 120.0)
+        self.assertEqual(r["Sessions_Since_Prev_Exit"], 6)
+        # still open but not a signal: re-anchors all the same
+        r = self.run_a([FLAT] * 10, range(6), 9, flags={"A": {LONG[0]: 0}})
+        self.assertEqual(r["Hold_Status"], "pending")
+        self.assertEqual(r["Prev_Was_Signal"], False)
+        self.assertEqual(r["Prev_Exit_Signal"], "")
+        self.assertIsNone(r["Prev_Exit_Signal_Date"])
+        self.assertIsNone(r["Prev_Exit_Ret_Pct"])
+        self.assertIsNone(r["Sessions_Since_Prev_Exit"])
+
+    def test_a_tracked_row_never_reanchors_on_its_own_bar(self):
+        rows = [FLAT, FLAT, (100, 100, 70, 75)] + [(75, 76, 74, 75)] * 5
+        r = self.run_a(rows, [0], 5)
+        self.assertEqual(r["Hold_Status"], "pending")
+        r = self.run_a(rows, [0], 5, add_own_bar=False)
+        self.assertEqual(r["Hold_Status"], "exited")
+        self.assertEqual(r["Entry_Date"], LONG[1])
+        self.assertEqual(r["Exit_Signal"], "stop")
+        self.assertIsNone(r["Prev_Signal_Date"])
+
+    def test_a_long_gap_still_splits_without_prev(self):
+        r = self.run_a([FLAT] * 13, [0], 12)
+        self.assertEqual(r["Hold_Status"], "pending")
+        self.assertEqual(r["Hold_Anchor_Kind"], "gap")
+        for col in tracker.PREV_COLUMNS:
+            self.assertIsNone(r[col], col)
+
+    def test_buy_flags_read_the_latest_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            led = Path(tmp) / "ledger.db"
+            conn = sqlite3.connect(led)
+            try:
+                conn.execute("CREATE TABLE picks (scan_ts TEXT, scan_mode TEXT, "
+                             "stock_id TEXT, bar_date TEXT, buy_ready INTEGER)")
+                conn.executemany("INSERT INTO picks VALUES (?,?,?,?,?)", [
+                    ("2026-10-07 15:05", "mode_prelaunch", "A", "2026-10-07", 0),
+                    ("2026-10-07 18:30", "mode_prelaunch", "A", "2026-10-07", 1),
+                    ("2026-09-01 15:00", "mode_prelaunch", "A", "2026-09-01", None),
+                    ("2026-10-07 15:05", "mode_other", "B", "2026-10-07", 1)])
+                conn.commit()
+            finally:
+                conn.close()
+            with mock.patch.object(tracker, "SIGNAL_LEDGER_FILE", led):
+                flags = tracker._ledger_buy_flags("mode_prelaunch")
+            with mock.patch.object(tracker, "SIGNAL_LEDGER_FILE", Path(tmp) / "no.db"):
+                self.assertEqual(tracker._ledger_buy_flags("mode_prelaunch"), {})
+        self.assertEqual(flags, {"A": {"2026-10-07": 1, "2026-09-01": None}})
+
+
+    def test_a_replayed_past_session_does_not_see_later_sessions(self):
+        # the store already holds the sessions after `today` (a replay of an
+        # old scan): the signal-day card must read exactly as it did live --
+        # no entry date, no fill priced from tomorrow's open
+        rows = [FLAT] * 20
+        out = self._run({"A": rows}, self.led([14], 14), today=LONG[14])
+        r = out.set_index("Stock_ID").loc["A"]
+        self.assertEqual(r["Hold_Status"], "pending")
+        self.assertEqual(r["Entry_Date"], "")
+        self.assertTrue(r["Entry_Open"] is None or r["Entry_Open"] != r["Entry_Open"])
+        self.assertEqual(r["Exit_Date"], "")
+
+class RecAnchors(_LongHarness, unittest.TestCase):
+    """rec_anchors {sid: {anchor, stop, target, rec_id}} override the natural
+    anchor (portfolio.sync builds them from live recommendations)."""
+
+    ROWS = [(round(100 + 0.1 * i, 2), 101, 99, 100) for i in range(20)]
+
+    def test_rec_anchor_overrides_the_streak(self):
+        r = self.run_a(self.ROWS, range(9), 9,
+                       rec_anchors={"A": {"anchor": LONG[6], "stop": 80.0,
+                                          "target": 120.0, "rec_id": "r1"}})
+        self.assertEqual(r["Hold_Anchor_Kind"], "rec")
+        self.assertEqual(r["Entry_Date"], LONG[7])
+        self.assertAlmostEqual(r["Entry_Open"], 100.7)
+        self.assertEqual(r["Hold_Day"], 3)
+        self.assertEqual(r["Prev_Signal_Date"], LONG[0])
+        self.assertEqual(r["Prev_Entry_Date"], LONG[1])
+        self.assertAlmostEqual(r["Prev_Entry_Open"], 100.1)
+        # the streak's own trade was still open at the recommendation
+        self.assertEqual(r["Prev_Exit_Signal"], "")
+        self.assertIsNone(r["Prev_Exit_Signal_Date"])
+
+    def test_rec_anchor_today_is_pending_with_rec_stop(self):
+        r = self.run_a(self.ROWS, range(9), 9,
+                       rec_anchors={"A": {"anchor": LONG[9], "stop": 95.5,
+                                          "target": 120.0, "rec_id": "r1"}})
+        self.assertEqual(r["Hold_Status"], "pending")
+        self.assertAlmostEqual(r["Plan_Stop"], 95.5)
+        self.assertEqual(r["Exit_Signal"], "")
+        self.assertEqual(r["Prev_Signal_Date"], LONG[0])
+
+    def test_an_anchor_outside_the_calendar_falls_back(self):
+        r = self.run_a(self.ROWS, range(9), 9,
+                       rec_anchors={"A": {"anchor": "2030-01-02", "stop": 95.5}})
+        self.assertEqual(r["Hold_Anchor_Kind"], "first")
+        self.assertEqual(r["Entry_Date"], LONG[1])
+        self.assertIsNone(r["Prev_Signal_Date"])
+
+    def test_a_closed_rec_gives_way_to_a_newer_signal(self):
+        rows = [FLAT] * 3 + [(100, 121, 99, 118)] + [(118, 119, 117, 118)] * 10
+        r = self.run_a(rows, range(6), 9, flags={"A": {LONG[0]: 1}},
+                       rec_anchors={"A": {"anchor": LONG[0], "stop": 80.0}})
+        self.assertEqual(r["Hold_Anchor_Kind"], "reentry")
+        self.assertEqual(r["Hold_Status"], "pending")
+        self.assertEqual(r["Prev_Exit_Signal"], "tp")
+
+    def test_no_rec_anchor_is_unchanged(self):
+        a = self.run_a(self.ROWS, range(9), 9)
+        b = self.run_a(self.ROWS, range(9), 9, rec_anchors={})
+        self.assertEqual(list(a.index), list(b.index))
+        self.assertEqual(a.astype(str).tolist(), b.astype(str).tolist())
+
+
+class FrameRobustness(_LongHarness, unittest.TestCase):
+    """Verifier fixes, 2026-10-08: "today" is the frame's newest bar date,
+    not row 0's, and one row the tracker cannot work out is blanked on its
+    own (unknown status blocks the buy) instead of taking the frame with it."""
+
+    def _frame(self, series, dates, today_i, **patches):
+        led = self.led(range(today_i), today_i,
+                       extra={sid: list(self.CAL[:today_i]) for sid in series})
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._store(tmp, series)
+            df = pd.DataFrame([{"Stock_ID": sid, "Data_Date": dates[sid],
+                                "Close_Price": 100.0, "Strict_Stop_Loss": 80.0,
+                                "Add_Price": 90.0} for sid in series])
+            with mock.patch.object(tracker, "PRICE_VOLUME_FILE", db), \
+                    mock.patch.object(tracker, "_ledger_bar_dates", lambda m: led), \
+                    mock.patch.object(tracker, "_ledger_buy_flags", lambda m: {}), \
+                    mock.patch.object(tracker, "_disturbed_fn", lambda: None):
+                ctx = [mock.patch.object(tracker, k, v) for k, v in patches.items()]
+                for c in ctx:
+                    c.start()
+                try:
+                    out = tracker.annotate_holding(df, "mode_prelaunch")
+                finally:
+                    for c in ctx:
+                        c.stop()
+        return out.set_index("Stock_ID")
+
+    def test_a_stale_first_row_does_not_wind_back_today(self):
+        series = {"S": [FLAT] * 6, "A": TIME_EXIT[:13]}
+        out = self._frame(series, {"S": LONG[5], "A": LONG[12]}, 12)
+        a = out.loc["A"]
+        # as of LONG[12] the time exit of LONG[10] is history; read as of
+        # row 0's LONG[5] it would still be "holding" on day 4
+        self.assertEqual(a["Hold_Status"], "exited")
+        self.assertEqual(a["Exit_Signal_Date"], LONG[10])
+        self.assertEqual(tracker._frame_today(pd.DataFrame(
+            {"Data_Date": [LONG[5], None, "bad", LONG[12], float("nan")]})), LONG[12])
+        self.assertEqual(tracker._frame_today(pd.DataFrame({"X": [1]})), "")
+
+    def test_a_failing_exit_plan_blanks_only_its_row(self):
+        series = {"A": TIME_EXIT[:13], "B": TIME_EXIT[:13]}
+        real = tracker._plan_row
+
+        def flaky(sid, *a, **k):
+            if sid == "B":
+                raise ValueError("boom")
+            return real(sid, *a, **k)
+        out = self._frame(series, {"A": LONG[12], "B": LONG[12]}, 12,
+                          _plan_row=flaky)
+        self.assertEqual(out.loc["A", "Hold_Status"], "exited")
+        self.assertEqual(out.loc["B", "Hold_Status"], "")
+        self.assertEqual(out.loc["B", "Exit_Signal"], "")
+        self.assertEqual(out.loc["B", "Entry_Date"], out.loc["A", "Entry_Date"])
+
+    def test_a_failing_segment_walk_blanks_only_its_row(self):
+        series = {"A": TIME_EXIT[:13], "B": TIME_EXIT[:13]}
+        real = tracker._segment_walk
+
+        def flaky(known, *a, **k):
+            flaky.calls += 1           # one walk per row, in frame order: B
+            if flaky.calls == 2:
+                raise ValueError("boom")
+            return real(known, *a, **k)
+        flaky.calls = 0
+        out = self._frame(series, {"A": LONG[12], "B": LONG[12]}, 12,
+                          _segment_walk=flaky)
+        self.assertEqual(out.loc["A", "Hold_Status"], "exited")
+        self.assertEqual(out.loc["B", "Hold_Status"], "")
+        self.assertEqual(out.loc["B", "Hold_Anchor"], "")
+        self.assertEqual(out.loc["B", "Hold_Anchor_Kind"], "")
+        for c in tracker.PREV_COLUMNS:
+            self.assertTrue(pd.isna(out.loc["B", c]), c)
+
+    def test_a_failing_previous_trade_blanks_the_whole_group(self):
+        led_flags = {"A": {LONG[0]: 1}}
+        with mock.patch.object(tracker, "_prev_columns",
+                               side_effect=ValueError("boom")):
+            out = self._run({"A": TIME_EXIT[:15]},
+                            self.led(list(range(11)), 14), today=LONG[14],
+                            flags=led_flags)
+        r = out.set_index("Stock_ID").loc["A"]
+        self.assertEqual(r["Hold_Status"], "pending")
+        self.assertEqual(r["Hold_Anchor_Kind"], "reentry")
+        for c in tracker.PREV_COLUMNS:
+            self.assertTrue(pd.isna(r[c]), c)

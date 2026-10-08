@@ -28,7 +28,7 @@ create or alter a table." So ensure_schema() only ever runs numbered steps.
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # One statement per entry so a migration can replay a subset.
 _V1 = [
@@ -136,7 +136,7 @@ _V1 = [
     """,
     # The single source of truth for what was really traded (F05, F12).
     # idempotency_key is UNIQUE so the phone re-sending a fill after a flaky
-    # save cannot create a second trade (report section 12, "重送與並發").
+    # save cannot create a second trade (report section 12, "resend and concurrency").
     """
     CREATE TABLE IF NOT EXISTS executions (
         execution_id    TEXT PRIMARY KEY,
@@ -243,7 +243,22 @@ _V1 = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_cycle_unique ON cycle_results(position_id, horizon_days, basis)",
 ]
 
-MIGRATIONS = {1: _V1}
+# v2 (2026-10-08): the recommendation lifecycle. A recommendation is "active"
+# while the recommended trade is live (entry window or in trade) and moves to
+# a terminal status -- expired / closed / superseded / cancelled -- exactly
+# once. CI rebuilds this ledger from data/recommendations.json on every run
+# and recommendation_events are never exported, so anything a later run needs
+# (why it ended, on which session, what the trade returned) has to live on the
+# row itself: status_reason, status_session, and outcome (JSON: entry_date,
+# entry_price, exit_date, exit_price, reason, bars, ret_gross_pct,
+# ret_net_pct). Additive columns only; a v1 ledger keeps every row.
+_V2 = [
+    "ALTER TABLE recommendations ADD COLUMN status_reason TEXT",
+    "ALTER TABLE recommendations ADD COLUMN status_session TEXT",
+    "ALTER TABLE recommendations ADD COLUMN outcome TEXT",
+]
+
+MIGRATIONS = {1: _V1, 2: _V2}
 
 
 def connect(path):

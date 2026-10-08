@@ -6,6 +6,20 @@ dropping it the moment it slips below the strict entry cutoff. ASCII only.
 
 One small JSON per mode under data/scan_state/. Failures are non-fatal: a missing
 or unreadable file just yields an empty prior set (= plain top-N, no hysteresis).
+
+Session-aware since 2026-10-08 (plan P0-5b). The file is
+
+    {"held_ids": [...], "session": "YYYY-MM-DD",
+     "prior_ids": [...], "prior_session": "YYYY-MM-DD"}
+
+`held_ids` is what the last run of `session` selected; `prior_ids` is the set
+that session's hysteresis started from (what the PREVIOUS session held). A
+second run of the same session used to start from the first run's own output,
+so a name that entered at 15:00 was "held" at 21:00 and got the loose N_HOLD
+band -- the list drifted on every rerun. prior_for() now hands a same-session
+rerun the previous session's set instead. The old {"held_ids": [...]} format
+still reads (session None), and load_held_ids / save_held_ids stay for
+gui/scan_worker.py; save_held_ids keeps the other keys.
 """
 import json
 from config.settings import DATA_DIR
@@ -18,22 +32,95 @@ def _path(mode: str):
     return _STATE_DIR / "{}.json".format(safe or "default")
 
 
-def load_held_ids(mode: str) -> list:
+def _ids(v):
+    return [str(x) for x in v] if isinstance(v, (list, tuple)) else None
+
+
+def _day(v):
+    return str(v or "").strip()[:10] or None
+
+
+def _raw(mode):
     try:
         data = json.loads(_path(mode).read_text(encoding="utf-8"))
-        ids = data.get("held_ids", [])
-        return [str(x) for x in ids]
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return []
+        return {}
+
+
+def _write(mode, data):
+    try:
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _path(mode).write_text(json.dumps(data, ensure_ascii=False),
+                               encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def load_state(mode: str) -> dict:
+    """{held_ids, session, prior_ids, prior_session}. A missing file, or the
+    old format, reads as session None and prior_ids None."""
+    data = _raw(mode)
+    return {
+        "held_ids": _ids(data.get("held_ids")) or [],
+        "session": _day(data.get("session")),
+        "prior_ids": _ids(data.get("prior_ids")),
+        "prior_session": _day(data.get("prior_session")),
+    }
+
+
+def prior_for(state: dict, session) -> list:
+    """The set this run's hysteresis starts from: on a rerun of the stored
+    session, the set THAT session started from; otherwise what was held
+    last."""
+    s = _day(session)
+    st = state if isinstance(state, dict) else {}
+    if s and st.get("session") == s and st.get("prior_ids") is not None:
+        return list(st["prior_ids"])
+    return list(st.get("held_ids") or [])
+
+
+def save_state(mode: str, session, held_ids, prior_ids=None) -> bool:
+    """Persist what `session` selected.
+
+    A new session rolls the stored held set into prior_ids / prior_session
+    (or takes `prior_ids` when given: the set the hysteresis actually started
+    from). The same session keeps the prior it already has. An OLDER session
+    never overwrites a newer one (a lagging feed). Without a session this is
+    save_held_ids. Returns True when written."""
+    s = _day(session)
+    held = [str(x) for x in (held_ids or [])]
+    if not s:
+        save_held_ids(mode, held)
+        return True
+    data = _raw(mode)
+    st = load_state(mode)
+    cur = st["session"]
+    if cur and cur > s:
+        return False
+    if cur == s:
+        prior = st["prior_ids"]
+        if prior is None:
+            prior = _ids(prior_ids)
+        prior_session = st["prior_session"]
+    else:
+        prior = _ids(prior_ids)
+        if prior is None:
+            prior = list(st["held_ids"])
+        prior_session = cur
+    data.update({"held_ids": held, "session": s, "prior_ids": prior,
+                 "prior_session": prior_session})
+    return _write(mode, data)
+
+
+def load_held_ids(mode: str) -> list:
+    return list(load_state(mode)["held_ids"])
 
 
 def save_held_ids(mode: str, ids) -> None:
-    try:
-        _STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _path(mode).write_text(
-            json.dumps({"held_ids": [str(x) for x in (ids or [])]},
-                       ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
+    """Replace held_ids only; every other key (session, prior_ids, ...) is
+    kept (read-modify-write)."""
+    data = _raw(mode)
+    data["held_ids"] = [str(x) for x in (ids or [])]
+    _write(mode, data)

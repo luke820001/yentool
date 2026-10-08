@@ -37,9 +37,25 @@ FIELDS = (
     "recommended_at", "initial_buy_price", "initial_stop_price",
     "initial_target_price", "trail_arm_price", "trail_lock_price",
     "valid_until_session", "horizon_days", "gate_snapshot", "status",
+    # the lifecycle (schema v2, 2026-10-08): why and on which session a
+    # recommendation left 'active', and the replayed trade when it closed.
+    # recommendation_events are never exported, so a later run (which
+    # rebuilds the ledger from this file) only knows what these carry.
+    "status_reason", "status_session", "outcome",
 )
 
+# Statuses a recommendation can END in (portfolio.ledger.TERMINAL_STATUSES).
+TERMINAL = ("expired", "closed", "superseded", "cancelled")
+
 FORMAT_VERSION = 1
+
+
+def _cell(value):
+    """A JSON value as a TEXT cell: an object (outcome, gate_snapshot written
+    by hand) is stored as its JSON text, the way the ledger writes it."""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=True, sort_keys=True)
+    return value
 
 
 def export_recommendations(ledger_path, out_path):
@@ -78,13 +94,21 @@ def export_recommendations(ledger_path, out_path):
     return len(rows)
 
 
-def seed_from_export(ledger_path, export_path):
+def seed_from_export(ledger_path, export_path, report=None):
     """Rebuild missing recommendations in the ledger from the published JSON.
 
-    Additive only: a recommendation already present is left exactly as it is,
-    because the local copy may have been through events the export does not
-    carry, and because an immutable first-day price must never be rewritten by
-    a sync. Returns the number inserted.
+    Additive for prices: a recommendation already present keeps every fixed
+    value, because an immutable first-day price must never be rewritten by a
+    sync. Returns the number inserted.
+
+    One exception, forward only (2026-10-08): when the local copy is still
+    'active' and the published one has ENDED (expired / closed / superseded /
+    cancelled), the end is copied over -- status, status_reason,
+    status_session and outcome -- with a 'synced_from_export' event.
+    Otherwise a local ledger that missed the end (a data repair applied to the
+    JSON, or a cloud run that closed it) would export it as active again and
+    resurrect it. Never terminal -> active, never a 'converted' row.
+    `report`, when a dict, receives {"inserted": n, "synced": n}.
     """
     export_path = Path(export_path)
     if not export_path.exists():
@@ -99,23 +123,48 @@ def seed_from_export(ledger_path, export_path):
         return 0
 
     from portfolio.schema import open_ledger
+    from portfolio.ledger import now_ts
     conn = open_ledger(ledger_path)
-    inserted = 0
+    inserted = synced = 0
     try:
-        existing = {r[0] for r in conn.execute(
-            "SELECT recommendation_id FROM recommendations")}
+        existing = {r[0]: r[1] for r in conn.execute(
+            "SELECT recommendation_id, status FROM recommendations")}
         cols = {r[1] for r in conn.execute("PRAGMA table_info(recommendations)")}
         with conn:
             for row in rows:
                 rid = row.get("recommendation_id")
-                if not rid or rid in existing:
+                if not rid:
+                    continue
+                if rid in existing:
+                    if (existing[rid] == "active"
+                            and row.get("status") in TERMINAL):
+                        sync = [f for f in ("status", "status_reason",
+                                            "status_session", "outcome")
+                                if f in cols]
+                        cur = conn.execute(
+                            "UPDATE recommendations SET {} WHERE "
+                            "recommendation_id = ? AND status = 'active'".format(
+                                ", ".join("{} = ?".format(f) for f in sync)),
+                            [_cell(row.get(f)) for f in sync] + [rid])
+                        if cur.rowcount == 1:
+                            conn.execute(
+                                "INSERT INTO recommendation_events "
+                                "(recommendation_id, event_type, "
+                                "effective_session, recorded_at, reason_code) "
+                                "VALUES (?,?,?,?,?)",
+                                (rid, "synced_from_export",
+                                 row.get("status_session"), now_ts(),
+                                 str(row.get("status"))))
+                            synced += 1
                     continue
                 use = [f for f in FIELDS if f in cols and f in row]
                 conn.execute(
                     "INSERT INTO recommendations ({}) VALUES ({})".format(
                         ", ".join(use), ", ".join("?" * len(use))),
-                    [row[f] for f in use])
+                    [_cell(row[f]) for f in use])
                 inserted += 1
     finally:
         conn.close()
+    if isinstance(report, dict):
+        report.update(inserted=inserted, synced=synced)
     return inserted

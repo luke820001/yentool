@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
@@ -349,15 +350,16 @@ class TrackedBlockIsNotDeleted(unittest.TestCase):
                          "tracked": {"count": 1}},
                 "rows": [], "tracked": [{"Stock_ID": "1815"}]}),
                 encoding="utf-8")
-            old = rx.MOBILE_DATA_FILE
-            rx.MOBILE_DATA_FILE = path
-            try:
+            # export_scan_result_json also writes the quote feed: point both
+            # outputs into the temp dir, or every suite run replaces the real
+            # (gitignored) mobile/quotes.json with this test's prices
+            quotes = Path(tmp) / "quotes.json"
+            with mock.patch.object(rx, "MOBILE_DATA_FILE", path), \
+                    mock.patch.object(rx, "MOBILE_QUOTES_FILE", quotes):
                 rx.export_scan_result_json(
                     pd.DataFrame([{"Stock_ID": "2330", "Close_Price": 100.0}]),
                     scan_mode="mode_prelaunch", session_date="2026-09-21")
                 got = json.loads(path.read_text(encoding="utf-8"))
-            finally:
-                rx.MOBILE_DATA_FILE = old
         self.assertEqual([r["Stock_ID"] for r in got["tracked"]], ["1815"])
         self.assertTrue(got["meta"]["tracked"]["carried_forward"])
         self.assertEqual(got["meta"]["tracked"]["built_for"], "2026-09-18")

@@ -17,15 +17,30 @@
 # is unreachable, a degraded OTC snapshot before TPEX has published, or a
 # payload whose per-column self-check failed (meta.checks.status == fail).
 #
+# Since 2026-10-08 the payload says it outright: meta.list_status.state is
+# "final" once the session's list is frozen (scanner/list_freeze.py, policy
+# final-once-v1) and "provisional" while a later run may still replace it.
+# A final list is never rescanned (scan.yml exits 3), so done == final.
+#
 # Env: GH_TOKEN, GH_REPO (gh), PAGES_URL, TZ=Asia/Taipei.
 # Test hooks: NOW_EPOCH fakes the clock, DRY_RUN=1 prints the plan and exits.
 set -euo pipefail
 
+# FIRST_ATTEMPT must equal scanner/list_freeze.FINAL_NOT_BEFORE: a list
+# scanned before it is never final (reason too_early), so an earlier first
+# attempt would only publish a provisional list and retry.
 FIRST_ATTEMPT="15:00"     # TPEX margin; see the OTC-snapshot guard in scan_headless
 LAST_ATTEMPT="19:30"      # after this, scan.yml's own late cron is the fallback
 RETRY_MIN=75              # 15:00, 16:15, 17:30, 18:45 -> at most 4 scans on a holiday
 JOB_BUDGET_MIN=340        # hop before the 360-minute job limit
 START=$(date +%s)
+
+# github.event.repository can be empty on scheduled events, which leaves
+# PAGES_URL a bare https://<owner>.github.io/ (the wrong site) -- rebuild it
+# from GH_REPO, as scanner/list_freeze.pages_url() does.
+if [[ -z "${PAGES_URL:-}" || "${PAGES_URL%/}" == *.github.io ]] && [[ -n "${GH_REPO:-}" ]]; then
+  PAGES_URL="https://${GH_REPO%%/*}.github.io/${GH_REPO#*/}"
+fi
 
 now() { echo "${NOW_EPOCH:-$(date +%s)}"; }
 today() { date -d "@$(now)" +%F; }
@@ -49,7 +64,7 @@ wait_until() {
 }
 
 published_today() {
-  local body date degraded regime_current
+  local body date degraded checks regime_current list_state
   body=$(curl -fsS --max-time 30 "${PAGES_URL}/scan_result.json?t=$(date +%s%N)") || return 1
   date=$(jq -r '.meta.data_date // "" | .[0:10]' <<<"$body")
   degraded=$(jq -r '.meta.degraded // ""' <<<"$body")
@@ -62,8 +77,20 @@ published_today() {
   # fixes itself within the hour. Retry it like any other incomplete scan; if
   # the feed never catches up the attempts run out and it publishes blocked,
   # exactly as before.
-  regime_current=$(jq -r '.meta.regime.is_current // true' <<<"$body")
-  log "published data_date=${date:-?} degraded=${degraded:-none} checks=${checks} regime_current=${regime_current}"
+  # (not `// true`: jq's alternative operator also replaces a false, so that
+  # spelling could never see a stale index)
+  regime_current=$(jq -r '.meta.regime.is_current | if . == null then true else . end' <<<"$body")
+  list_state=$(jq -r '.meta.list_status.state // empty' <<<"$body")
+  log "published data_date=${date:-?} degraded=${degraded:-none} checks=${checks} regime_current=${regime_current} list_state=${list_state:-none}"
+  # final-once: when the payload carries a list status it is the whole answer.
+  # "final" already folds in every condition below plus an unreadable regime,
+  # an unflagged empty list and a scan before FIRST_ATTEMPT; "provisional" is
+  # retried like any incomplete scan.
+  if [[ -n "$list_state" ]]; then
+    [[ "$date" == "$(today)" && "$list_state" == "final" ]]
+    return
+  fi
+  # A payload from before the freeze: the original four conditions.
   # Done = today's session, no degraded market, the per-column self-check
   # (tools/check_scan_result.py) did not fail, and the index feed is current.
   # A failed check is published with a red banner so the phone knows, and

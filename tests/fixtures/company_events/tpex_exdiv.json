@@ -1,0 +1,58 @@
+[
+ {
+  "ExRrightsExDividendDate": "1150930",
+  "SecuritiesCompanyCode": "8440",
+  "CompanyName": "綠電",
+  "ExRrightsExDividend": "除息",
+  "StockDividendRatio": "0.00000000",
+  "SubscriptionRatioToNewSharesIssued": "0.00000000",
+  "SubscriptionPricePerShare": "0.00",
+  "CashDividend": "0.35000000",
+  "AllocatedForPublicUnderwriting": "0",
+  "SubscribedByEmployees": "0",
+  "SubscribedByExistingShareholders": "0",
+  "SubscribedProRataInThousandShares": "0.00000000"
+ },
+ {
+  "ExRrightsExDividendDate": "1151007",
+  "SecuritiesCompanyCode": "6129",
+  "CompanyName": "普誠",
+  "ExRrightsExDividend": "除權",
+  "StockDividendRatio": "0.00000000",
+  "SubscriptionRatioToNewSharesIssued": "0.12455307",
+  "SubscriptionPricePerShare": "11.75",
+  "CashDividend": "0.00000000",
+  "AllocatedForPublicUnderwriting": "2000000",
+  "SubscribedByEmployees": "3000000",
+  "SubscribedByExistingShareholders": "15000000",
+  "SubscribedProRataInThousandShares": "93.41480433"
+ },
+ {
+  "ExRrightsExDividendDate": "1151001",
+  "SecuritiesCompanyCode": "1784",
+  "CompanyName": "訊聯",
+  "ExRrightsExDividend": "除息",
+  "StockDividendRatio": "0.00000000",
+  "SubscriptionRatioToNewSharesIssued": "0.00000000",
+  "SubscriptionPricePerShare": "0.00",
+  "CashDividend": "0.88096400",
+  "AllocatedForPublicUnderwriting": "0",
+  "SubscribedByEmployees": "0",
+  "SubscribedByExistingShareholders": "0",
+  "SubscribedProRataInThousandShares": "0.00000000"
+ },
+ {
+  "ExRrightsExDividendDate": "1151001",
+  "SecuritiesCompanyCode": "6523",
+  "CompanyName": "達爾膚",
+  "ExRrightsExDividend": "除息",
+  "StockDividendRatio": "0.00000000",
+  "SubscriptionRatioToNewSharesIssued": "0.00000000",
+  "SubscriptionPricePerShare": "0.00",
+  "CashDividend": "2.00000000",
+  "AllocatedForPublicUnderwriting": "0",
+  "SubscribedByEmployees": "0",
+  "SubscribedByExistingShareholders": "0",
+  "SubscribedProRataInThousandShares": "0.00000000"
+ }
+]

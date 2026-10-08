@@ -15,6 +15,12 @@ BROKER_BRANCH_FILE = DATA_DIR / "broker_branch.db"
 SIGNAL_LOG_FILE = DATA_DIR / "signal_log.db"
 TAIEX_FILE      = DATA_DIR / "taiex.db"
 
+# Company events for the phone card (ingestion/company_events.py): latest
+# monthly revenue, next ex-rights/ex-dividend date, next investor conference.
+# DISPLAY ONLY -- never scored. Committed by .github/workflows/scan.yml so the
+# accumulated conference dates survive between cloud runs.
+COMPANY_EVENTS_FILE = DATA_DIR / "company_events.json"
+
 # Forward-performance ledger: append-only record of every scan's picks plus the
 # realized forward returns backfilled later. Turns the open-loop scanner into a
 # self-measuring system (live hit-rate, alpha decay, score calibration).
@@ -114,7 +120,7 @@ LARGE_HOLDER_WEEKS = 3
 
 # Cond_B uses FinMind shareholding data: weekly, optional, and throttled to
 # ~1 request / 1.5s. Fetching it for every full-market candidate (100-250
-# stocks) serially adds minutes to a scan, so it is OFF by default — the scan
+# stocks) serially adds minutes to a scan, so it is OFF by default -- the scan
 # uses whatever chip data is already cached and never blocks on the network.
 # Populate the cache out of band (e.g. main.py on the watchlist) or export
 # CHIP_FETCH_IN_SCAN=1 to fetch inline.

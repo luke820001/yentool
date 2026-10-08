@@ -232,17 +232,33 @@ _SORT_KEYS = {
 
 
 def sort_for_mode(df, selected_mode):
-    """Rank rows by a key appropriate to the mode (descending)."""
+    """Rank rows by a key appropriate to the mode (descending).
+
+    Ties break on Stock_ID ascending with a stable sort (2026-10-08, plan
+    P0-5b). The default quicksort is not stable, so two names on the same
+    score swapped places between the 15:05 run and a 21:48 rerun of
+    2026-10-07 (3498 / 6805, both 71.3) -- and rank 20 is the entry cutoff.
+    Only the order AMONG equal scores is fixed; nothing else changes.
+    """
     if df is None or df.empty:
         return df
     key = _SORT_KEYS.get(selected_mode, "Explosion_Score")
     if key not in df.columns:
         return df
     score = pd.to_numeric(df[key], errors="coerce").fillna(float("-inf"))
+    if "Stock_ID" not in df.columns:
+        return (
+            df.assign(_sort_key=score)
+              .sort_values("_sort_key", ascending=False, kind="mergesort")
+              .drop(columns="_sort_key")
+              .reset_index(drop=True)
+        )
+    sid = df["Stock_ID"].astype(str).str.strip()
     return (
-        df.assign(_sort_key=score)
-          .sort_values("_sort_key", ascending=False)
-          .drop(columns="_sort_key")
+        df.assign(_sort_key=score, _sort_sid=sid)
+          .sort_values(["_sort_key", "_sort_sid"], ascending=[False, True],
+                       kind="mergesort")
+          .drop(columns=["_sort_key", "_sort_sid"])
           .reset_index(drop=True)
     )
 
@@ -662,13 +678,39 @@ def mark_buy_ready(df, scan_mode, session_date=None):
                  else pd.Series([False] * n, index=df.index))
     fresh = status.eq("pending") | (first_day & known)
 
+    # Trade restrictions (2026-10-08, plan P0-1; scanner/trade_restrictions).
+    # Only the kinds in trade_restrictions.BLOCKING_RESTRICTIONS refuse a buy
+    # -- ("suspended",) by default: disposition is shown and explained on the
+    # card but does not block (its signals were the best bucket in the
+    # preliminary research, BACKTEST_LOG section M). The set is read at call
+    # time, so flipping it there is the whole change. A value that is not a
+    # known kind (column missing, "", NaN) reads as "unknown", which blocks
+    # only if the set names "unknown".
+    try:
+        import scanner.trade_restrictions as _tr
+        blocking = tuple(_tr.BLOCKING_RESTRICTIONS)
+        kinds = tuple(_tr.RESTRICTION_KINDS)
+    except Exception:
+        blocking, kinds = ("suspended",), ()
+    if "Trade_Restriction" in df.columns:
+        restr = (df["Trade_Restriction"].where(df["Trade_Restriction"].notna(), "")
+                 .astype(str).str.strip())
+    else:
+        restr = pd.Series([""] * n, index=df.index)
+    restr = restr.where(restr.isin(kinds), "unknown") if kinds else restr
+    restricted = restr.isin(blocking)
+
     ok = ((rank < N_ENTER) & (market == "OTC") & core & fresh & current
-          & integrity & enter_ok)
+          & integrity & enter_ok & ~restricted)
 
     # First failing condition wins, ordered from most to least actionable: the
     # market gate is the reason to do nothing at all today; a data fault is the
     # reason to trust nothing about this row; only then the per-name filters.
+    # "restricted" goes FIRST (lowest priority): it binds only when every
+    # other gate passes, so every existing reason keeps its meaning and the
+    # restriction itself is always on the card via Trade_Restriction.
     block = pd.Series("", index=df.index)
+    block = block.mask(restricted, "restricted")
     block = block.mask(~fresh & known, "held")
     block = block.mask(~known, "unknown")
     block = block.mask(~core, "quality")

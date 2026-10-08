@@ -26,6 +26,7 @@ from portfolio.schema import open_ledger  # re-exported for callers
 
 __all__ = [
     "open_ledger", "now_ts", "record_recommendation", "expire_recommendations",
+    "TERMINAL_STATUSES", "transition_recommendation", "set_valid_until",
     "open_position", "add_execution", "record_dividend", "mark_day",
     "freeze_cycle", "position_view", "portfolio_summary", "LedgerError",
 ]
@@ -166,6 +167,87 @@ def expire_recommendations(conn, session_date, reason="window_elapsed"):
     return len(rows)
 
 
+# The recommendation lifecycle (2026-10-08, "Model T"): 'active' means the
+# recommended trade is live -- inside its entry window or in trade -- and it
+# leaves 'active' exactly once, for one of these. A terminal recommendation
+# never returns to 'active', and it frees the cycle (_open_cycle), so the next
+# genuine signal opens cycle_seq + 1. 'converted' (a real position was opened
+# from it, local only) is not in this list and the lifecycle never touches it.
+#   expired     no fill (no bar on the entry session, or no priceable open),
+#               or the horizon safety net (data never arrived)
+#   closed      the canonical replay booked the exit (stop/lock/tp/late/time)
+#   superseded  replaced before entry: a rule-version change inside the entry
+#               window, or a same-session re-run that no longer qualifies it
+#   cancelled   a data repair (a recommendation that should never have been
+#               written, e.g. one created by a degraded run)
+TERMINAL_STATUSES = ("expired", "closed", "superseded", "cancelled")
+
+
+def transition_recommendation(conn, rec_id, to_status, reason,
+                              effective_session, outcome=None):
+    """Move an ACTIVE recommendation to a terminal status, once.
+
+    The row keeps its fixed prices; only status, status_reason,
+    status_session and outcome change, through an UPDATE guarded by
+    status = 'active' (never a DELETE: SQLite keeps deleted bytes in freelist
+    pages, and an ended recommendation is still evidence of what was said).
+    One recommendation_events row records it. Returns True when this call made
+    the transition, False when the row was not active (already terminal,
+    converted, or unknown) -- so re-running a whole pass is harmless.
+    `outcome` is a JSON-able dict (the replayed trade) or None.
+    """
+    if to_status not in TERMINAL_STATUSES:
+        raise LedgerError("not a terminal recommendation status: {}".format(
+            to_status))
+    payload = (json.dumps(outcome, ensure_ascii=True, sort_keys=True)
+               if outcome is not None else None)
+    effective_session = _session(effective_session) or None
+    with conn:
+        cur = conn.execute(
+            "UPDATE recommendations SET status = ?, status_reason = ?, "
+            "status_session = ?, outcome = ? "
+            "WHERE recommendation_id = ? AND status = 'active'",
+            (to_status, str(reason or ""), effective_session, payload, rec_id))
+        if cur.rowcount != 1:
+            return False
+        conn.execute(
+            "INSERT INTO recommendation_events "
+            "(recommendation_id, event_type, effective_session, recorded_at, "
+            "reason_code, payload) VALUES (?,?,?,?,?,?)",
+            (rec_id, to_status, effective_session, now_ts(), str(reason or ""),
+             payload))
+    return True
+
+
+def set_valid_until(conn, rec_id, session, reason):
+    """Set (or move) an ACTIVE recommendation's entry session.
+
+    `valid_until_session` is the session the recommended trade is entered on:
+    the next market session after the qualifying one. reason 'backfill' fills
+    a record written without one (event 'window_set'); 'market_closed' moves
+    it when the market turned out not to trade that day, e.g. a typhoon
+    closure (event 'window_moved'). Returns True when the row changed.
+    """
+    session = _session(session)
+    if not session:
+        return False
+    with conn:
+        cur = conn.execute(
+            "UPDATE recommendations SET valid_until_session = ? "
+            "WHERE recommendation_id = ? AND status = 'active' "
+            "AND (valid_until_session IS NULL OR valid_until_session != ?)",
+            (session, rec_id, session))
+        if cur.rowcount != 1:
+            return False
+        conn.execute(
+            "INSERT INTO recommendation_events "
+            "(recommendation_id, event_type, effective_session, recorded_at, "
+            "reason_code) VALUES (?,?,?,?,?)",
+            (rec_id, "window_moved" if reason == "market_closed"
+             else "window_set", session, now_ts(), str(reason or "")))
+    return True
+
+
 # --- Positions and executions ----------------------------------------------
 
 def open_position(conn, stock_id, stock_name="", market="", strategy="",
@@ -200,7 +282,7 @@ def open_position(conn, stock_id, stock_name="", market="", strategy="",
         if recommendation_id:
             # The recommendation has done its job: it is now a real holding,
             # not an outstanding suggestion. Report section 5.2's lifecycle
-            # ends the advice branch here ("已建立實際持倉"), which also stops
+            # ends the advice branch here ("position established"), which also stops
             # expire_recommendations from later marking it as one that lapsed
             # unacted-on -- it did not lapse, it was taken.
             conn.execute(

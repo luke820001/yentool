@@ -120,18 +120,25 @@ def split_tracked(verified, published, tracked_ids, limit=MAX_TRACKED,
     return out.reset_index(drop=True)
 
 
-def annotate_tracked(df, scan_mode):
+def annotate_tracked(df, scan_mode, rec_anchors=None):
     """Give a tracked row the same treatment a listed row gets, so the phone
     can render it with the same code path: trade levels, holding day, exit
     plan, chip readout. Buy_Ready is forced false -- a name that is no longer
-    on the list is not a new buy, whatever its indicators say."""
+    on the list is not a new buy, whatever its indicators say.
+
+    The name is NOT on today's list, so today must not count as one of its
+    appearances (add_own_bar=False): before 2026-10-08 the tracker added the
+    row's own bar, which re-anchored a dropped-out name on today and showed
+    a holder "buy at the next open" for a trade they were already in.
+    `rec_anchors` is passed through (see holding_tracker.annotate_holding)."""
     if df is None or df.empty:
         return df
     from scanner.scan_mode import add_trade_columns
     from scanner.holding_tracker import annotate_holding
     out = add_trade_columns(df, scan_mode)
     try:
-        out = annotate_holding(out, scan_mode)
+        out = annotate_holding(out, scan_mode, rec_anchors=rec_anchors,
+                               add_own_bar=False)
     except Exception as e:
         print("  [tracked] holding annotation skipped: {}".format(e))
     try:

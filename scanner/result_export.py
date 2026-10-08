@@ -32,7 +32,8 @@ from config.settings import (
 def export_scan_result(df, scan_mode="", reports=None, degraded=None,
                        session_date=None, strategy_version="",
                        quality=None, quotes_meta=None, tracked=None,
-                       live_record=None):
+                       live_record=None, rec_stats=None, events_meta=None,
+                       report_sources=None):
     """
     Write the full result DataFrame (all computed columns) to SCAN_RESULT_FILE,
     overwriting any previous version. Two context columns (mode + timestamp) are
@@ -64,7 +65,9 @@ def export_scan_result(df, scan_mode="", reports=None, degraded=None,
                                 degraded=degraded, session_date=session_date,
                                 strategy_version=strategy_version,
                                 quality=quality, quotes_meta=quotes_meta,
-                                tracked=tracked, live_record=live_record)
+                                tracked=tracked, live_record=live_record,
+                                rec_stats=rec_stats, events_meta=events_meta,
+                                report_sources=report_sources)
     except Exception as e:
         # A mobile-feed hiccup must never break the primary CSV export.
         print("  [export] mobile json failed: {}".format(e))
@@ -127,15 +130,34 @@ def _publish_quotes(df, names=None):
     return payload
 
 
+def _report_sources(sources, reports):
+    """meta.report_sources: one entry per published report, nothing else."""
+    if not isinstance(sources, dict) or not isinstance(reports, dict):
+        return {}
+    out = {}
+    for k, v in sources.items():
+        if k in reports and isinstance(v, dict):
+            out[str(k)] = dict(v)
+    return out
+
+
 def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
                             degraded=None, session_date=None,
                             strategy_version="", quality=None,
-                            quotes_meta=None, tracked=None, live_record=None):
+                            quotes_meta=None, tracked=None, live_record=None,
+                            rec_stats=None, events_meta=None,
+                            report_sources=None):
     """
     Write the scan result as JSON for the mobile PWA. Structure:
         {"meta": {...}, "rows": [...]}
 
     `reports` is an optional {market: text} map (ALL/OTC/TSE) of AI reports.
+    `report_sources` says where each of those texts came from, published as
+    meta.report_sources = {market: {source: gemini|groq|template, model,
+    attempts, seconds, error}} (scan_headless.build_market_reports). It is a
+    sibling, not a change to meta.reports, which stays {market: str} for the
+    phones that cache an older app.js. Like reports it describes THIS run, so
+    a caller without one publishes {}.
     `degraded` is a short ASCII reason string when an exchange feed failed its
     sanity floor this run (the phone shows a data-fault banner and the missing
     market must NOT be read as "no candidates today"). None = healthy.
@@ -154,6 +176,15 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
     none keeps the previous block, marked carried_forward, for the same
     reason `tracked` is carried: the desktop export must not strip what the
     cloud built.
+    `rec_stats` is what the recommendation lifecycle did this run
+    (portfolio.sync.rec_meta: created / attached / closed / expired /
+    superseded / backfilled / moved / deferred / writes), published as
+    meta.rec. It is a fact about THIS run, so a caller without one
+    publishes none.
+    `events_meta` is ingestion.company_events.meta_block -- per-source health
+    of the display-only company-event columns (Rev_* / Ex_* / Conf_Date),
+    published as meta.events. A caller without one keeps the previous block,
+    marked carried_forward, like live_record.
     NaN/inf are coerced to null so the JSON is valid. Returns the written path.
     """
     MOBILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -220,9 +251,19 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
                 "missing": quotes.get("missing", []),
             },
             "reports": reports or {},
+            "report_sources": _report_sources(report_sources, reports),
         },
         "rows": rows,
     }
+    # Provisional until result_checks.check_files has judged the file and
+    # stamped the real block (scanner/list_freeze, 2026-10-08): a run that dies
+    # before its checks leaves a list the scan-timer will retry, never a
+    # frozen one.
+    try:
+        from scanner.list_freeze import seed_block
+        payload["meta"]["list_status"] = seed_block(payload["meta"])
+    except Exception as e:
+        print("  [export] list_status seed skipped: {}".format(e))
     if tracked is not None and not tracked.empty:
         t = tracked.replace([float("inf"), float("-inf")], pd.NA)
         payload["tracked"] = json.loads(
@@ -254,6 +295,8 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
                 payload["meta"]["tracked"] = meta_old
         except Exception:
             pass
+    if isinstance(rec_stats, dict):
+        payload["meta"]["rec"] = rec_stats
     if isinstance(live_record, dict) and live_record:
         payload["meta"]["live_record"] = live_record
     else:
@@ -264,6 +307,18 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
                 prev_rec = dict(prev_rec)
                 prev_rec["carried_forward"] = True
                 payload["meta"]["live_record"] = prev_rec
+        except Exception:
+            pass
+    if isinstance(events_meta, dict) and events_meta:
+        payload["meta"]["events"] = events_meta
+    else:
+        try:
+            with open(MOBILE_DATA_FILE, encoding="utf-8") as f:
+                prev_ev = ((json.load(f).get("meta") or {}).get("events"))
+            if isinstance(prev_ev, dict) and prev_ev:
+                prev_ev = dict(prev_ev)
+                prev_ev["carried_forward"] = True
+                payload["meta"]["events"] = prev_ev
         except Exception:
             pass
     if quotes_meta:

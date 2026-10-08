@@ -43,7 +43,11 @@
 
 * **`scan_result.json`** = `{meta, rows}`。`meta` 帶模式、策略版本、掃描時間、
   行情日期、`calendar_tail`（真實交易日）、`regime`（大盤判定，含 `as_of_date`
-  與 `is_current`）、`quality`、`degraded`、`reports`（AI 報告）。
+  與 `is_current`）、`quality`、`degraded`、`reports`（AI 報告，`{市場: 文字}`）、
+  `report_sources`（每份報告的來源 `{市場: {source, model, attempts, seconds, error}}`，
+  `source` 為 `gemini` / `groq` / `template`；`template` 表示 AI 沒有回應、
+  內容是本機依規則產生的模板，畫面應標示「模板·非 AI」。舊檔沒有這個欄位時，
+  以報告第一行是否為【模板報告 / 【本地報告 判斷）。
   每個 `row` 帶技術欄位，以及**後端算好的買進判定** `Buy_Ready` / `Buy_Block`，
   和**固定首日建議** `Recommendation_ID` / `Initial_Buy_Price` /
   `Recommended_On` / `Rec_Status` / `Rec_Valid_Until`。
@@ -178,3 +182,25 @@ Service Worker 走 network-first：有網路一定看到最新的掃描與最新
 「核心+ 但大盤未順風」三桶，各自用完整出場規則（隔日開盤進、含費稅、續抱到 20 天）重放後
 的筆數、勝率、平均與合計。後端 `scanner/live_record.py` 每次掃描重算，放在 `meta.live_record`；
 桌面掃描沒有重算時會沿用上一次的並標示「沿用上一次掃描算的」。
+
+## 建議頁三組、資金與下單指引（2026-10-08，v31）
+
+建議頁分成「今日可買」、「模擬持有中（今天動作）」和「參考」三組。分組只看後端欄位
+（`Buy_Ready`／`Buy_Block`、`Hold_Status`、`Exit_Signal`），手機只會把「可買」降級，不會升級。
+
+- **股數與費用**：資金、檔數（預設 8）和每筆風險 % 存在 IndexedDB 的 meta `sizing`
+  （`{capital_cents, max_slots, risk_pct}`，和費率設定放在一起），所以會跟著「匯出備份」一起帶走，
+  匯入時也會檢查範圍。另外在 `localStorage` 的 `yt_sizing_v1` 存一份備用。
+  讀寫都包了 try/catch，瀏覽器不允許儲存時，這次開啟仍可使用，只是不會記住。費稅算法與 `portfolio/money.py` 相同：
+  手續費取到元、最低 NT$20；證交稅取到元。
+- **下單指引**：交易規則（零股 09:10 起撮合等）寫在 `app.js` 的 `ORDER_RULES`，附查核日期。
+  處置與注意股的撮合分鐘數和預收款只取自後端的 `Restriction_Match_Min`、`Restriction_Prepay`，
+  不寫死在手機端。
+- **績效頁**的「系統訊號紀錄」直接讀 `meta.live_record`（tradable、bench、by_restriction、by_sid），不是帳本。
+  出場原因表、曲線和「排除起始日批次」是用 `tradable.trades` 算的；後端只保留最近 40 筆
+  （`live_record.TRADES_KEPT`），超過時畫面會標明「只就保留的最近 N 筆計算」，標題那一行才是全部筆數。
+- **驗證**：`node tests/mobile_probe.js` 在 node vm 裡啟動整個 `app.js`，用三份資料各畫一次每一頁，
+  分別是 `tests/fixtures/mobile/scan_2026-09-23.json`（09-23 舊版資料，沒有新欄位）、
+  `tests/fixtures/mobile/scan_2026-10-07.json`，以及一份合成的新欄位資料。`mobile/scan_result.json` 不進 git，
+  測試不讀它。`tests/test_mobile_probe.py` 另外用 `portfolio/money.py` 產生約 5,800 筆手續費／證交稅格點，
+  以 `--fee-grid` 交給 probe 逐筆比對；沒有安裝 node 時跳過。

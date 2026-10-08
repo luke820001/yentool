@@ -110,11 +110,15 @@ BLOCK_TEXT = {
     "rank":      "非前20名",
     "market":    "非上櫃",
     "quality":   "未過品質閘門",
-    "held":      "已進場·非新訊號",
+    "held":      "非新訊號·前日已在清單",
     "unknown":   "持倉狀態不明",
     "integrity": "資料完整性未過",
     "stale":     "個股資料非最新",
     "no_rule":   "此模式無驗證買進規則",
+    # Added 2026-10-08 with the investor-view release; same wording as
+    # mobile/app.js BLOCK_TEXT and config/report_text.json block_label.
+    "dropped":   "已掉出清單·僅追蹤出場",
+    "restricted": "交易受限·無法下單",
 }
 
 # ── 各模式決策卡（依 signal ledger 實戰驗證，見 docs/EVAL_PLAYBOOK.md）────────
@@ -490,7 +494,9 @@ def _hold_banner(row, disturbed=False):
             return ("出場提醒：★ {}今日收盤出場（第 {} 天）".format(
                 "已到期，" if after_close else "", day), YELLOW)
         if status == "overdue":
-            return "出場提醒：已持有第 {} 天，應已出場（{}）".format(
+            # Since 2026-10-08 a past time exit is "exited"; "overdue" now means
+            # the bars needed to book an exit are missing (a data gap).
+            return "出場提醒：已持有第 {} 天仍無出場紀錄（{}），可能缺資料，請自行確認".format(
                 day, exit_d or "已過期"), RED
         exit_s = "，出場日 {}".format(exit_d) if exit_d else ""
         return "出場提醒：持有第 {}/{} 天，還有 {} 個交易日{}".format(

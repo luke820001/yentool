@@ -42,8 +42,10 @@ Nothing here changes selection logic; it only observes. Failures are swallowed
 so a ledger problem can never break a live scan.
 """
 import json
+import os
 import sqlite3
 from datetime import datetime, date
+from pathlib import Path
 
 import pandas as pd
 
@@ -146,6 +148,45 @@ def _ensure_schema(conn):
         if name not in ocols:
             conn.execute("ALTER TABLE outcomes ADD COLUMN {} {}".format(
                 name, decl))
+    _ensure_list_sessions(conn)
+
+
+# The final-once marker (scanner/list_freeze, 2026-10-08): one row per (DATA
+# session, mode) whose published list is final. The freeze gate reads it, so
+# it travels with the ledger in the workflow's state commit.
+LIST_SESSION_FIELDS = (
+    "scan_session", "scan_mode", "state", "first_published_at",
+    "published_at", "revision", "picks_ts", "strategy_version", "rows",
+    "buy_ready_ids", "reasons", "revised_reason", "revised_at", "run_id")
+
+
+def _ensure_list_sessions(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS list_sessions (
+            scan_session       TEXT,
+            scan_mode          TEXT,
+            state              TEXT,
+            first_published_at TEXT,
+            published_at       TEXT,
+            revision           INTEGER,
+            picks_ts           TEXT,
+            strategy_version   TEXT,
+            rows               INTEGER,
+            buy_ready_ids      TEXT,
+            reasons            TEXT,
+            revised_reason     TEXT,
+            revised_at         TEXT,
+            run_id             TEXT,
+            PRIMARY KEY (scan_session, scan_mode)
+        )
+        """
+    )
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(list_sessions)")}
+    for name in LIST_SESSION_FIELDS:
+        if name not in cols:
+            conn.execute("ALTER TABLE list_sessions ADD COLUMN {} {}".format(
+                name, "INTEGER" if name in ("revision", "rows") else "TEXT"))
 
 
 def _f(row, col):
@@ -219,7 +260,11 @@ def record_picks(df, scan_mode, scan_session=None):
     same (session, mode) is replaced wholesale, so re-scanning a day is safe.
 
     `scan_session` defaults to today's wall-clock date (the run that produced
-    the list). The per-stock forward anchor is each row's own Data_Date.
+    the list). scan_headless passes the DATA session (2026-10-08), so a run
+    after midnight or on a holiday no longer files the list under a session
+    with no bars, and the picks key equals the freeze key (list_sessions).
+    Rows written before that keep their wall-clock key. The per-stock forward
+    anchor is each row's own Data_Date.
 
     Also stores the buy DECISION, not just the shortlist (F17): core_plus,
     buy_ready, buy_block, a gate_detail JSON of the remaining gate inputs and
@@ -259,10 +304,15 @@ def record_picks(df, scan_mode, scan_session=None):
         # JSON because the gate's inputs grow over time (Integrity_OK and the
         # per-row freshness check were both added after the table was designed)
         # and a schema change per input would be worse than a blob here.
+        # restriction / restriction_until (2026-10-08): the trade restriction
+        # in force (scanner/trade_restrictions), so live_record can count the
+        # record by it; None when the scan did not annotate restrictions.
         gate = {
             "hold_status": _s(r, "Hold_Status"),
             "integrity_ok": _b(r, "Integrity_OK"),
             "regime": regime,
+            "restriction": _s(r, "Trade_Restriction"),
+            "restriction_until": _s(r, "Restriction_Until"),
         }
         rows.append((
             session, ts, scan_mode, sid,
@@ -311,6 +361,189 @@ def record_picks(df, scan_mode, scan_session=None):
     except Exception as e:
         print("  [ledger] record failed: {}".format(e))
         return 0
+
+
+def _open_rw(path=None):
+    p = Path(path) if path else Path(SIGNAL_LEDGER_FILE)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(p), timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _list_row(row):
+    out = {k: row[k] for k in row.keys()}
+    for k in ("buy_ready_ids", "reasons"):
+        try:
+            v = json.loads(out.get(k) or "[]")
+            out[k] = v if isinstance(v, list) else []
+        except (TypeError, ValueError):
+            out[k] = []
+    return out
+
+
+def record_list_session(scan_mode, block, rows=None, buy_ready_ids=None,
+                        run_id=None, path=None):
+    """Upsert the list_sessions row for block["session"] (a meta.list_status
+    block, scanner/list_freeze). Returns what happened: 'inserted',
+    'updated', 'revised', 'same', 'refused', 'skipped' or 'error'. Never
+    raises.
+
+    A final row is never downgraded to provisional, and is overwritten only
+    by a block that carries a revised_reason (its revision then moves past
+    the stored one and first_published_at is kept). Re-recording the same
+    publish is a no-op. picks_ts is the newest picks.scan_ts of the session,
+    i.e. the run whose list this is."""
+    if not isinstance(block, dict):
+        return "skipped"
+    session = str(block.get("session") or "")[:10]
+    state = block.get("state")
+    if not session or state not in ("final", "provisional"):
+        return "skipped"
+    if run_id is None:
+        run_id = os.environ.get("GITHUB_RUN_ID") or None
+    conn = None
+    try:
+        conn = _open_rw(path)
+        _ensure_schema(conn)
+        old = conn.execute(
+            "SELECT * FROM list_sessions WHERE scan_session = ? AND scan_mode = ?",
+            (session, scan_mode)).fetchone()
+        try:
+            rev = max(int(block.get("revision") or 1), 1)
+        except (TypeError, ValueError):
+            rev = 1
+        first = block.get("first_published_at") or block.get("published_at")
+        status = "inserted" if old is None else "updated"
+        if old is not None and old["state"] == "final":
+            old_rev = int(old["revision"] or 1)
+            if state != "final":
+                print("  [freeze] {} stays final in the ledger (a provisional "
+                      "result does not replace it)".format(session))
+                return "refused"
+            if (old["published_at"] == block.get("published_at")
+                    and old_rev == rev):
+                return "same"
+            if not block.get("revised_reason"):
+                print("  [freeze] {} is final (revision {}); not overwritten "
+                      "without a revised_reason".format(session, old_rev))
+                return "refused"
+            rev = max(rev, old_rev + 1)
+            first = old["first_published_at"] or first
+            status = "revised"
+        picks_ts = conn.execute(
+            "SELECT MAX(scan_ts) FROM picks WHERE scan_session = ? AND scan_mode = ?",
+            (session, scan_mode)).fetchone()[0]
+        ids = [str(x) for x in (buy_ready_ids or [])]
+        reasons = block.get("reasons") if isinstance(block.get("reasons"), list) else []
+        conn.execute(
+            "INSERT OR REPLACE INTO list_sessions ({}) VALUES ({})".format(
+                ", ".join(LIST_SESSION_FIELDS),
+                ", ".join("?" for _ in LIST_SESSION_FIELDS)),
+            (session, scan_mode, state, first, block.get("published_at"), rev,
+             picks_ts, block.get("strategy_version"),
+             None if rows is None else int(rows),
+             json.dumps(ids), json.dumps([str(r) for r in reasons]),
+             block.get("revised_reason"), block.get("revised_at"), run_id))
+        conn.commit()
+        return status
+    except Exception as e:
+        print("  [freeze] list session not recorded: {}".format(e))
+        return "error"
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def final_list_session(scan_mode, session=None, path=None):
+    """The final list_sessions row of `session` (default: the newest final
+    one) as a dict, or None. Read-only: a missing file stays missing, an old
+    ledger without the table reads as None, and -- opened immutable when no
+    WAL is pending -- no -wal / -shm files are left beside a file the
+    workflow commits with `git add -f`."""
+    p = Path(path) if path else Path(SIGNAL_LEDGER_FILE)
+    try:
+        if not p.is_file():
+            return None
+        wal = Path(str(p) + "-wal")
+        pending = wal.exists() and wal.stat().st_size > 0
+        uri = p.resolve().as_uri() + ("?mode=ro" if pending
+                                      else "?mode=ro&immutable=1")
+        conn = sqlite3.connect(uri, uri=True, timeout=10)
+    except Exception:
+        return None
+    try:
+        conn.row_factory = sqlite3.Row
+        if conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' "
+                        "AND name = 'list_sessions'").fetchone() is None:
+            return None
+        if session:
+            row = conn.execute(
+                "SELECT * FROM list_sessions WHERE scan_mode = ? AND "
+                "scan_session = ? AND state = 'final'",
+                (scan_mode, str(session)[:10])).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM list_sessions WHERE scan_mode = ? AND "
+                "state = 'final' ORDER BY scan_session DESC LIMIT 1",
+                (scan_mode,)).fetchone()
+        return _list_row(row) if row is not None else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def amend_picks(scan_session, scan_mode, updates, path=None):
+    """Apply an evening restriction amend (list_freeze.amend_restrictions) to
+    the session's stored picks: gate_detail.restriction / restriction_until,
+    and buy_ready / buy_block when the amend withdrew a buy. `updates` is
+    {stock_id: {restriction, restriction_until[, buy_ready, buy_block]}}.
+    scan_ts is NOT touched -- the list is still the one published then.
+    Returns the number of rows updated (0 on any failure)."""
+    if not updates:
+        return 0
+    conn = None
+    n = 0
+    try:
+        conn = _open_rw(path)
+        _ensure_schema(conn)
+        for sid, upd in updates.items():
+            row = conn.execute(
+                "SELECT gate_detail FROM picks WHERE scan_session = ? AND "
+                "scan_mode = ? AND stock_id = ?",
+                (str(scan_session)[:10], scan_mode, str(sid))).fetchone()
+            if row is None:
+                continue
+            try:
+                gate = json.loads(row[0] or "{}")
+                if not isinstance(gate, dict):
+                    gate = {}
+            except (TypeError, ValueError):
+                gate = {}
+            for key in ("restriction", "restriction_until"):
+                if key in upd:
+                    gate[key] = upd[key]
+            sets = ["gate_detail = ?"]
+            vals = [json.dumps(gate, ensure_ascii=False, sort_keys=True)]
+            for key in ("buy_ready", "buy_block"):
+                if key in upd:
+                    sets.append("{} = ?".format(key))
+                    vals.append(upd[key])
+            conn.execute(
+                "UPDATE picks SET {} WHERE scan_session = ? AND scan_mode = ? "
+                "AND stock_id = ?".format(", ".join(sets)),
+                vals + [str(scan_session)[:10], scan_mode, str(sid)])
+            n += 1
+        conn.commit()
+        return n
+    except Exception as e:
+        print("  [freeze] picks not amended: {}".format(e))
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _calendar_mature(bar_date, horizon):
