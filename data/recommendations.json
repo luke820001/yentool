@@ -11,16 +11,19 @@
    "initial_stop_price": "107.10",
    "initial_target_price": "151.20",
    "market": "OTC",
+   "outcome": "{\"bars\": 11, \"entry_date\": \"2026-09-10\", \"entry_price\": 125.0, \"exit_date\": \"2026-09-24\", \"exit_price\": 116.0, \"reason\": \"time\", \"ret_gross_pct\": -7.2, \"ret_net_pct\": -7.74}",
    "recommendation_id": "rec-1815-mode_prelaunch-1",
    "recommended_at": "2026-09-09 20:43:05",
-   "status": "active",
+   "status": "closed",
+   "status_reason": "time",
+   "status_session": "2026-09-24",
    "stock_id": "1815",
    "stock_name": "富喬",
    "strategy": "mode_prelaunch",
    "strategy_version": "prelaunch-2026-09-09",
    "trail_arm_price": "133.56",
    "trail_lock_price": "128.52",
-   "valid_until_session": null
+   "valid_until_session": "2026-09-10"
   },
   {
    "cycle_seq": 1,
@@ -54,16 +57,19 @@
    "initial_stop_price": "187.50",
    "initial_target_price": "281.50",
    "market": "OTC",
+   "outcome": null,
    "recommendation_id": "rec-3498-mode_prelaunch-1",
    "recommended_at": "2026-10-06 15:05:53",
    "status": "active",
+   "status_reason": null,
+   "status_session": null,
    "stock_id": "3498",
    "stock_name": "陽程",
    "strategy": "mode_prelaunch",
    "strategy_version": "prelaunch-2026-09-21",
    "trail_arm_price": "240.50",
    "trail_lock_price": "239.00",
-   "valid_until_session": null
+   "valid_until_session": "2026-10-07"
   },
   {
    "cycle_seq": 1,
@@ -74,16 +80,19 @@
    "initial_stop_price": "297.50",
    "initial_target_price": "446.50",
    "market": "OTC",
+   "outcome": null,
    "recommendation_id": "rec-8227-mode_prelaunch-1",
    "recommended_at": "2026-10-07 15:05:33",
    "status": "active",
+   "status_reason": null,
+   "status_session": null,
    "stock_id": "8227",
    "stock_name": "巨有科技",
    "strategy": "mode_prelaunch",
    "strategy_version": "prelaunch-2026-09-21",
    "trail_arm_price": "381.50",
    "trail_lock_price": "379.00",
-   "valid_until_session": null
+   "valid_until_session": "2026-10-08"
   }
  ],
  "table": "recommendations"
