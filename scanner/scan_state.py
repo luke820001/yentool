@@ -21,10 +21,36 @@ rerun the previous session's set instead. The old {"held_ids": [...]} format
 still reads (session None), and load_held_ids / save_held_ids stay for
 gui/scan_worker.py; save_held_ids keeps the other keys.
 """
+import datetime as _dt
 import json
 from config.settings import DATA_DIR
 
 _STATE_DIR = DATA_DIR / "scan_state"
+
+
+def _today():
+    """Today's date in Taipei (the CI runner clock is UTC)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return _dt.datetime.now(ZoneInfo("Asia/Taipei")).date()
+    except Exception:
+        return (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).date()
+
+
+def valid_day(v):
+    """True for an ISO 'YYYY-MM-DD' (or longer, date first) that is a real date
+    from 2000 up to tomorrow in Taipei. A session that is NaN, junk or in the
+    future cannot be the date of any bar; one such value saved as the session
+    made every later save look "older" and be refused (2026-10-09 audit
+    D11-04)."""
+    s = str(v or "").strip()
+    if len(s) < 10 or s[4] != "-" or s[7] != "-":
+        return False
+    try:
+        d = _dt.date.fromisoformat(s[:10])
+    except ValueError:
+        return False
+    return _dt.date(2000, 1, 1) <= d <= _today() + _dt.timedelta(days=1)
 
 
 def _path(mode: str):
@@ -37,7 +63,14 @@ def _ids(v):
 
 
 def _day(v):
+    """The first 10 characters of a date-like value, or None when there is
+    nothing there. NOT validated: see valid_day."""
     return str(v or "").strip()[:10] or None
+
+
+def _good_day(v):
+    d = _day(v)
+    return d if d and valid_day(d) else None
 
 
 def _raw(mode):
@@ -64,9 +97,9 @@ def load_state(mode: str) -> dict:
     data = _raw(mode)
     return {
         "held_ids": _ids(data.get("held_ids")) or [],
-        "session": _day(data.get("session")),
+        "session": _good_day(data.get("session")),
         "prior_ids": _ids(data.get("prior_ids")),
-        "prior_session": _day(data.get("prior_session")),
+        "prior_session": _good_day(data.get("prior_session")),
     }
 
 
@@ -94,6 +127,8 @@ def save_state(mode: str, session, held_ids, prior_ids=None) -> bool:
     if not s:
         save_held_ids(mode, held)
         return True
+    if not valid_day(s):
+        return False        # junk or future: never becomes the stored session
     data = _raw(mode)
     st = load_state(mode)
     cur = st["session"]

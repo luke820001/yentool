@@ -56,6 +56,14 @@ surface and the slippage stress test.
 # The rule as adopted on 2026-08-06 (stop widened 2026-09-17, see
 # scan_mode.PRELAUNCH_STOP_PCT; lock timing and arm threshold 2026-09-21),
 # kept here so callers share one definition. Fractions, not percents.
+# A level is a product (4.48 reads back as 5.60 * 0.8 = 4.4799999999999995), a
+# bar's price is a rounded quote, and "the bar touched the level" is an equality
+# the rule means to include. Compared bare, an exact touch below about NT$12
+# was missed (entry 5.60: a low of 4.48 did not stop out). The tolerance is a
+# billionth of a dollar, far below any tick; booked prices are not rounded
+# (2026-10-09 audit D8-06).
+_EPS = 1e-9
+
 DEFAULT_RULE = {
     "stop_pct": 0.20,     # disaster stop below entry
     "tp_pct": 0.20,       # take profit above entry
@@ -85,10 +93,12 @@ DEFAULT_RULE = {
 # 2.5% above the fill.
 #
 # Taking any profit that still exists late in the hold, rather than carrying it
-# into the last day, lifts the recent win rate 69.1 -> 71.7% and the older
+# into the last day, lifts the recent win rate 69.1 -> 70.8% and the older
 # window 67.6 -> 69.5%, with the mean unchanged (+2.00 -> +1.95 recent, +1.91
 # -> +2.04 older), both halves of both windows up, 25 of 25 quarters at least
-# as good, and it survives a 0.5% worse fill on every exit (70.8 / 68.6).
+# as good. (The 71.7% first quoted here was a REJECTED variant the harness
+# measured by mistake; 70.8% is the executable DEFAULT_RULE, and it is also
+# the win rate after a 0.5% worse fill -- docs/BACKTEST_LOG.md, 2026-09-22.)
 #
 # The surface is flat rather than peaked: every day from 4 to 9 and every
 # threshold from 0 to +1% improves both windows. The CONTROL is what makes the
@@ -260,29 +270,29 @@ def replay_exit(opens, highs, lows, closes, dates=None, hold_bars=None,
             return booked(i, op, "late")
 
         # 1. the open, against the stop carried IN to this bar
-        if target is not None and op >= target:
+        if target is not None and op >= target - _EPS:
             return booked(i, op, "tp")
-        if stop_px is not None and op <= stop_px:
+        if stop_px is not None and op <= stop_px + _EPS:
             return booked(i, op, "lock" if armed else "stop")
 
         # 2. ambiguous remainder: the lowest exit level the bar touched wins.
         # Only the stop CARRIED IN counts -- a lock this bar is about to arm
         # protects from tomorrow, not from the rest of today.
-        if stop_px is not None and lo <= stop_px:
+        if stop_px is not None and lo <= stop_px + _EPS:
             return booked(i, stop_px, "lock" if armed else "stop")
-        if target is not None and hi >= target:
+        if target is not None and hi >= target - _EPS:
             return booked(i, target, "tp")
 
         # 3. the close: arming is what the evening payload can see, and the
         # raised stop is the order placed for the next session.
-        if (arm_px is not None) and (not armed) and cl == cl and cl >= arm_px:
+        if (arm_px is not None) and (not armed) and cl == cl and cl >= arm_px - _EPS:
             armed = True
             stop_px = lock_px if stop_px is None else max(stop_px, lock_px)
 
         # 4. late profit-taking, also decided at the close and acted on at the
         # next open. i is 0-based, so bar i is trading day i + 1.
         if (late_from and late_px is not None and cl == cl
-                and (i + 1) >= late_from and cl >= late_px):
+                and (i + 1) >= late_from and cl >= late_px - _EPS):
             late_due = True
 
         # 5. the time exit, and the ride past it. Decided at the close like

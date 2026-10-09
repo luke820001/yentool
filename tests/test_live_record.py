@@ -22,6 +22,10 @@ from scanner.live_record import build_live_record, net_pct
 SESSIONS = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-01-05", periods=140)]
 SIG = 125                       # index of the first signal day (D1)
 D1, D2 = SESSIONS[SIG], SESSIONS[SIG + 1]
+# D2 close: 10 pct under D1 (the exchange limit), still far below both means.
+# Not lower: scanner/index_clean drops a one-session step beyond 11 pct as a bad print.
+CRASH = round((1000.0 + SIG) * 0.9, 1)
+CRASH_PCT = round((CRASH / 1000.0 - 1.0) * 100.0, 2)
 
 
 def price_rows(sid, closes, spread=0.01, opens=None):
@@ -73,7 +77,7 @@ class Fixture:
 
     def _taiex(self):
         closes = [1000.0 + i for i in range(SIG + 1)]     # rising: gate open on D1
-        closes.append(500.0)                               # D2: far below both means
+        closes.append(CRASH)                               # D2: far below both means
         with sqlite3.connect(self.taiex) as c:
             c.execute("CREATE TABLE TAIEX (date TEXT, close REAL)")
             c.executemany("INSERT INTO TAIEX VALUES (?,?)",
@@ -442,15 +446,15 @@ class TheRecordHasABenchmark(unittest.TestCase):
     def test_both_indices_over_the_whole_span(self):
         b = self.rec["bench"]
         self.assertEqual((b["from"], b["to"]), (SESSIONS[0], D2))
-        self.assertEqual((b["taiex_from"], b["taiex_to"]), (1000.0, 500.0))
-        self.assertEqual(b["taiex_pct"], -50.0)
+        self.assertEqual((b["taiex_from"], b["taiex_to"]), (1000.0, CRASH))
+        self.assertEqual(b["taiex_pct"], CRASH_PCT)
         self.assertEqual((b["otc_from_date"], b["otc_to_date"]), (SESSIONS[0], D2))
         self.assertEqual(b["otc_pct"], _pct(OTC_CLOSES[0], OTC_CLOSES[SIG + 1]))
 
     def test_each_closed_trade_carries_its_own_window(self):
         by = {x["sid"]: x for x in self.rec["tradable"]["trades"]}
         # 1111: signal-day close (D1) -> exit-day close (D2)
-        self.assertEqual(by["1111"]["taiex_pct"], _pct(1000.0 + SIG, 500.0))
+        self.assertEqual(by["1111"]["taiex_pct"], _pct(1000.0 + SIG, CRASH))
         self.assertEqual(by["1111"]["otc_pct"],
                          _pct(OTC_CLOSES[SIG], OTC_CLOSES[SIG + 1]))
         # 4444 exits on day 10; TAIEX has no bar there
@@ -488,7 +492,7 @@ class TheRecordHasABenchmark(unittest.TestCase):
         from scanner.live_record import BENCH_POINTS
         self.assertLessEqual(len(s), BENCH_POINTS)
         self.assertEqual(s[0][0], SESSIONS[0])
-        self.assertEqual(s[-1], [D2, 500.0, OTC_CLOSES[SIG + 1]])
+        self.assertEqual(s[-1], [D2, CRASH, OTC_CLOSES[SIG + 1]])
         days = [p[0] for p in s]
         self.assertEqual(days, sorted(set(days)))
         json.dumps(self.rec)
@@ -498,7 +502,7 @@ class TheRecordHasABenchmark(unittest.TestCase):
         try:
             rec = fx.build()
             b = rec["bench"]
-            self.assertEqual(b["taiex_pct"], -50.0)
+            self.assertEqual(b["taiex_pct"], CRASH_PCT)
             for k in ("otc_from", "otc_to", "otc_pct", "otc_from_date"):
                 self.assertIsNone(b[k], k)
             self.assertTrue(all(p[2] is None for p in b["series"]))

@@ -195,7 +195,7 @@ def _frozen_exit(scan_mode, ctx):
         return FROZEN
 
 
-def _record_list_session(scan_mode, result_df, degraded):
+def _record_list_session(scan_mode, result_df, degraded, session=None):
     """After check_files stamped meta.list_status: a FINAL list of a clean run
     becomes the session's freeze marker in the ledger (committed by the
     workflow). Provisional / degraded runs write nothing -- the next run may
@@ -207,6 +207,12 @@ def _record_list_session(scan_mode, result_df, degraded):
             block = ((_json.load(f).get("meta") or {}).get("list_status") or {})
     except Exception as e:
         print("  [freeze] no list status to record: {}".format(e))
+        return None
+    if session and str(block.get("session") or "")[:10] != str(session)[:10]:
+        # The payload on disk is not this run's (the export did not land):
+        # its stamp must not become the marker of a session it is not about.
+        print("  [freeze] payload is of {} but this run is of {}: no marker "
+              "written".format(block.get("session"), str(session)[:10]))
         return None
     if degraded is not None or block.get("state") != list_freeze.STATE_FINAL:
         print("  [freeze] list of {} is {} ({}): not frozen, a later run may "
@@ -283,8 +289,57 @@ def _session_date(df):
     """
     if df is None or df.empty or "Data_Date" not in df.columns:
         return ""
-    dates = [str(d)[:10] for d in df["Data_Date"] if str(d or "").strip()]
+    from scanner.scan_state import valid_day
+    dates = [str(d)[:10] for d in df["Data_Date"]
+             if str(d or "").strip() and valid_day(d)]
     return max(dates) if dates else ""
+
+
+def _hysteresis_prior(state, scan_mode, session):
+    """The set this run's hysteresis starts from. prior_for() reads it off
+    data/scan_state; when that file is missing or unreadable (a merge-conflict
+    marker from the push race, a fresh runner) it is rebuilt from the signal
+    ledger, which holds the same lists, instead of falling back to a plain
+    top-N that changes the SHAPE of the list (2026-10-09 audit D11-05)."""
+    prior = prior_for(state, session)
+    if prior or state.get("session") or state.get("held_ids"):
+        return prior
+    try:
+        from scanner.signal_ledger import previous_session_ids
+        ids = previous_session_ids(scan_mode, session)
+    except Exception:
+        ids = None
+    if ids:
+        print("  [state] no usable scan state; prior list rebuilt from the "
+              "ledger ({} names)".format(len(ids)))
+        return ids
+    return prior
+
+
+# What the recommendation steps could not do this run (2026-10-09 audit
+# D6B-02): a buy with no frozen entry / stop / target record must keep the list
+# provisional. run_scan() clears it at the start and hands it to check_files.
+_RUN_FAULTS = []
+# the day's snapshot names / boards for the universe export (set per run)
+_SNAP_NAMES = {}
+
+
+def _fault(code, detail):
+    _RUN_FAULTS.append((code, str(detail)[:120]))
+
+
+def _recs_export_unreadable(export):
+    """True when the published recommendations file is there but unusable
+    (corrupt, truncated, wrong shape). Prints the reason; never raises."""
+    try:
+        from scanner.result_checks import recs_problem
+        why = recs_problem(export)
+    except Exception:
+        return False
+    if why:
+        print("  [rec] {} {}: recommendations are read-only this run".format(
+            getattr(export, "name", str(export)), why))
+    return bool(why)
 
 
 def _prepare_recommendations(scan_mode, session_date, degraded):
@@ -298,6 +353,11 @@ def _prepare_recommendations(scan_mode, session_date, degraded):
     runs on non-degraded runs only: a degraded run writes nothing (P0-3).
     Returns (rec_anchors, advance_stats or None)."""
     ledger, export = PORTFOLIO_LEDGER_FILE, RECOMMENDATIONS_EXPORT_FILE
+    if _recs_export_unreadable(export):
+        # The history this run would rebuild the ledger from is unreadable:
+        # an empty ledger would create every recommendation again as cycle 1
+        # and the export would overwrite the file. Read-only until repaired.
+        return load_rec_anchors(ledger, scan_mode, session_date), None
     try:
         report = {}
         seeded = seed_from_export(ledger, export, report=report)
@@ -307,6 +367,8 @@ def _prepare_recommendations(scan_mode, session_date, degraded):
                       seeded, report.get("synced", 0)))
     except Exception as e:
         print("  [rec] seed skipped: {}".format(e))
+        if degraded is None:
+            _fault("rec_seed_failed", e)
     adv = None
     if degraded is None and session_date:
         try:
@@ -315,6 +377,8 @@ def _prepare_recommendations(scan_mode, session_date, degraded):
             print("  [rec] {}".format(summarize_advance(adv)))
         except Exception as e:
             print("  [rec] advance skipped: {}".format(e))
+            # not None: the lifecycle was tried; meta.rec.error carries why
+            adv = {"error": "advance: {}".format(str(e)[:100])}
     anchors = load_rec_anchors(ledger, scan_mode, session_date)
     return anchors, adv
 
@@ -333,7 +397,8 @@ def _create_recommendations(result_df, scan_mode, session_date, degraded,
     that pass. Returns (result_df, anchors, attach_stats)."""
     from scanner.market_calendar import entry_session_after
     ledger = PORTFOLIO_LEDGER_FILE
-    writes = degraded is None
+    writes = degraded is None and not _recs_export_unreadable(
+        RECOMMENDATIONS_EXPORT_FILE)
     stats = {"created": 0, "attached": 0, "writes": writes, "created_ids": []}
     try:
         nxt = entry_session_after(session_date) if session_date else None
@@ -343,6 +408,7 @@ def _create_recommendations(result_df, scan_mode, session_date, degraded,
         print("  [rec] {}".format(summarize(stats)))
     except Exception as e:
         print("  [rec] skipped: {}".format(e))
+        stats["error"] = "attach: {}".format(str(e)[:100])
     if stats.get("created_ids") or stats.get("superseded"):
         try:
             anchors = load_rec_anchors(ledger, scan_mode, session_date)
@@ -379,6 +445,7 @@ def _finish_recommendations(tracked_df, scan_mode, session_date, degraded):
             n, export.name))
     except Exception as e:
         print("  [rec] export skipped: {}".format(e))
+        _fault("rec_export_failed", e)
     return tracked_df
 
 
@@ -492,6 +559,8 @@ def build_market_reports(df, sources=None):
 
 def run_scan(scan_mode="mode_prelaunch"):
     print("=== headless scan: {} ===".format(scan_mode))
+    del _RUN_FAULTS[:]
+    _SNAP_NAMES.clear()
 
     # Final-once (scanner/list_freeze): a session whose list is already
     # final is not rescanned. This first check needs no market data.
@@ -509,13 +578,15 @@ def run_scan(scan_mode="mode_prelaunch"):
         from scanner.market_snapshot import backfill_history, refresh_market
         _rows, _snap_health = refresh_market(_PV)
         snapshot_frame = _snap_health.get("frame")
+        _SNAP_NAMES.update(names=_snap_health.get("names"),
+                           boards=_snap_health.get("boards"))
         # The snapshot gives every instrument TODAY's bar and nothing else, so
         # a holding in one still has no averages. Fill history for a slice of
         # the under-covered names each scan, liquid ones first; the whole
         # market is covered within days rather than after three months of
         # snapshots. Names that repeatedly cannot be fetched are remembered
         # and skipped so the budget goes to the ones that can.
-        backfill_history(_PV)
+        backfill_history(_PV, boards=_snap_health.get("boards"))
     except Exception as e:
         print("  [snapshot] skipped: {}".format(str(e)[:100]))
 
@@ -603,7 +674,7 @@ def run_scan(scan_mode="mode_prelaunch"):
         return _frozen_exit(scan_mode, freeze)
     revised_reason, list_prev = gate.get("revised_reason"), gate.get("prev")
 
-    prior_ids = prior_for(state, session_pre)
+    prior_ids = _hysteresis_prior(state, scan_mode, session_pre)
     ranked_df = result_df
     result_df, held_ids = select_with_hysteresis(ranked_df, prior_ids)
     session_date = _session_date(result_df)
@@ -624,7 +695,7 @@ def run_scan(scan_mode="mode_prelaunch"):
         if gate["action"] == list_freeze.ACTION_FROZEN:
             return _frozen_exit(scan_mode, freeze)
         revised_reason, list_prev = gate.get("revised_reason"), gate.get("prev")
-        prior_ids = prior_for(state, session_pre)
+        prior_ids = _hysteresis_prior(state, scan_mode, session_pre)
         result_df, held_ids = select_with_hysteresis(ranked_df, prior_ids)
         session_date = _session_date(result_df) or session_date
 
@@ -637,7 +708,10 @@ def run_scan(scan_mode="mode_prelaunch"):
         print("  [events] not started: {}".format(e))
 
     if degraded is None:
-        save_state(scan_mode, session_pre, held_ids, prior_ids)
+        if not save_state(scan_mode, session_pre, held_ids, prior_ids):
+            print("  [state] NOT saved for {} (older than the stored session or "
+                  "not a valid date); the next run starts from the old set"
+                  .format(session_pre))
     result_df = add_trade_columns(result_df, scan_mode)
 
     # Recommendations first (2026-10-08): restore, advance and read the
@@ -738,16 +812,29 @@ def run_scan(scan_mode="mode_prelaunch"):
     tracked_df = _finish_recommendations(tracked_df, scan_mode, session_date,
                                          degraded)
 
+    # What this run could not write. A list whose picks never reached the
+    # ledger would read as FINAL while the next session saw today's names as
+    # brand new signals (2026-10-09 audit D11-02); check_files gets these as
+    # errors, which keeps the list provisional.
+    run_faults = list(_RUN_FAULTS)
+    n = 0
     try:
         if degraded is None:
             n = record_picks(result_df, scan_mode,
                              scan_session=session_date or None)
-        else:
-            n = 0
+            if not n and result_df is not None and len(result_df):
+                # record_picks swallows its own errors and returns 0
+                run_faults.append(("ledger_write_failed",
+                                   "0 of {} picks reached the signal ledger"
+                                   .format(len(result_df))))
+    except Exception as e:
+        print("  [ledger] picks skipped: {}".format(e))
+        run_faults.append(("ledger_write_failed", str(e)[:120]))
+    try:
         filled = backfill_outcomes()
         print("  [ledger] recorded {} picks, backfilled {} outcomes".format(n, filled))
     except Exception as e:
-        print("  [ledger] skipped: {}".format(e))
+        print("  [ledger] outcomes skipped: {}".format(e))
 
     # What the shipped rule has actually done on the signals this scanner
     # published (scanner/live_record.py), shown on the phone next to the
@@ -818,10 +905,16 @@ def run_scan(scan_mode="mode_prelaunch"):
                                      STOCK_NAMES_FILE)
         from scanner.universe_export import export as export_universe
         from ingestion.inst_trades import get_inst_features
+        # Names and boards come from the two daily feeds the scan already
+        # downloaded; the file is only the memory of codes seen before.
         try:
-            _names = _json.load(open(STOCK_NAMES_FILE, encoding="utf-8"))
+            from scanner.market_snapshot import refresh_name_cache
+            _names = refresh_name_cache(STOCK_NAMES_FILE, _SNAP_NAMES.get("names"))
         except Exception:
-            _names = {}
+            try:
+                _names = _json.load(open(STOCK_NAMES_FILE, encoding="utf-8"))
+            except Exception:
+                _names = {}
         # Institutional flow for the WHOLE published set, not just the
         # shortlist. The call was passing a hard-coded null here -- with
         # get_inst_features imported and never used -- so every chip field in
@@ -837,7 +930,8 @@ def run_scan(scan_mode="mode_prelaunch"):
                   .format(str(_e)[:80]))
         _built = export_universe(MOBILE_UNIVERSE_FILE, PRICE_VOLUME_FILE,
                                  names=_names, inst=_inst,
-                                 session_date=session_date, scan_mode=scan_mode)
+                                 session_date=session_date, scan_mode=scan_mode,
+                                 boards=_SNAP_NAMES.get("boards"))
         print("  [universe] {} stock(s) published for holdings lookup"
               " ({} with institutional flow)".format(_built, len(_inst)))
     except Exception as e:
@@ -883,7 +977,12 @@ def run_scan(scan_mode="mode_prelaunch"):
                                   events_meta=events_meta)
         print("  [export] scan result -> {}".format(path))
     except Exception as e:
+        # Nothing was published for this session. check_files and the freeze
+        # marker would read the PREVIOUS payload off disk and stamp the old
+        # session final with this run's ids (2026-10-09 audit D11-09), so the
+        # run stops here and the workflow sees a failure, not a green publish.
         print("  [export] failed: {}".format(e))
+        raise RuntimeError("scan result was not published: {}".format(e))
 
     # Per-market AI reports for the phone (matches the desktop "summarize what is
     # shown" behaviour; OTC filter -> only OTC names sent to the model). Written
@@ -918,14 +1017,16 @@ def run_scan(scan_mode="mode_prelaunch"):
                              ledger_path=SIGNAL_LEDGER_FILE,
                              history_path=SCAN_CHECKS_FILE,
                              expected_session=data_health.get("expected_session"),
-                             revised_reason=revised_reason, list_prev=list_prev)
+                             revised_reason=revised_reason, list_prev=list_prev,
+                             run_faults=run_faults)
         print(format_report(report))
     except Exception as e:
         print("  [checks] skipped: {}".format(e))
 
     # The list check_files just judged final is this session's freeze marker.
     try:
-        _record_list_session(scan_mode, result_df, degraded)
+        _record_list_session(scan_mode, result_df, degraded,
+                             session=session_date or None)
     except Exception as e:
         print("  [freeze] marker skipped: {}".format(e))
 

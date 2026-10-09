@@ -2,6 +2,116 @@
 
 ---
 
+## 2026-10-09 （擁有者：「繼續優化，要確定每一個編碼都有依照我們設定的去執行」→ 逐碼符合度稽核＋故障注入）
+
+做法：把每一條設定的規則（買進閘門、出場參數、欄位恆等式、資料來源）逐一對照實際程式與已發布檔案，再對每個讀檔／讀行情的入口做故障注入
+（檔案不見、損毀、被截斷、回傳空表、日期倒退）。**買進規則、出場參數、CORE+／上櫃／大盤閘門、N_ENTER／N_HOLD、`STRATEGY_VERSION`
+全部沒動**；已發布的名單、建議、戰績逐筆重算結果與線上一致（Buy_Ready／Buy_Block 差異 0）。這一輪補的是：**讀不到＝沒有東西** 這類會悄悄放行的路徑。
+
+### fix: 「讀不到」不再被當成「沒有」（fail-closed）
+
+- **訊號登錄簿讀不到 → 不可買**（D11-01／M-15）：登錄簿不存在、損毀、沒有 `picks` 表時，過去所有持有中的標的都像「首日訊號」而變成可買。
+  現在 `Hold_Status` 空白、`Buy_Ready=False`、`Buy_Block='unknown'`；`check_files` 回報 `ledger_unreadable`（錯誤）→ 清單維持 provisional，排程會重試。
+- **前一交易日的登錄簿被掏空 → 同樣不可買**（D3-02）：平常 49 檔、昨天只剩 1 檔時，其餘 48 檔會被當成新訊號。`_thin_previous_session` 偵測後整份封鎖。
+- **建議檔損毀**：`recs_unreadable`（錯誤）；損毀的檔案改名保留為 `.bad`，不再被新檔悄悄蓋掉（`portfolio/publish.py`，D11-03）；建立／推進建議失敗會寫入
+  `meta.rec.error` 與本次執行的 `_RUN_FAULTS`，兩者都變成 `check_files` 錯誤，不再只是 log 一行（`rec_failed`、`buy_ready_without_recommendation`）。
+- **滯後的 scan_state／hysteresis 登錄簿**（D11-04、D11-05）：資料日期倒退的存檔不再讓後面每一次存檔都被拒絕；登錄簿不可讀時 hysteresis 不再靜默關閉。
+- **當成「通過」的假值**（D11-07）：文字 `"False"`、無限大過去會被 `.astype(bool)` 當成 True，現在文字只有「說是 true」才算、數字必須有限且非 0；
+  CORE+ 三個條件遇到無限大（ATR +inf 算「夠波動」、離高點 −inf 算「靠近高點」）一律不通過；收盤不是有限正數、成交量為 0 或未知（占位或停牌的 K 棒，D11-13）、或同一個 Stock_ID 出現兩次，都進 `integrity` 封鎖。
+- **大盤狀態依「正在掃的那個交易日」判斷**（D1-03），不是磁碟上最新那根 K 棒。
+- **處置／注意／變更交易名單**：`altered`（變更交易）來源失敗時，該板別的每一檔標 `unknown`（過去等於「沒有受限」）；`altered_feed_failed` 升為警告。
+- **公司事件**（`ingestion/company_events.py`）：除權息表或新聞表欄位對不上時不再用空表覆蓋舊快取（移除 `EXDIV_MIN_ROWS` 這個行數門檻，改驗欄位鍵）。
+- **大盤指數資料清洗**（新 `scanner/index_clean.py`）：TAIEX／TPEX 表原本沒有交易日檢查，週日 `2026-09-20` 的 K 棒進了大盤均線與手機圖表；
+  零收盤或 10 倍誤植也被所有讀取者接受。大盤狀態、大盤續抱腿、戰績基準、報告四個讀取者共用同一個清洗函式；寫入端（`ingestion/market_index.py`）同樣擋掉。
+- **JSON 不得含 NaN／Infinity**（新 `scanner/json_safe.py`，D9-01）：Python 讀寫都不會抱怨，但手機的 `JSON.parse` 會拒絕整份檔案。
+  `scan_result`、`quotes`、`universe` 一律嚴格輸出；`check_files` 對現有檔案掃描 → `non_finite_json`（錯誤）。
+- **回補歷史的板別標示**：`backfill_history` 使用當日快照的板別（TSE／OTC），不再靠快取名稱猜。
+- **名稱與板別改取自每日兩份行情來源**（M-26）：`universe.json` 有 22 檔 `Market` 是空字串，因為名稱快取只認得「以前查過的代碼」。
+  現在 `fetch_snapshot` 同時解析兩家交易所的名稱（以來源為準），合併進 `data/stock_names.json`（只增不減，原子寫入），
+  `universe.json` 新增 `blank_market`／`unnamed` 兩個計數，缺板別時用當日快照的板別補。
+
+### feat: 每一筆結案的模擬單留下「完整紀錄」，並由獨立重播驗算
+
+- `trade_record`（`scanner/live_record.py`）：進場日／進場價、**決定出場日**、**成交日**、成交基準（`level` 觸價／`open` 跳空或隔日開盤／`close` 時間出場）、
+  持有天數與日曆天、最大有利／不利幅度、毛／淨報酬與成本，以及**逐日路徑**（日期、OHLC、當日收盤對進場價、狀態、隔日停損價、第幾天、是否續抱）。
+  逐日狀態是在每個前綴上直接呼叫 `replay_exit` 得到，所以紀錄不可能和規則漂移。
+- 時間出場的引擎記帳是第 10 天收盤，但實際下單隔日開盤才成交 —— 兩者都存（`live_fill_date`／`live_fill_price`），差異攤在檯面上，不再各說各話
+  （這是規格上已知的差距，STRATEGY 3.5）。
+- `portfolio/sync.py` 結案時把完整紀錄存進建議檔的 `outcome`；舊的八個欄位一字不改。
+- `check_files` 對每筆新格式的結案做**獨立重播**（`_check_closed_records`）：路徑日期、進場日對 `valid_until_session`、結案日對路徑末日、報酬對價格、
+  出場原因對 `replay_exit` 的結果，任何不符 → `rec_record_mismatch`（錯誤）；沒有逐日路徑的舊結案只計數（`rec_record_legacy`，資訊）。
+  不同 `strategy_version` 的結案不用今天的規則審。
+
+### feat: 新的自我檢查（全部在 `scanner/result_checks.py`）
+
+- 停利啟動／鎖利價恆等式（D10-18，出場規則裡原本只有大小順序、沒有數值恆等式的兩個價位）：`trail_arm_pct_mismatch`、`trail_lock_pct_mismatch`（價格要等於收盤價 ×（1＋啟動 2.5%／鎖利 2%）並對齊 tick）。
+- `strategy_version_mismatch`（警告）：清單的規則版本不是程式內建的 `STRATEGY_VERSION`。
+- **大盤閘門對帳**（M-25）：清單帶著它自己判斷用的大盤狀態（`meta.regime`），可買的列只能出現在「大盤順風且資料是新的」那一天；
+  `buy_ready_without_regime`（錯誤）用和 `mark_buy_ready` 同一條公式比對，過去沒有任何東西核對這一關。
+- 建議檔健康：`rec_failed`、`buy_ready_without_recommendation`；`ledger_unreadable`、`recs_unreadable`；`non_finite_json`；`altered_feed_failed`（警告）。
+- 大盤續抱腿（`meta.market_leg`）：涵蓋每一檔持有中部位續抱視窗的每一天；缺日 = 該腿關閉（與 `replay_exit` 的「缺 = 不續抱」同一個語意）。
+
+### fix: 出場引擎的「剛好碰到」與戰績重算的四捨五入
+
+- **剛好碰到價位也算碰到**（D8-06，`scanner/exit_rules.py`）：價位是乘出來的（5.60 × 0.8 讀回來是 4.4799999999999995），過去低價股（約 NT$12 以下）
+  最低價剛好等於停損 4.48 時**不會**停損。比較加上十億分之一元的容差（遠小於任何一檔），成交價不四捨五入；1,200 組合成序列的雜湊釘仍然一致。
+  `tests/test_conformance_20261009.py` 掃過 1.00–11.99 元每個整分位價位的停損與停利。
+- **戰績重算 CORE+ 與掃描用同一個精度**（`scanner/live_record.py`）：掃描用的是四捨五入後的欄位（5 日漲幅、離高點 1 位小數，ATR 2 位），
+  舊訊號重算時用未四捨五入的值，+5.03% 這種掃描當時算「5.0 通過」的訊號會被重算判不通過。
+
+### fix: 文件與註解和實作對齊
+
+- `docs/STRATEGY.md` 刪掉「降低部位」的說法（大盤只決定**新倉**能不能開，持有部位永遠依自己的出場規則 —— 2026-07-06 定案）；
+  橫幅文字集中到 `config/regime_text.json`（.py 維持 ASCII；`TaiwanScanner.spec` 與 `docs/打包指令.txt` 一併帶進打包）。
+- `config/settings.py` 的 `CHIP_FETCH_IN_SCAN` 註解改為實際行為：這個開關被 `chip_verifier` 匯入卻從沒被讀取，設環境變數什麼都不會改變（D8-08）；買進規則本來就不用籌碼。
+- README／BACKTEST_LOG／STRATEGY／TASKS／`排程與即時行情.md` 由文件稽核代理逐項對照後更新。
+
+### feat: 手機版（v33）
+
+- 績效頁新增「已結案建議的完整紀錄」（最近 20 筆，新的在前）：訊號日 → 規則進場 → 出場判定日 → 出場成交（日期、價格、盤中觸價／開盤／收盤）→ 出場原因 →
+  持有天數 → 毛／淨報酬與成本 → MFE／MAE；時間出場另列「實盤：當晚下單、隔日開盤約 …」與帳上收盤價的差；可展開逐日明細（OHLC、當日狀態、隔日停損、期滿後續抱）。
+  沒有逐日路徑的舊紀錄只顯示摘要並標明；資料自相矛盾時顯示警告但不改動數字；缺檔顯示標示過的空狀態，不報錯。
+- 「對帳：你的成交 vs 規則」：只有你自己有成交的建議才顯示，比對進場／出場日（差幾個交易日）與價差，以及你的淨報酬對規則的淨報酬。
+  **成交只在手機本機讀取與顯示**，不抓取、不儲存、不寫回、不記錄。
+- 手機從 `./recommendations.json` 讀紀錄：`scan.yml` 在上傳 Pages 前把 `data/recommendations.json` 複製到 `mobile/`（git 忽略，與 `scan_result.json` 相同；晚間補註〔exit 4〕同樣會帶上，`list_freeze.PAGES_DERIVED_FILES` 與對應測試釘住這一步）。
+  這份檔案本來就是公開提交的，只由建議表產生，不含部位。PWA shell 升到 v33。
+- 新增 `tests/test_mobile_trade_record.py`（16 個）與 `tests/mobile_probe.js` O／P 兩段（831 項、加 `--trade-grid` 1,599 項）；15 個突變全部被抓到。
+  尚未在真實瀏覽器目視檢查（預覽窗只有靜態檔）。
+
+### test: 把「設定的每個值」釘成測試（新增 222 個＋故障注入測試）
+
+- `tests/test_pin_*.py`、`tests/test_settled_values.py`、`tests/pin_phone_probe.js`：買進閘門（CORE+ 邊界、20/80 hysteresis、名次切線、單一封鎖優先序）、
+  出場規則（價位、啟動／鎖利、後期收利、時間出場、續抱、大盤續抱腿）、Launch_Score 金標值、資料底線與整點檢查、戰績與檢查器容差、工作流程檔、
+  手機端的策略常數與 tick 表（約 83 列字面值對照）。用 272 個一行突變驗證：268 個被抓到；其餘 4 個經判斷為等價突變（結果價位相同）。
+- 這些釘子的假資料不含大盤指數的清洗（那有自己的 `tests/test_index_clean.py`），`tests/pin_support.raw_index()` 在大盤均線邊界測試中把清洗關掉，
+  免得合成的大跳空／國定假日被清洗當成壞資料。
+- 故障注入：`tests/test_failclosed_*_20261009.py`（登錄簿、建議檔、受限名單、公司事件、回補板別、名稱與板別、閘門）、`tests/test_trade_record_20261009.py`、
+  `tests/test_index_clean.py`、`tests/test_conformance_20261009.py`。
+
+### docs: 舊條目更正（只在這裡更正，不改寫歷史）
+
+- 2026-09-23 條目的「3 格 35.8%」是同日重用格子灌高的數字，嚴格重用後 28.2%（5 格 19.0%），見 2026-10-08 條目；同條目的實戰戰績 8 筆（2026-06-25 起）
+  發生在大盤續抱腿上線**之前**。
+- 2026-09-21 起 `STRATEGY_VERSION = "prelaunch-2026-09-21"`（當時的條目沒有記這次升版）。
+- 2026-09-22「三處實作差距先不要動」已被 2026-09-23 的 First_Day 規則取代。
+- 2026-09-14 的恆等式 `Hold_Day + Hold_Remaining == Hold_Total` 在續抱時成立，但 `Hold_Remaining` 會是負數。
+- 2026-10-08 的晚間補註目前沒有專屬排程（見 `docs/排程與即時行情.md`）。
+- 候選池是以**前一交易日**的成交值排序（舊條目寫「當日」）；「唯一必守」的說法不準：標「必守」的是規則本身的出場（停損、停利、後期收利），不是只有停損。
+- 「附錄 D.3.C」指實作稽核附錄 D。
+- 程式註解：`exit_rules.py` 的後期收利說明把被否決變體的 71.7% 當成採用值，已改為 70.8%；`result_checks.py` 開頭的欄數寫 96，實際約 120。
+
+### 這一輪**沒有**改、需要擁有者決定的項目
+
+- M-01 候選池（前一交易日 vs 當日）只改了文件措辭；要維持 S-1 候選池還是重新選池，請擁有者決定。
+- M-03 哪幾列出場規則算「必守」；M-31 預設成交價留白 vs 進場開盤價；M-49 －10% 加碼確認；M-50 崩盤燈（要做或刪）；
+  M-13 `Exit_Signal_Price` 不貼齊 tick；M-35 舊登錄簿的結果欄位（跑一次 `reset_rule_outcomes`＋`backfill_outcomes` 並加規則指紋）；
+  D4-02 三筆 `Entry_Open` 還原後落在非 tick 價位；M-60 四份截止時間副本。
+- `gui/app.py`（擁有者自己的修改，未動）：M-05 第 132 行「71.7%勝」應為「70.8%勝」、M-16 假日、M-17／18、D5-03，以及約 1147–1170 行的「建議降部位」措辭。
+  **桌面程式要重新啟動**，否則舊版 GUI 仍用舊欄位。
+- 2027 年休市表要更新：`python -m scanner.market_calendar --refresh 2027`。
+
+---
+
 ## 2026-10-08 （擁有者：「建議的時間點很怪、標的又少、資訊看不懂」→ 投資者視角整體改版）
 
 評估與計畫見 `docs/投資者視角完整評估與改善計畫_2026-10-07.md`。**買進規則、出場參數、CORE+／上櫃／大盤閘門、

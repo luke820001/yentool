@@ -92,9 +92,8 @@ def _regime_by_date(taiex_file=TAIEX_FILE):
     t = load_sheet(taiex_file, "TAIEX")
     if t.empty or "close" not in t.columns:
         return {}
-    t = t.copy()
-    t["close"] = _num(t["close"])
-    t = t.dropna(subset=["close"]).sort_values("date")
+    from scanner.index_clean import clean_closes
+    t, _dropped = clean_closes(t)
     c = t["close"]
     ok = (c > c.rolling(20).mean()) & (c > c.rolling(60).mean())
     return {str(d)[:10]: bool(v) for d, v in zip(t["date"], ok)}
@@ -161,15 +160,19 @@ def _core_from_bars(hist):
     h52 = c.rolling(252, min_periods=min(FULL_52W_BARS, len(c))).max().iloc[-1]
     if pd.isna(h52) or float(h52) <= 0:
         return None, full
-    dist52 = (float(h52) - float(c.iloc[-1])) / float(h52) * 100
+    # The scan gates on the STORED columns: Dist_52W_High_Pct and Ret_5D_Pct
+    # are rounded to 1 decimal, ATR_Pct to 2 (analyzer/trend_analysis.py). The
+    # recompute rounds the same way, so a signal at +5.03 percent (stored and
+    # gated as 5.0) is not judged differently here (2026-10-09 audit).
+    dist52 = round((float(h52) - float(c.iloc[-1])) / float(h52) * 100, 1)
     if len(c) < 6 or float(c.iloc[-6]) <= 0:
         return None, full
-    ret5 = (float(c.iloc[-1]) / float(c.iloc[-6]) - 1) * 100
+    ret5 = round((float(c.iloc[-1]) / float(c.iloc[-6]) - 1) * 100, 1)
     atr = ((_num(hist["high"]) - _num(hist["low"])) / c).rolling(20).mean().iloc[-1]
     if pd.isna(atr):
         return None, full
     core = (dist52 <= CORE_PLUS_DIST52_MAX and ret5 <= CORE_PLUS_RET5_MAX
-            and float(atr) * 100 >= CORE_PLUS_ATR_MIN)
+            and round(float(atr) * 100, 2) >= CORE_PLUS_ATR_MIN)
     return bool(core), full
 
 
@@ -235,6 +238,135 @@ def replay_trade(fwd, extend_if=None, hold_bars=None, ride_cap=None):
     # the hold with no price exit inside it, '' that the ride is still on --
     # both are open trades, reported as reason ''.
     return out
+
+
+RECORD_SCHEMA = 1
+
+
+def _r2(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return round(v, 2) if v == v else None
+
+
+def _gap_days(a, b):
+    try:
+        return (datetime.strptime(str(b)[:10], "%Y-%m-%d")
+                - datetime.strptime(str(a)[:10], "%Y-%m-%d")).days
+    except (TypeError, ValueError):
+        return None
+
+
+def trade_record(fwd, t, hold_bars=None):
+    """The COMPLETE record of one replayed trade (2026-10-09), from the
+    signal's next-open fill to the exit. `fwd` and `t` are exactly what
+    replay_trade was given and returned; nothing here decides anything, it
+    only writes down what the canonical replay did, day by day:
+
+      entry_date / entry_price      the fill (first bar's open)
+      exit_decision_date            the session whose evening the rule fired
+                                    (a stop / lock / take-profit trades through
+                                    the level on the day, so decision = fill;
+                                    a late profit-take is decided at the close
+                                    BEFORE its fill; a time exit at its close)
+      exit_fill_date / exit_price   where the rule books the exit
+      exit_basis                    'level' (a stop / lock / take-profit level
+                                    inside the bar) | 'open' (a gap through the
+                                    level, or the late profit-take at the next
+                                    open) | 'close' (the time exit)
+      live_fill_date / _price       time exits only: the engine books the close
+                                    of the decision day, an order placed that
+                                    evening fills at the NEXT open. Both are
+                                    kept so the difference is visible, not
+                                    argued (spec gap noted in STRATEGY 3.5).
+      bars / calendar_days          sessions held through the exit / calendar
+      mfe_pct / mae_pct             best high / worst low against the fill
+      ret_gross_pct / ret_net_pct / cost_pct
+      path                          one entry per held session: date, OHLC, the
+                                    close against the fill, status (holding |
+                                    armed | sell_next_open | exit_<reason>),
+                                    stop (the order level carried into the next
+                                    session, None on the exit bar), day and
+                                    ride (True from the session the time exit
+                                    was tested and the position was kept)
+
+    The per-day state comes from replay_exit itself on each prefix of the
+    window, so the record cannot drift from the rule. {} when the entry bar is
+    unusable."""
+    if fwd is None or not len(fwd) or not isinstance(t, dict) \
+            or t.get("reason") == "na" or t.get("entry_price") is None:
+        return {}
+    hold = DEFAULT_RULE["hold_bars"] if hold_bars is None else int(hold_bars)
+    n = len(fwd)
+    dates = ([str(d)[:10] if d is not None and d == d else None
+              for d in fwd["date"].tolist()] if "date" in fwd.columns else None)
+    o = _num(fwd["open"]).tolist()
+    h = _num(fwd["high"]).tolist()
+    l = _num(fwd["low"]).tolist()
+    c = _num(fwd["close"]).tolist()
+    entry = float(t["entry_price"])
+    exited = bool(t.get("exited"))
+    upto = max(1, min(n, int(t.get("bars") or n))) if exited else n
+    path = []
+    for k in range(upto):
+        p = replay_exit(o[:k + 1], h[:k + 1], l[:k + 1], c[:k + 1],
+                        dates=dates[:k + 1] if dates else None, hold_bars=None)
+        last = exited and k == upto - 1
+        if last:
+            status, stop = "exit_" + str(t.get("reason")), None
+        elif p.get("exited"):
+            status, stop = "exit_" + str(p.get("reason")), None
+        else:
+            status = ("sell_next_open" if p.get("late_due")
+                      else "armed" if p.get("armed") else "holding")
+            stop = _r2(p.get("stop"))
+        path.append({"date": dates[k] if dates else None,
+                     "open": _r2(o[k]), "high": _r2(h[k]), "low": _r2(l[k]),
+                     "close": _r2(c[k]),
+                     "close_ret_pct": _r2((c[k] / entry - 1.0) * 100.0)
+                     if c[k] == c[k] else None,
+                     "status": status, "stop": stop, "day": k + 1,
+                     "ride": bool(k + 1 >= hold and not last)})
+    highs = [x for x in h[:upto] if x == x]
+    lows = [x for x in l[:upto] if x == x]
+    rec = {"schema": RECORD_SCHEMA, "entry_date": dates[0] if dates else None,
+           "entry_price": _r2(entry),
+           "exit_decision_date": None, "exit_fill_date": None,
+           "exit_basis": None, "exit_price": None,
+           "live_fill_date": None, "live_fill_price": None,
+           "bars": upto, "calendar_days": None,
+           "mfe_pct": _r2((max(highs) / entry - 1.0) * 100.0) if highs else None,
+           "mae_pct": _r2((min(lows) / entry - 1.0) * 100.0) if lows else None,
+           "ret_gross_pct": None, "ret_net_pct": None, "cost_pct": None,
+           "path": path}
+    if not exited:
+        return rec
+    reason = str(t.get("reason"))
+    fill_date = t.get("exit_date")
+    xo = o[upto - 1]
+    if reason == "late":
+        basis = "open"
+        decision = dates[upto - 2] if dates and upto >= 2 else None
+    elif reason == "time":
+        basis = "close"
+        decision = fill_date
+    else:
+        basis = "open" if abs(float(t["exit_price"]) - xo) < 1e-9 else "level"
+        decision = fill_date
+    gross = t.get("ret_gross_pct")
+    net = t.get("ret_net_pct")
+    rec.update(exit_decision_date=decision, exit_fill_date=fill_date,
+               exit_basis=basis, exit_price=_r2(t.get("exit_price")),
+               calendar_days=_gap_days(rec["entry_date"], fill_date),
+               ret_gross_pct=_r2(gross), ret_net_pct=_r2(net),
+               cost_pct=_r2(gross - net) if gross is not None and net is not None
+               else None)
+    if reason == "time" and upto < n:
+        rec.update(live_fill_date=dates[upto] if dates else None,
+                   live_fill_price=_r2(o[upto]))
+    return rec
 
 
 def _replay(fwd, extend_if=None):
@@ -341,10 +473,8 @@ def _index_closes(taiex_file, sheet):
         return []
     if t.empty or "close" not in t.columns or "date" not in t.columns:
         return []
-    t = t[["date", "close"]].copy()
-    t["date"] = t["date"].astype(str).str.slice(0, 10)
-    t["close"] = _num(t["close"])
-    t = t.dropna().drop_duplicates("date", keep="last").sort_values("date")
+    from scanner.index_clean import clean_closes
+    t, _dropped = clean_closes(t)
     return [(d, float(c)) for d, c in zip(t["date"], t["close"]) if c > 0]
 
 

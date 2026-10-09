@@ -149,8 +149,9 @@ def build_quote_feed(price_db, stock_ids, sessions=FEED_SESSIONS,
 
 def write_quote_feed(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
+    from scanner.json_safe import dump_strict
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+        dump_strict(payload, f, ensure_ascii=False, separators=(",", ":"))
     return str(path)
 
 

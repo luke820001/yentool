@@ -29,7 +29,7 @@ def frame(**overrides):
         "Stock_ID": "8069", "Stock_Name": "TestCo", "Market": "OTC",
         "Data_Date": TODAY, "Close_Price": 100.0,
         "Suggested_Buy_Price": 100.0, "Strict_Stop_Loss": 85.0,
-        "Target_Price": 120.0, "Trail_Arm_Price": 106.0,
+        "Target_Price": 120.0, "Trail_Arm_Price": 102.5,
         "Trail_Lock_Price": 102.0, "Core_Plus": True, "Integrity_OK": True,
         "Hold_Status": "pending", "Launch_Score": 80.0,
     }
@@ -42,7 +42,7 @@ class GateCase(unittest.TestCase):
 
     def setUp(self):
         self._real = market_regime.get_market_regime
-        market_regime.get_market_regime = lambda: {
+        market_regime.get_market_regime = lambda *a, **k: {
             "ok": True, "enter_ok": True, "risk_on": True, "is_current": True}
 
     def tearDown(self):
@@ -103,7 +103,7 @@ class TestBuyGate(GateCase):
         self.assertEqual(block, "market")
 
     def test_unreadable_regime_blocks_everything(self):
-        market_regime.get_market_regime = lambda: {"ok": False, "risk_on": True}
+        market_regime.get_market_regime = lambda *a, **k: {"ok": False, "risk_on": True}
         ready, block = self.block_of(frame())
         self.assertFalse(ready)
         self.assertEqual(block, "regime")
@@ -118,14 +118,14 @@ class TestBuyGate(GateCase):
         all 46 rows were blocked while both screens told the owner the market
         had not reclaimed its averages. A stale feed says "regime_stale".
         """
-        market_regime.get_market_regime = lambda: {
+        market_regime.get_market_regime = lambda *a, **k: {
             "ok": True, "enter_ok": True, "risk_on": True, "is_current": False}
         ready, block = self.block_of(frame())
         self.assertFalse(ready)
         self.assertEqual(block, "regime_stale")
 
     def test_a_genuinely_closed_market_still_says_regime(self):
-        market_regime.get_market_regime = lambda: {
+        market_regime.get_market_regime = lambda *a, **k: {
             "ok": True, "enter_ok": False, "risk_on": False, "is_current": True}
         ready, block = self.block_of(frame())
         self.assertFalse(ready)
@@ -144,7 +144,7 @@ class TestBuyGate(GateCase):
 
     def test_regime_without_freshness_keys_still_works(self):
         """Older callers return no is_current; absent must not mean stale."""
-        market_regime.get_market_regime = lambda: {"ok": True, "enter_ok": True}
+        market_regime.get_market_regime = lambda *a, **k: {"ok": True, "enter_ok": True}
         ready, _ = self.block_of(frame())
         self.assertTrue(ready)
 
@@ -638,8 +638,14 @@ class TestReentryCardIsTheNewTrade(GateCase):
 
     def test_the_payload_check_accepts_it(self):
         from scanner.result_checks import check_payload
+        from tests.test_result_checks import lvl
+        from scanner.scan_mode import PRELAUNCH_TRAIL_ARM, PRELAUNCH_TRAIL_LOCK
         _, out = self._annotate()
         row = out.iloc[0].to_dict()
+        # the fixture's trail pair belongs to a close of 100; this row closes
+        # higher, and the checker holds the pair to the row's own close
+        row["Trail_Arm_Price"] = lvl(row["Close_Price"], PRELAUNCH_TRAIL_ARM, "up")
+        row["Trail_Lock_Price"] = lvl(row["Close_Price"], PRELAUNCH_TRAIL_LOCK, "down")
         items = check_payload({"meta": {"mode": MODE, "data_date": TODAY,
                                         "session_date": TODAY},
                                "rows": [row]})["items"]

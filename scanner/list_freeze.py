@@ -66,6 +66,11 @@ PAGES_TIMEOUT = 10
 # them back before the workflow uploads mobile/, or the deploy would ship the
 # app without its data.
 PAGES_DATA_FILES = ("scan_result.json", "quotes.json", "universe.json")
+# Gitignored under mobile/ too, but NOT downloaded back from Pages: the workflow
+# rebuilds them from tracked data (data/recommendations.json) in the step that
+# runs before every Pages upload, an amend (exit 4) included, so an amended
+# recommendations file goes out with the amended list (2026-10-09).
+PAGES_DERIVED_FILES = ("recommendations.json",)
 
 ACTION_SCAN = "scan"
 ACTION_FROZEN = "frozen"

@@ -22,7 +22,7 @@
  * useful for the browser's own cache without fragmenting ours.
  * ==========================================================================*/
 
-const VERSION = "v31";
+const VERSION = "v33";
 const CACHE = "yentool-" + VERSION;
 
 // Data files are cached under their bare URL too, so an offline start finds
@@ -36,6 +36,7 @@ const SHELL = [
   "./manifest.webmanifest",
   "./scan_result.json",
   "./quotes.json",
+  "./recommendations.json",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./icons/apple-touch-icon.png",

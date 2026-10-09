@@ -374,17 +374,30 @@ def _store_bars(pairs, upto, cal_set):
             for sid, rows in raw.items()}
 
 
-def _outcome(t):
+def _outcome(t, record=None, signal_session=None, planned_session=None):
+    """The closed trade as the ledger stores it. The first eight keys are the
+    long-standing summary; `record` (scanner.live_record.trade_record) adds the
+    complete record -- decision day, fill day, basis and the day-by-day path --
+    so a closed recommendation can be audited from the stored row alone."""
     def r2(v):
         return None if v is None else round(float(v), 2)
-    return {"entry_date": t.get("entry_date"),
-            "entry_price": r2(t.get("entry_price")),
-            "exit_date": t.get("exit_date"),
-            "exit_price": r2(t.get("exit_price")),
-            "reason": t.get("reason"),
-            "bars": int(t.get("bars") or 0),
-            "ret_gross_pct": r2(t.get("ret_gross_pct")),
-            "ret_net_pct": r2(t.get("ret_net_pct"))}
+    out = {"entry_date": t.get("entry_date"),
+           "entry_price": r2(t.get("entry_price")),
+           "exit_date": t.get("exit_date"),
+           "exit_price": r2(t.get("exit_price")),
+           "reason": t.get("reason"),
+           "bars": int(t.get("bars") or 0),
+           "ret_gross_pct": r2(t.get("ret_gross_pct")),
+           "ret_net_pct": r2(t.get("ret_net_pct"))}
+    if record:
+        for k, v in record.items():
+            if k not in out:
+                out[k] = v
+        out["record_schema"] = out.pop("schema", None)
+        out["signal_session"] = str(signal_session)[:10] if signal_session else None
+        out["planned_entry_session"] = (str(planned_session)[:10]
+                                        if planned_session else None)
+    return out
 
 
 def _leg_unknown(extend_if, exit_day, trade, cap):
@@ -554,7 +567,7 @@ def advance_recommendations(ledger_path, scan_mode, session_date,
                 else:
                     # 5. the canonical replay
                     import pandas as pd
-                    from scanner.live_record import replay_trade
+                    from scanner.live_record import replay_trade, trade_record
                     fwd = pd.DataFrame(
                         [(_day(b[0]), b[1], b[2], b[3], b[4])
                          for b in bars[:window]],
@@ -576,7 +589,9 @@ def advance_recommendations(ledger_path, scan_mode, session_date,
                                 [rid, "active", "exit_deferred", xd])
                             continue
                         move(rid, "closed", t["reason"], xd,
-                             outcome=_outcome(t))
+                             outcome=_outcome(
+                                 t, record=trade_record(fwd, t, hold_bars=hold),
+                                 signal_session=fq, planned_session=vu))
                         continue
                 # 6. the safety net
                 past = len(cal) - bisect.bisect_right(cal, vu)
@@ -609,7 +624,7 @@ def rec_meta(attach_stats=None, advance_stats=None):
            "moved": int(v.get("moved", 0) or 0),
            "deferred": int(v.get("deferred", 0) or 0),
            "writes": bool(a.get("writes", False)),
-           "advanced": bool(advance_stats is not None)}
+           "advanced": bool(advance_stats is not None and not v.get("error"))}
     errs = [s.get("error") for s in (a, v) if s.get("error")]
     if errs:
         out["error"] = "; ".join(str(e)[:120] for e in errs)

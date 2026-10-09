@@ -254,6 +254,34 @@ def _rule_version():
         return BUY_RULE_VERSION_FALLBACK
 
 
+def previous_session_ids(scan_mode, before_session):
+    """Stock ids the newest recorded list OLDER than `before_session` held for
+    this mode, or None when the ledger cannot say. It is the same set
+    data/scan_state/<mode>.json keeps as held_ids: scan_state is only ever a
+    cache of it, so a missing or corrupt state file can be rebuilt from here
+    instead of silently turning the hysteresis off (2026-10-09 audit D11-05)."""
+    conn = None
+    try:
+        if not SIGNAL_LEDGER_FILE.exists():
+            return None
+        conn = sqlite3.connect(str(SIGNAL_LEDGER_FILE))
+        row = conn.execute(
+            "SELECT MAX(scan_session) FROM picks WHERE scan_mode = ? "
+            "AND scan_session < ?", (scan_mode, str(before_session)[:10])
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        ids = conn.execute(
+            "SELECT stock_id FROM picks WHERE scan_mode = ? AND scan_session = ? "
+            "ORDER BY rank", (scan_mode, row[0])).fetchall()
+        return [str(r[0]) for r in ids if r and r[0]]
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def record_picks(df, scan_mode, scan_session=None):
     """
     Append today's shortlist for `scan_mode` to the ledger. Idempotent: the
@@ -288,7 +316,7 @@ def record_picks(df, scan_mode, scan_session=None):
     regime = None
     try:
         from scanner.market_regime import get_market_regime
-        r = get_market_regime() or {}
+        r = get_market_regime(session) or {}
         regime = {k: r.get(k) for k in
                   ("ok", "enter_ok", "is_current", "as_of_date", "ref_date")}
     except Exception:

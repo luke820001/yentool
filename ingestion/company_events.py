@@ -73,7 +73,6 @@ MOPS_BOARD = {"TSE": "sii", "OTC": "otc"}
 # A revenue answer shorter than this is a partial publish, not the market.
 REV_MIN_ROWS = {"TSE": 800, "OTC": 600}
 MOPS_REV_MIN_ROWS = 50          # early in the month only a few have reported
-EXDIV_MIN_ROWS = 0              # a short or empty window is legitimate
 TIMEOUT = 15
 TRIES = 2
 BACKOFF_S = 3.0
@@ -212,6 +211,30 @@ def _ex_kind(text):
     s = str(text or "")
     d, r = CH_DIV in s, CH_RIGHT in s
     return "both" if d and r else "right" if r else "div" if d else None
+
+
+# The keys each ex-date answer must carry (date, id, kind). A feed that
+# renames them parses to nothing, and an answer that parses to nothing is
+# otherwise indistinguishable from a quiet window.
+EXDIV_KEYS = {"TSE": ("Date", "Code", "Exdividend"),
+              "OTC": ("ExRrightsExDividendDate", "SecuritiesCompanyCode",
+                      "ExRrightsExDividend")}
+
+
+def _has_keys(raw, keys):
+    """True when at least one row of `raw` carries every key in `keys`."""
+    return any(isinstance(r, dict) and all(k in r for k in keys) for r in raw)
+
+
+def _upcoming_exdiv(block, today):
+    """How many ex-dates in a cached {sid: [{date, ...}]} block are on or
+    after `today`."""
+    n = 0
+    for v in (block or {}).values():
+        for e in v if isinstance(v, list) else []:
+            if isinstance(e, dict) and str(e.get("date") or "") >= today.isoformat():
+                n += 1
+    return n
 
 
 def _parse_exdiv(raw, date_key, id_key, kind_key):
@@ -578,8 +601,17 @@ def refresh(cache_path=None, today=None, fetch=None, log=print, write=True,
                 if not isinstance(raw, list):
                     raise RuntimeError("not a list")
                 got = parsers[board](raw)
-                if len(raw) < EXDIV_MIN_ROWS:
-                    raise RuntimeError("short answer")
+                # An answer the parser cannot read is not "no events": a
+                # renamed key parses to nothing, and an empty list during an
+                # outage would erase ex-dates that are still ahead (and the
+                # reduced reference price limit_flags builds from them).
+                if raw and not _has_keys(raw, EXDIV_KEYS[board]):
+                    raise RuntimeError(
+                        "{} rows without the ex-date keys".format(len(raw)))
+                ahead = _upcoming_exdiv(events["exdiv"].get(board), today)
+                if not got and ahead:
+                    raise RuntimeError(
+                        "empty answer would drop {} upcoming ex-dates".format(ahead))
                 events["exdiv"][board] = got
                 _mark(h, True, rows=sum(len(v) for v in got.values()),
                       as_of=today.isoformat(), now_s=now_s)
@@ -594,6 +626,9 @@ def refresh(cache_path=None, today=None, fetch=None, log=print, write=True,
                 raw = fetcher(NEWS_URLS[board])
                 if not isinstance(raw, list):
                     raise RuntimeError("not a list")
+                if raw and not _has_keys(raw, (K_CLAUSE, K_FACT, id_keys[board])):
+                    raise RuntimeError(
+                        "{} rows without the announcement keys".format(len(raw)))
                 got = parse_conf_news(raw, id_keys[board])
                 for sid, ds in got.items():
                     for d in ds:

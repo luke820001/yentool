@@ -572,7 +572,7 @@ class BuyGate(NoNetwork):
     def setUp(self):
         super().setUp()
         self._real = market_regime.get_market_regime
-        market_regime.get_market_regime = lambda: {
+        market_regime.get_market_regime = lambda *a, **k: {
             "ok": True, "enter_ok": True, "risk_on": True, "is_current": True}
 
     def tearDown(self):
@@ -604,7 +604,7 @@ class BuyGate(NoNetwork):
                          (False, "quality"))
         self.assertEqual(self.gate(frame(Trade_Restriction=s, Hold_Status="holding")),
                          (False, "held"))
-        market_regime.get_market_regime = lambda: {
+        market_regime.get_market_regime = lambda *a, **k: {
             "ok": True, "enter_ok": False, "risk_on": False, "is_current": True}
         self.assertEqual(self.gate(frame(Trade_Restriction=s)), (False, "regime"))
 
@@ -638,7 +638,7 @@ class Acceptance(NoNetwork):
         self.p = payload()
         self._real = market_regime.get_market_regime
         reg = dict(self.p["regime"])
-        market_regime.get_market_regime = lambda: dict(reg)
+        market_regime.get_market_regime = lambda *a, **k: dict(reg)
         self.info = fetch_recorded()
         self.rows = tr.annotate_restrictions(pd.DataFrame(self.p["rows"]),
                                              self.info, SESSION)
@@ -772,7 +772,7 @@ class Wiring(NoNetwork):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             db = Path(tmp) / "signal_ledger.db"
             real = market_regime.get_market_regime
-            market_regime.get_market_regime = lambda: {"ok": True}
+            market_regime.get_market_regime = lambda *a, **k: {"ok": True}
             try:
                 with mock.patch.object(sl, "SIGNAL_LEDGER_FILE", db):
                     self.assertEqual(sl.record_picks(df, MODE, scan_session=SESSION), 2)

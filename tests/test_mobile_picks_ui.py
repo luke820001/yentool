@@ -40,6 +40,11 @@ F1_PHONE = ("Gain_1M_Pct", "Vol_MA20", "Vol_Today", "Core_Plus", "Entry_Date",
 # display-only company events: rendered, deliberately phone=False
 EVENT_COLS = ("Rev_Month", "Rev_Amount_K", "Rev_YoY_Pct", "Rev_MoM_Pct",
               "Rev_Cum_YoY_Pct", "Ex_Date", "Ex_Kind", "Ex_Cash_Div", "Conf_Date")
+# the hold clock and the late-take note (2026-10-09): shown on the simulated
+# hold cards exactly as the desktop shows them, deliberately phone=False in
+# the registry -- an outage there must not fail the payload, and the phone
+# prints them only when they agree with each other (see holdClock/lateDueNow)
+HOLD_DISPLAY_COLS = ("Hold_Day", "Hold_Remaining", "Exit_Date", "Exit_Note")
 # Rec_Status_Reason values written by portfolio/sync.py (exit reasons,
 # no_fill, horizon_elapsed, rule_version, retracted:<code>) and
 # tools/rec_set_status.py (degraded_run)
@@ -210,7 +215,7 @@ class ThePhoneReadsRegisteredColumns(unittest.TestCase):
             self.assertTrue(rc.COLUMNS[col]["phone"], col)
 
     def test_event_columns_stay_display_only(self):
-        for col in EVENT_COLS:
+        for col in EVENT_COLS + HOLD_DISPLAY_COLS:
             self.assertFalse(rc.COLUMNS[col]["phone"], col)
 
     def test_every_column_read_is_registered(self):
@@ -223,7 +228,8 @@ class ThePhoneReadsRegisteredColumns(unittest.TestCase):
         j = APP.index("// --- 11.2 ")
         cols = set(re.findall(r"\b(?:r|row)\.([A-Z][A-Za-z0-9_]+)", APP[i:j]))
         self.assertIn("Prev_Signal_Date", cols)
-        off = sorted(c for c in cols if c not in EVENT_COLS and not rc.COLUMNS[c]["phone"])
+        off = sorted(c for c in cols if c not in EVENT_COLS + HOLD_DISPLAY_COLS
+                     and not rc.COLUMNS[c]["phone"])
         self.assertEqual(off, [], "read by the picks views but phone=False")
 
 

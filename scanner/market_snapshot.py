@@ -124,13 +124,78 @@ def parse_otc(raw):
     return pd.DataFrame(rows)
 
 
+def parse_names(raw, board):
+    """{stock_id: [name, board]} for every instrument a board's daily feed
+    lists, whether or not it traded (a suspended name still has a name, and may
+    be held). The same feeds the bars come from, so the name and the board of a
+    code are never older than the bar next to them (2026-10-09, M-26: 22
+    universe records had an empty Market because the cache only knew the names
+    somebody had once looked up)."""
+    code_key, name_key = (("Code", "Name") if board == "TSE"
+                          else ("SecuritiesCompanyCode", "CompanyName"))
+    out = {}
+    for r in raw or []:
+        if not isinstance(r, dict):
+            continue
+        code = r.get(code_key)
+        if not _keep_code(code):
+            continue
+        nm = str(r.get(name_key) or "").strip()
+        if nm:
+            out[str(code).strip()] = [nm, board]
+    return out
+
+
+def refresh_name_cache(path, fresh, log=print):
+    """Merge the feed's {id: [name, board]} into the persistent name cache and
+    return the merged dict. The feed wins on a clash (a rename, a code that
+    moved board); a code the feed did not list is kept, so a thin or failed
+    feed can only ever ADD to the cache, never shrink it. The file is written
+    only when something changed, through a temp file so a crash cannot leave a
+    half-written cache."""
+    import json
+    import os
+    try:
+        with open(str(path), "r", encoding="utf-8") as f:
+            cache = json.load(f)
+        if not isinstance(cache, dict):
+            cache = {}
+    except (OSError, ValueError):
+        cache = {}
+    if not fresh:
+        return cache
+    changed = 0
+    for sid, pair in fresh.items():
+        if cache.get(sid) != pair:
+            cache[sid] = pair
+            changed += 1
+    if changed:
+        tmp = str(path) + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False)
+            os.replace(tmp, str(path))
+            log("  [names] {} name/board entr(ies) refreshed from the daily "
+                "feeds".format(changed))
+        except OSError as e:
+            log("  [names] cache not written ({}); using the merged names for "
+                "this run".format(str(e)[:80]))
+    return cache
+
+
 def fetch_snapshot(log=print):
     """Both exchanges' latest daily bar for every instrument. Returns
     (DataFrame, health) where health says what each board contributed."""
     from scanner.market_filter import _fetch_json
-    tse = parse_tse(_fetch_json(TSE_URL))
-    otc = parse_otc(_fetch_json(OTC_URL))
+    raw_tse = _fetch_json(TSE_URL)
+    raw_otc = _fetch_json(OTC_URL)
+    tse = parse_tse(raw_tse)
+    otc = parse_otc(raw_otc)
     health = {"TSE": len(tse), "OTC": len(otc), "ok": True, "skipped": []}
+    health["names"] = {**parse_names(raw_tse, "TSE"), **parse_names(raw_otc, "OTC")}
+    # which exchange lists each code (an OTC-listed ETF has a 00 prefix too)
+    health["boards"] = {**{str(s): "TSE" for s in tse.get("stock_id", [])},
+                        **{str(s): "OTC" for s in otc.get("stock_id", [])}}
     frames = []
     for name, df in (("TSE", tse), ("OTC", otc)):
         if len(df) < MIN_ROWS[name]:
@@ -515,10 +580,11 @@ def _record_attempts(price_db, asked, filled):
 
 
 def stocks_needing_history(price_db, min_bars=BACKFILL_MIN_BARS,
-                           limit=BACKFILL_PER_SCAN):
+                           limit=BACKFILL_PER_SCAN, boards=None):
     """{stock_id: market} for the most liquid names whose recent window is
     incomplete, skipping the ones repeated attempts have shown cannot be
-    filled.
+    filled. `boards` is {stock_id: 'TSE'|'OTC'} from today's snapshot; a name
+    it does not know maps to None (the fetcher probes both exchanges).
 
     "Incomplete" means MISSING SESSIONS, not merely few rows. The first
     version asked `COUNT(*) < 60` over all time, which cannot see a hole: on
@@ -568,19 +634,21 @@ def stocks_needing_history(price_db, min_bars=BACKFILL_MIN_BARS,
         sid = str(r[0])
         if sid in skip:
             continue
-        # 00-prefixed instruments list on the TSE side of the fetchers.
-        out[sid] = "TSE" if sid.startswith("00") else None
+        # The exchange that lists the code, from today's own snapshot. A "00"
+        # prefix says nothing: about 117 ETFs list on the OTC board and are
+        # not served under the .TW suffix (2026-10-09 audit D7-01).
+        out[sid] = (boards or {}).get(sid)
         if len(out) >= limit:
             break
     return out
 
 
-def backfill_history(price_db, limit=BACKFILL_PER_SCAN, log=print):
+def backfill_history(price_db, limit=BACKFILL_PER_SCAN, log=print, boards=None):
     """Fetch history for a slice of the under-covered names. Returns how many
     were filled. Never raises: this is a completeness improvement, not a
     precondition for the scan."""
     try:
-        want = stocks_needing_history(price_db, limit=limit)
+        want = stocks_needing_history(price_db, limit=limit, boards=boards)
         if not want:
             return 0
         from ingestion.price_volume_multi import (multi_fetch_and_save_batch,

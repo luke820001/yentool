@@ -409,7 +409,7 @@ class TestCheckFilesStamp(unittest.TestCase):
         with mock.patch.object(rx, "MOBILE_DIR", self.dir), \
                 mock.patch.object(rx, "MOBILE_DATA_FILE", out), \
                 mock.patch.object(rx, "_publish_quotes", lambda df, names=None: {}), \
-                mock.patch.object(rx, "_regime", lambda: {"ok": True}), \
+                mock.patch.object(rx, "_regime", lambda *a, **k: {"ok": True}), \
                 mock.patch.object(rx, "_calendar_tail", lambda: []):
             rx.export_scan_result_json(pd.DataFrame([clean_row()]), MODE,
                                        scan_time=DATE + " 15:05:00",
@@ -619,7 +619,22 @@ class TestPages(unittest.TestCase):
             if m:
                 ignored.add(m.group(1))
         self.assertTrue(ignored)
-        self.assertLessEqual(ignored, set(lf.PAGES_DATA_FILES))
+        self.assertLessEqual(ignored, set(lf.PAGES_DATA_FILES)
+                             | set(lf.PAGES_DERIVED_FILES))
+
+    def test_a_derived_file_is_rebuilt_before_every_pages_upload(self):
+        """The files outside PAGES_DATA_FILES are not downloaded back, so the
+        workflow must rebuild each of them from tracked data before the
+        upload, under the same condition the upload uses (published covers
+        exit 0 and the exit-4 amend)."""
+        wf = (ROOT / ".github" / "workflows" / "scan.yml").read_text(encoding="utf-8")
+        up = wf.index("Upload Pages artifact")
+        for name in lf.PAGES_DERIVED_FILES:
+            cp = wf.index("cp data/%s mobile/%s" % (name, name))
+            self.assertLess(cp, up, name)
+            step = wf[wf.rindex("- name:", 0, cp):cp]
+            self.assertIn("steps.scan.outputs.published == 'true'", step, name)
+        self.assertTrue(set(lf.PAGES_DERIVED_FILES).isdisjoint(lf.PAGES_DATA_FILES))
 
 
 # --------------------------------------------------------------------------

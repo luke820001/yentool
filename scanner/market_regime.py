@@ -5,9 +5,41 @@ but collapsed in the 2022 bear (lift ~1.07). So a scan should tell the user
 whether the market is a tailwind or a headwind for these strategies.
 ASCII only outside the user-facing banner text.
 """
+import json
+from pathlib import Path
+
 import pandas as pd
 from storage.data_store import load_sheet, max_stored_date
 from config.settings import TAIEX_FILE, PRICE_VOLUME_FILE
+from scanner.index_clean import clean_closes
+
+_TEXT_FILE = Path(__file__).resolve().parent.parent / "config" / "regime_text.json"
+
+# ASCII fallbacks: the Chinese banner lives in config/regime_text.json. A missing
+# or unreadable file must never break the regime, only plain-English the banner.
+_TEXT_FALLBACK = {
+    "no_data": "Market regime: not enough data",
+    "stale": "Market data is stale: TAIEX latest {as_of}, stock data {ref}; not treated as a tailwind",
+    "tailwind": "Market tailwind: TAIEX above 20/60MA (60-day drawdown {dd}%)",
+    "neutral": "Market neutral: TAIEX above 60MA, below 20MA; no new entries, holdings follow exit rules (60-day drawdown {dd}%)",
+    "headwind": "Market headwind: TAIEX below 60MA; no new entries, holdings follow exit rules (60-day drawdown {dd}%)",
+}
+
+
+def _text(key, **kw):
+    """Banner text for `key` from config/regime_text.json, else the ASCII
+    fallback. Never raises."""
+    try:
+        data = json.loads(_TEXT_FILE.read_text(encoding="utf-8"))
+        tpl = data.get(key)
+        if not isinstance(tpl, str) or not tpl:
+            tpl = _TEXT_FALLBACK[key]
+    except Exception:
+        tpl = _TEXT_FALLBACK[key]
+    try:
+        return tpl.format(**kw)
+    except Exception:
+        return _TEXT_FALLBACK[key].format(**kw)
 
 
 def get_market_regime(data_date=None) -> dict:
@@ -40,7 +72,7 @@ def get_market_regime(data_date=None) -> dict:
     # dict that says ok=False. An unknown regime must fail CLOSED (F15).
     out = {"ok": False, "risk_on": False, "enter_ok": False, "strong": False,
            "as_of_date": None, "ref_date": None, "is_current": False,
-           "text": "大盤狀態：資料不足"}
+           "text": _text("no_data")}
     try:
         ref_date = str(data_date or "")[:10] or max_stored_date(PRICE_VOLUME_FILE)
         out["ref_date"] = ref_date
@@ -48,9 +80,15 @@ def get_market_regime(data_date=None) -> dict:
         t = load_sheet(TAIEX_FILE, "TAIEX")
         if t.empty:
             return out
-        t = t.copy()
-        t["close"] = pd.to_numeric(t["close"], errors="coerce")
-        t = t.dropna(subset=["close"]).sort_values("date")
+        # Only bars that are real sessions with a plausible close, and only up
+        # to the session being scanned: a partial same-day print dated AFTER the
+        # scan's data date must not be read as "today" (2026-10-09 audit D1-03),
+        # and a corrupt or weekend bar must not move the moving averages
+        # (D11-06, M-12). bars_dropped says how many were refused.
+        t, dropped = clean_closes(t)
+        out["bars_dropped"] = int(sum(dropped.values()))
+        if ref_date:
+            t = t[t["date"] <= ref_date]
         c = t["close"]
         if len(c) < 60:
             return out
@@ -89,18 +127,18 @@ def get_market_regime(data_date=None) -> dict:
                              and out["str20"] >= 0.022)
 
         if not is_current:
-            # Say WHICH bar the opinion came from. "資料不足" would be a lie --
+            # Say WHICH bar the opinion came from. "not enough data" would be a lie --
             # the series is long enough, it is simply not about today.
-            out["text"] = ("大盤資料過期：TAIEX 最新 {}，個股資料 {}，"
-                           "本次不視為順風（請先更新大盤資料）".format(
-                               as_of or "無", ref_date or "未知"))
+            out["text"] = _text("stale", as_of=as_of or "-", ref=ref_date or "?")
         elif above60 and above20:
-            out["text"] = "大盤順風：TAIEX 站上 20/60MA，動能策略 edge 正常（60日回檔 {:.0f}%）".format(dd)
+            out["text"] = _text("tailwind", dd="{:.0f}".format(dd))
         elif above60:
-            out["text"] = "大盤中性：TAIEX 在 60MA 上、跌破 20MA，留意轉弱（60日回檔 {:.0f}%）".format(dd)
+            out["text"] = _text("neutral", dd="{:.0f}".format(dd))
         else:
-            out["text"] = ("大盤逆風：TAIEX 跌破 60MA，動能策略 edge 易失效，"
-                           "建議降部位（60日回檔 {:.0f}%）".format(dd))
+            out["text"] = _text("headwind", dd="{:.0f}".format(dd))
     except Exception:
-        pass
+        # Anything half-computed is unusable: an exception after the keys were
+        # filled must not leave a tailwind behind (fail closed, F15).
+        out.update(ok=False, risk_on=False, enter_ok=False, strong=False,
+                   is_current=False)
     return out

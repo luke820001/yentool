@@ -79,13 +79,15 @@ def _load(price_db, min_bars=MIN_BARS, limit_bars=RECENT_BARS):
     return df.sort_values(["stock_id", "date"])
 
 
-def build(price_db, names=None, inst=None, min_bars=MIN_BARS):
-    """Compact records keyed by stock id."""
+def build(price_db, names=None, inst=None, min_bars=MIN_BARS, boards=None):
+    """Compact records keyed by stock id. `boards` ({id: 'TSE'|'OTC'}, from the
+    day's snapshot) fills the Market of a code whose name is not cached."""
     df = _load(price_db, min_bars=min_bars)
     if df.empty:
         return {}
     names = names or {}
     inst = inst or {}
+    boards = boards or {}
     # The market's session calendar over the window, so a per-stock gap can be
     # told apart from a day the market did not open.
     sessions = sorted({str(d) for d in df["date"]})
@@ -116,7 +118,8 @@ def build(price_db, names=None, inst=None, min_bars=MIN_BARS):
         nm = names.get(sid)
         name = (nm[0] if isinstance(nm, list) and nm else
                 (nm if isinstance(nm, str) else sid))
-        market = (nm[1] if isinstance(nm, list) and len(nm) > 1 else "")
+        market = (nm[1] if isinstance(nm, list) and len(nm) > 1 and nm[1] else
+                  str(boards.get(sid) or ""))
 
         def ma(n):
             if len(c) < n or not unbroken(n):
@@ -175,17 +178,29 @@ def build(price_db, names=None, inst=None, min_bars=MIN_BARS):
 
 
 def export(path, price_db, names=None, inst=None, session_date="",
-           scan_mode="", log=print):
+           scan_mode="", log=print, boards=None):
     """Write universe.json. Returns the number of stocks written."""
-    stocks = build(price_db, names=names, inst=inst)
+    stocks = build(price_db, names=names, inst=inst, boards=boards)
     if not stocks:
         log("  [universe] nothing to write")
         return 0
+    # Self-check (2026-10-09, M-26): a record with no board or with the code
+    # standing in for its name means the name source missed it. Counted and
+    # said out loud rather than published as if it were whole.
+    blank_market = sorted(s for s, r in stocks.items() if not r.get("Market"))
+    unnamed = sorted(s for s, r in stocks.items()
+                     if r.get("Stock_Name") in (None, "", s))
+    if blank_market or unnamed:
+        log("  [universe] {} record(s) without a board, {} without a name "
+            "(e.g. {})".format(len(blank_market), len(unnamed),
+                               ", ".join((blank_market or unnamed)[:5])))
     payload = {
         "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "session_date": str(session_date or "")[:10],
         "mode": scan_mode,
         "count": len(stocks),
+        "blank_market": len(blank_market),
+        "unnamed": len(unnamed),
         "note": "every listed instrument with enough history, not only the "
                 "scanned shortlist; each record carries its OWN Data_Date "
                 "because a stock outside the daily analysis can be a session "
@@ -195,6 +210,7 @@ def export(path, price_db, names=None, inst=None, session_date="",
     }
     from pathlib import Path
     Path(path).parent.mkdir(parents=True, exist_ok=True)
+    from scanner.json_safe import dump_strict
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+        dump_strict(payload, f, ensure_ascii=False, separators=(",", ":"))
     return len(stocks)

@@ -31,6 +31,7 @@ archive/legacy/*.xlsx
 # contract on 21 counts, and was the thing a feed-outage run would have
 # published to the phone. Fetch a real one for local work -- see mobile/README.
 mobile/scan_result.json
+mobile/recommendations.json
 mobile/quotes.json
 mobile/universe.json
 

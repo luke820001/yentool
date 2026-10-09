@@ -29,6 +29,7 @@ import os
 import pandas as pd
 
 import config.settings as _settings
+from scanner.index_clean import clean_closes
 
 _CACHE = {}
 
@@ -72,10 +73,9 @@ def disturbed_by_date(taiex_file=None):
     try:
         t = _load(path)
         if not t.empty:
-            t["date"] = t["date"].astype(str).str.slice(0, 10)
-            t["close"] = pd.to_numeric(t["close"], errors="coerce")
-            t = (t.dropna(subset=["close"]).sort_values("date", kind="mergesort")
-                 .drop_duplicates("date", keep="last"))
+            # real sessions with plausible closes only (scanner/index_clean):
+            # a weekend or corrupt bar would shift both averages
+            t, _dropped = clean_closes(t)
             c = t["close"]
             ma20 = c.rolling(20).mean()
             ma60 = c.rolling(60).mean()

@@ -1,7 +1,7 @@
 """
 Per-column self-check of the published scan payload. ASCII only.
 
-The cloud scan publishes mobile/scan_result.json (96 columns x N rows plus a
+The cloud scan publishes mobile/scan_result.json (~120 columns x N rows plus a
 meta block), mobile/quotes.json and data/recommendations.json. Until now the
 only checks were upstream guards (feed floors, per-bar integrity, the buy
 gate): nothing looked at the file that actually reaches the phone. A column
@@ -37,6 +37,7 @@ import json
 import math
 import re
 from datetime import datetime
+from pathlib import Path
 
 CHECKS_VERSION = 1
 HISTORY_KEEP = 60
@@ -940,6 +941,12 @@ def _check_rows(rows, meta, rep, scan_mode):
             out = _num(r.get("Scale_Out_Price"))
             if out is not None and abs(out - _lvl(close, out_pct, "up", sid)) > _PRICE_TOL:
                 hit("scale_out_pct_mismatch", sid, "Scale_Out_Price")
+            # the trailing pair (2026-10-09 audit D10-18): the only levels of
+            # the exit rule with no identity of their own, only the ordering
+            if arm is not None and abs(arm - _lvl(close, arm_pct, "up", sid)) > _PRICE_TOL:
+                hit("trail_arm_pct_mismatch", sid, "Trail_Arm_Price")
+            if lock is not None and abs(lock - _lvl(close, lock_pct, "down", sid)) > _PRICE_TOL:
+                hit("trail_lock_pct_mismatch", sid, "Trail_Lock_Price")
 
         # Core_Plus derives from three columns on the same row
         if prelaunch and "Core_Plus" in r:
@@ -1084,6 +1091,16 @@ def _check_rows(rows, meta, rep, scan_mode):
                 if r.get("Market") != "OTC" or r.get("Core_Plus") is not True \
                         or not fresh or iok is not True or rank >= n_enter:
                     hit("buy_ready_violates_gate", sid, "Buy_Ready")
+                # the market gate (STRATEGY 3.4): a new entry opens only on a
+                # tailwind day, judged on a current TAIEX. The list carries
+                # the regime it was judged on; the same formula as
+                # scan_mode.mark_buy_ready (2026-10-09 audit M-25: nothing
+                # compared the two, so a regime that never reached the rows
+                # would have shipped a green list on a headwind day).
+                if reg and not (reg.get("ok") is True
+                                and reg.get("enter_ok") is True
+                                and reg.get("is_current") is not False):
+                    hit("buy_ready_without_regime", sid, "Buy_Ready")
             # A buy signal's card must describe a trade that can still be
             # entered. The 2026-10-07 payload shipped 8227 as Buy_Ready on an
             # 'exited' card (the old, closed trade) and stayed green. Since
@@ -1157,10 +1174,11 @@ def _check_rows(rows, meta, rep, scan_mode):
         "fill_on_pending_row", "held_row_without_entry_date", "entry_date_in_future",
         "fill_level_mismatch", "exit_before_entry", "buy_ready_with_block",
         "blocked_without_reason", "buy_ready_violates_gate", "buy_ready_on_stale_row",
+        "buy_ready_without_regime",
         "recommendation_partial", "recommendation_orphan_value", "non_positive",
         "sup_gap_mismatch", "res_gap_mismatch", "squeeze_mismatch",
         "add_pct_mismatch", "plan_add_level_mismatch", "add_hit_on_pending_row",
-        "add_hit_before_entry",
+        "add_hit_before_entry", "trail_arm_pct_mismatch", "trail_lock_pct_mismatch",
         "exit_signal_on_pending_row", "plan_stop_pending_mismatch",
         "plan_stop_level_mismatch", "exit_signal_partial",
         "scale_out_pct_mismatch", "price_off_tick",
@@ -1196,6 +1214,8 @@ def _check_rows(rows, meta, rep, scan_mode):
         "stop_not_below_entry": "Strict_Stop_Loss >= Suggested_Buy_Price",
         "target_not_above_entry": "Target_Price <= Suggested_Buy_Price",
         "trail_lock_not_below_arm": "Trail_Lock_Price >= Trail_Arm_Price",
+        "trail_arm_pct_mismatch": "Trail_Arm_Price is not close * (1 + the arm percentage)",
+        "trail_lock_pct_mismatch": "Trail_Lock_Price is not close * (1 + the lock percentage)",
         "entry_ref_not_close": "prelaunch entry reference is not the close",
         "stop_pct_mismatch": "stop is not close * (1 - PRELAUNCH_STOP_PCT)",
         "target_pct_mismatch": "target is not close * (1 + PRELAUNCH_TP_PCT)",
@@ -1218,6 +1238,7 @@ def _check_rows(rows, meta, rep, scan_mode):
         "buy_ready_with_block": "Buy_Ready true but Buy_Block non-empty",
         "blocked_without_reason": "Buy_Ready false with empty Buy_Block",
         "buy_ready_violates_gate": "Buy_Ready true on a row failing the OTC/Core+/fresh(pending or First_Day)/integrity/rank gate",
+        "buy_ready_without_regime": "Buy_Ready true although the list's own market regime is not an entry tailwind (or not current)",
         "recommendation_partial": "Recommendation_ID without its frozen prices/dates",
         "recommendation_orphan_value": "frozen recommendation value without an id",
         "non_positive": "MA / volume average not positive",
@@ -1349,13 +1370,43 @@ def _check_restriction_meta(restr, has_rows, data_date, cal, rep):
         rep.warn("restrictions_stale", "meta.quality.restrictions", len(stale),
                  "disposition list older than the previous session ({}): {}".format(
                      prev, ", ".join(stale)))
-    for key, code in (("attention_ok", "attention_feed_failed"),
-                      ("altered_ok", "altered_feed_failed")):
-        st = restr.get(key) if isinstance(restr.get(key), dict) else {}
-        bad = [b for b in MARKETS if st.get(b) is False]
-        if bad:
-            rep.info(code, "meta.quality.restrictions." + key, len(bad),
-                     "best-effort list unreadable: " + ", ".join(bad))
+    st = restr.get("attention_ok") if isinstance(restr.get("attention_ok"), dict) else {}
+    bad = [b for b in MARKETS if st.get(b) is False]
+    if bad:
+        rep.info("attention_feed_failed", "meta.quality.restrictions.attention_ok",
+                 len(bad), "best-effort list unreadable: " + ", ".join(bad))
+    st = restr.get("altered_ok") if isinstance(restr.get("altered_ok"), dict) else {}
+    bad = [b for b in MARKETS if st.get(b) is False]
+    if bad:
+        # the altered / halt feeds are where 'suspended' (the one blocking
+        # kind) comes from: unreadable means the rows read 'unknown'
+        rep.warn("altered_feed_failed", "meta.quality.restrictions.altered_ok",
+                 len(bad), "altered / halt list unreadable, a suspension would "
+                 "go unseen (rows read 'unknown'): " + ", ".join(bad))
+
+
+def _check_rec_health(meta, rows, rep):
+    """The recommendation lifecycle must have done its job (2026-10-09 audit
+    D6B-02). A step that failed leaves meta.rec.error; a buy that reached the
+    list without its frozen entry / stop / target record is the visible result.
+    Either keeps the list provisional on a normal run (the timer retries); a
+    degraded run writes no recommendations by design, so it only warns."""
+    rec = meta.get("rec")
+    if not isinstance(rec, dict):
+        return
+    degraded = bool(meta.get("degraded"))
+    if rec.get("error"):
+        (rep.warn if degraded else rep.error)(
+            "rec_failed", "meta.rec.error", 1, str(rec.get("error"))[:160])
+    if degraded or rec.get("writes") is not True:
+        return
+    missing = [str(r.get("Stock_ID") or "?") for r in rows
+               if isinstance(r, dict) and r.get("Buy_Ready") is True
+               and _is_null(r.get("Recommendation_ID"))]
+    if missing:
+        rep.error("buy_ready_without_recommendation", "Recommendation_ID",
+                  len(missing),
+                  "buy without a recommendation record: " + ", ".join(missing[:5]))
 
 
 def _check_list_status(ls, session, rep):
@@ -1406,6 +1457,18 @@ def _check_meta(payload, rep, expected_session=None):
     if not rows and not meta.get("empty_ok") and not meta.get("degraded"):
         rep.error("empty_not_flagged", "meta.empty_ok", 1,
                   "zero rows without empty_ok or degraded")
+    # The version the payload names must be the version of the code that
+    # checks it (2026-10-09 audit D10-18): recommendations are compared with
+    # the payload's own meta, which proves nothing about the producer.
+    if meta.get("mode") == "mode_prelaunch" and "strategy_version" in meta:
+        try:
+            from scanner.scan_mode import STRATEGY_VERSION
+        except Exception:
+            STRATEGY_VERSION = None
+        if STRATEGY_VERSION and meta.get("strategy_version") != STRATEGY_VERSION:
+            rep.warn("strategy_version_mismatch", "meta.strategy_version", 1,
+                     "payload says {!r}, this code is {!r}".format(
+                         meta.get("strategy_version"), STRATEGY_VERSION))
 
     if meta.get("degraded"):
         rep.warn("feed_degraded", "meta.degraded", 1, str(meta.get("degraded")))
@@ -1415,6 +1478,7 @@ def _check_meta(payload, rep, expected_session=None):
             rep.error("rec_written_on_degraded_run", "meta.rec", 1,
                       "a degraded run wrote recommendations (created {}, "
                       "writes {})".format(rec.get("created"), rec.get("writes")))
+    _check_rec_health(meta, rows, rep)
     quality = meta.get("quality") or {}
     if quality.get("data_lag"):
         rep.warn("data_lag", "meta.quality.data_lag", 1,
@@ -1654,6 +1718,118 @@ def _check_recommendations(payload, recs, rep):
     for key, fn, code, column, detail in spec:
         if found[key]:
             fn(code, column, len(found[key]), detail, sample=found[key])
+    _check_closed_records(items, version, rep)
+
+
+def _outcome_of(rec):
+    """A recommendation's outcome as a dict (the export may hold it as an
+    object or as JSON text), None when absent or unreadable."""
+    out = rec.get("outcome")
+    if isinstance(out, str):
+        try:
+            out = json.loads(out)
+        except ValueError:
+            return None
+    return out if isinstance(out, dict) else None
+
+
+def _record_problem(rec, out):
+    """Why the stored trade record of one closed recommendation disagrees with
+    the rule, or None. The record's own OHLC path is replayed by the canonical
+    exit engine (scanner.exit_rules.replay_exit) and has to land on the same
+    exit; the dates have to line up with the recommendation row."""
+    path = out.get("path")
+    if not isinstance(path, list) or not path:
+        return "path missing"
+    from scanner.exit_rules import DEFAULT_RULE, replay_exit
+    try:
+        d = [str(p.get("date") or "")[:10] for p in path]
+        o = [float(p["open"]) for p in path]
+        h = [float(p["high"]) for p in path]
+        l = [float(p["low"]) for p in path]
+        c = [float(p["close"]) for p in path]
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return "path unreadable"
+    if d != sorted(d) or len(set(d)) != len(d):
+        return "path dates not ascending"
+    if str(out.get("entry_date") or "")[:10] != d[0]:
+        return "entry_date {} is not the first path day {}".format(
+            out.get("entry_date"), d[0])
+    planned = str(rec.get("valid_until_session") or "")[:10]
+    if planned and d[0] != planned:
+        return "filled {} but the entry session was {}".format(d[0], planned)
+    if str(out.get("exit_fill_date") or "")[:10] != d[-1]:
+        return "exit_fill_date {} is not the last path day {}".format(
+            out.get("exit_fill_date"), d[-1])
+    if str(rec.get("status_session") or "")[:10] != d[-1]:
+        return "closed on {} but the path ends {}".format(
+            rec.get("status_session"), d[-1])
+    if _num(out.get("bars")) != len(path):
+        return "bars {} but {} path days".format(out.get("bars"), len(path))
+    dec = str(out.get("exit_decision_date") or "")[:10]
+    if not dec or dec > d[-1] or dec < d[0]:
+        return "exit_decision_date {} outside the trade".format(out.get("exit_decision_date"))
+    if rec.get("status_reason") not in (None, out.get("reason")):
+        return "status_reason {} but the outcome says {}".format(
+            rec.get("status_reason"), out.get("reason"))
+    gross, ep, xp = _num(out.get("ret_gross_pct")), _num(out.get("entry_price")), \
+        _num(out.get("exit_price"))
+    if None in (gross, ep, xp) or ep <= 0:
+        return "return fields missing"
+    if abs((xp / ep - 1.0) * 100.0 - gross) > 0.03:
+        return "ret_gross_pct {} does not follow the prices".format(gross)
+    if abs(ep - o[0]) > _PRICE_TOL:
+        return "entry_price {} is not the first open {}".format(ep, o[0])
+    reason = out.get("reason")
+    p = replay_exit(o, h, l, c, dates=d, hold_bars=None)
+    last = len(path) - 1
+    if reason in ("stop", "lock", "tp", "late"):
+        if not (p.get("exited") and p.get("bar") == last
+                and p.get("reason") == reason
+                and abs(float(p["exit_price"]) - xp) <= _PRICE_TOL):
+            return "the rule does not exit {} at {} on {}".format(reason, xp, d[-1])
+    elif reason == "time":
+        if p.get("exited"):
+            return "the rule already exited ({}) on {}".format(
+                p.get("reason"), p.get("date"))
+        if len(path) < DEFAULT_RULE["hold_bars"]:
+            return "time exit after {} bars".format(len(path))
+        if abs(xp - c[last]) > _PRICE_TOL:
+            return "time exit {} is not that day's close {}".format(xp, c[last])
+    else:
+        return "unknown exit reason {!r}".format(reason)
+    return None
+
+
+def _check_closed_records(items, version, rep):
+    """Every closed recommendation that carries a trade record must agree with
+    an independent replay of the record's own path (2026-10-09). Records
+    closed under another strategy version are not judged by today's rule, and
+    older outcomes that have no path are only counted."""
+    bad, legacy = [], []
+    for rec in items:
+        if not isinstance(rec, dict) or rec.get("status") != "closed":
+            continue
+        out = _outcome_of(rec)
+        if out is None:
+            continue
+        rid = str(rec.get("recommendation_id") or rec.get("stock_id") or "?")
+        if "path" not in out:
+            legacy.append(rid)
+            continue
+        if version and str(rec.get("strategy_version") or "") != version:
+            continue
+        why = _record_problem(rec, out)
+        if why:
+            bad.append("{}: {}".format(rid, why))
+    if bad:
+        rep.error("rec_record_mismatch", "recommendations.outcome", len(bad),
+                  "stored trade record disagrees with the rule: " + "; ".join(bad[:3]),
+                  sample=bad)
+    if legacy:
+        rep.info("rec_record_legacy", "recommendations.outcome", len(legacy),
+                 "closed before the complete record existed (no day-by-day path)",
+                 sample=legacy)
 
 
 def _check_events(payload, meta, rep):
@@ -1711,6 +1887,33 @@ def _check_events(payload, meta, rep):
         rep.warn("events_not_annotated", "Rev_Month", len(rows),
                  "revenue loaded ({} names) but no listed row carries "
                  "it".format(rev_rows))
+
+
+def _check_market_leg(meta, rows, rep):
+    """meta.market_leg = {"YYYY-MM-DD": bool}: the per-date market half of the
+    ride rule, published so the phone can apply it (2026-10-09 audit M-04).
+    Missing is INFO, not a warning: without it the phone falls back to the own
+    5-bar mean alone, which is visible on the card, and a TAIEX outage is not
+    a reason to rescan. A malformed map is a warning: the phone would read it
+    as a market verdict it is not."""
+    if not rows:
+        return
+    leg = meta.get("market_leg")
+    if leg is None:
+        rep.add("info", "market_leg_missing", "meta.market_leg", 1,
+                "the market leg of the ride is not published (TAIEX history "
+                "unreadable?); the phone judges the ride on the stock alone")
+        return
+    bad = []
+    if not isinstance(leg, dict):
+        bad = ["not an object"]
+    else:
+        for k, v in leg.items():
+            if not (isinstance(v, bool) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(k))):
+                bad.append(str(k))
+    if bad:
+        rep.warn("market_leg_malformed", "meta.market_leg", len(bad),
+                 "keys must be YYYY-MM-DD and values true/false", sample=bad)
 
 
 def _check_live_record(meta, rep):
@@ -1779,14 +1982,59 @@ def _check_tracked(payload, meta, rep, scan_mode):
 # --------------------------------------------------------------------------
 # public API
 # --------------------------------------------------------------------------
+def ledger_problem(ledger_path):
+    """None when the signal ledger can be read, else a short reason.
+
+    The holding columns, the 'held' block and the freeze marker all lean on
+    this file. 2026-10-09 audit D11-01: a corrupt or missing ledger used to
+    read as "no history", every held name looked new, and the list still went
+    out FINAL with no check item at all."""
+    import sqlite3
+    conn = None
+    try:
+        if not Path(str(ledger_path)).exists():
+            return "missing"
+        conn = sqlite3.connect(str(ledger_path))
+        conn.execute("SELECT COUNT(*) FROM picks").fetchone()
+        return None
+    except Exception as e:
+        return "unreadable: {}".format(str(e)[:80])
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def recs_problem(recs_path):
+    """None when the recommendations export is absent (first run) or sound,
+    else a short reason. A present file that does not parse, or that has the
+    wrong shape, is what export_recommendations would overwrite with an empty
+    set (D11-03)."""
+    try:
+        if not Path(str(recs_path)).exists():
+            return None
+    except Exception:
+        return None
+    data = _load_json(recs_path)
+    if not isinstance(data, dict):
+        return "does not parse as a JSON object"
+    if not isinstance(data.get("recommendations"), list):
+        return "has no recommendations list"
+    return None
+
+
 def check_payload(payload, quotes=None, recs=None, tracked_ids=None,
-                  expected_session=None, now=None):
-    """Audit one published payload. Returns the report dict (never raises)."""
+                  expected_session=None, now=None, file_issues=None):
+    """Audit one published payload. Returns the report dict (never raises).
+
+    `file_issues` is [(level, code, detail)] about the stores the payload leans
+    on (check_files builds it from the ledger and recommendations files)."""
     rep = _Report()
     try:
         meta = payload.get("meta") or {}
         rows = payload.get("rows") or []
         scan_mode = str(meta.get("mode") or "")
+        for lvl, code, detail in (file_issues or []):
+            rep.add(lvl, code, "", 1, detail)
         _check_meta(payload, rep, expected_session=expected_session)
         _check_columns(rows, rep)
         _check_rows(rows, meta, rep, scan_mode)
@@ -1805,6 +2053,7 @@ def check_payload(payload, quotes=None, recs=None, tracked_ids=None,
         # per-name history and benchmark
         _check_events(payload, meta, rep)
         _check_live_record(meta, rep)
+        _check_market_leg(meta, rows, rep)
     except Exception as e:      # the checker must never take the scan down
         rep.error("checker_crash", "", 1, "{}: {}".format(type(e).__name__, e))
 
@@ -1953,7 +2202,8 @@ def append_history(history_path, report, meta, keep=HISTORY_KEEP):
 
 def check_files(scan_path, quotes_path=None, recs_path=None, ledger_path=None,
                 history_path=None, write=True, expected_session=None,
-                revised_reason=None, list_prev=None, now=None):
+                revised_reason=None, list_prev=None, now=None,
+                run_faults=None):
     """Audit the published files, write meta.checks back, return the report.
 
     Idempotent: running twice on the same files yields the same report.
@@ -1963,7 +2213,9 @@ def check_files(scan_path, quotes_path=None, recs_path=None, ledger_path=None,
     final / provisional state always agrees with the checks in the same file.
     `list_prev` is the block this publish follows (default: the payload's own
     stamp); `revised_reason` (force_rescan / pages_behind / restriction_info)
-    bumps its revision. `now` (a datetime) pins checked_at / revised_at."""
+    bumps its revision. `now` (a datetime) pins checked_at / revised_at.
+    `run_faults` is [(code, detail)] the run itself could not do (a failed
+    ledger write): each becomes an error, so the list stays provisional."""
     payload = _load_json(scan_path)
     if payload is None:
         return {"version": CHECKS_VERSION, "status": "fail", "errors": 1,
@@ -1979,9 +2231,37 @@ def check_files(scan_path, quotes_path=None, recs_path=None, ledger_path=None,
     if ledger_path and quotes and quotes.get("sessions"):
         tracked = tracked_ids_from_ledger(ledger_path, str(meta.get("mode") or ""),
                                           quotes["sessions"][0])
+    issues = []
+    # Python reads NaN / Infinity happily and writes them back; the phone's
+    # JSON.parse refuses the whole file (2026-10-09 audit D9-01).
+    try:
+        from scanner.json_safe import has_non_finite_token
+        for label, path in (("scan_result", scan_path), ("quotes", quotes_path)):
+            if path and Path(str(path)).exists():
+                with open(path, "r", encoding="utf-8") as f:
+                    if has_non_finite_token(f.read()):
+                        issues.append(("error", "non_finite_json",
+                                       "{} holds a bare NaN/Infinity (invalid "
+                                       "JSON for the phone)".format(label)))
+    except Exception:
+        pass
+    has_rows = bool(payload.get("rows"))
+    if ledger_path and has_rows:
+        why = ledger_problem(ledger_path)
+        if why:
+            issues.append(("error", "ledger_unreadable",
+                           "signal ledger {}".format(why)))
+    for code, detail in (run_faults or []):
+        issues.append(("error", str(code), str(detail)))
+    if recs_path:
+        why = recs_problem(recs_path)
+        if why:
+            issues.append(("error", "recs_unreadable",
+                           "recommendations export {}".format(why)))
     report = check_payload(payload, quotes=quotes, recs=recs, tracked_ids=tracked,
                            expected_session=expected_session,
-                           now=now if isinstance(now, datetime) else None)
+                           now=now if isinstance(now, datetime) else None,
+                           file_issues=issues)
     if write:
         meta["checks"] = report
         try:
@@ -1993,8 +2273,9 @@ def check_files(scan_path, quotes_path=None, recs_path=None, ledger_path=None,
             # the seeded provisional block stays: fails toward a retry
             print("  [checks] list_status not stamped: {}".format(e))
         payload["meta"] = meta
+        from scanner.json_safe import dump_strict
         with open(scan_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+            dump_strict(payload, f, ensure_ascii=False, separators=(",", ":"))
         if history_path:
             try:
                 append_history(history_path, report, meta)

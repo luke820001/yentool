@@ -25,7 +25,11 @@ docs/BACKTEST_LOG.md section M; flipping the constant is the whole change
 A failed feed is NOT a block either: it yields Trade_Restriction "unknown"
 on that board's rows and a meta warning (result_checks
 restrictions_feed_failed). Restrictions are information by default, and
-"we could not read the list" is information too.
+"we could not read the list" is information too. The altered / halt feeds
+follow the same rule (2026-10-09): when one is unreadable, a name it does not
+list reads 'unknown' (never 'none'), because the one blocking kind,
+'suspended', comes from exactly those feeds; result_checks raises the warning
+altered_feed_failed.
 
 Sources (all live-verified 2026-10-08, TLS on, plain GET):
   disposition  TPEX openapi tpex_disposal_information, fallback the TPEX web
@@ -935,6 +939,11 @@ def restriction_of(row, info, session, nxt, ex_map=None):
         alt = (info.get("altered") or {}).get(sid)
         if alt in ("altered", "suspended"):
             flags.add(alt)
+        elif (info.get("altered_ok") or {}).get(board) is False:
+            # The altered / halt feeds were unreadable: "not listed" proves
+            # nothing, and 'suspended' is the one kind that blocks a buy. The
+            # row says so ('unknown' is display only, it never blocks).
+            flags.add("unknown")
         seen = (info.get("attention") or {}).get(sid)
         latest = (info.get("attention_latest") or {}).get(board)
         if seen and latest and seen >= latest:

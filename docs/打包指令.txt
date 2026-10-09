@@ -9,7 +9,7 @@
 
 [推薦] 資料夾模式 (onedir) -- DB 留在 exe 旁邊、跨次保存
 ------------------------------------------------------------
-python -m PyInstaller --noconfirm --windowed --name TaiwanScanner --add-data "config/scan_modes.json;config" --add-data "config/report_text.json;config" --add-data "config/twse_holidays.json;config" main_gui.py
+python -m PyInstaller --noconfirm --windowed --name TaiwanScanner --add-data "config/scan_modes.json;config" --add-data "config/report_text.json;config" --add-data "config/twse_holidays.json;config" --add-data "config/regime_text.json;config" main_gui.py
 
     產物: dist\TaiwanScanner\TaiwanScanner.exe
     (整個 dist\TaiwanScanner\ 資料夾一起帶走)
@@ -17,7 +17,7 @@ python -m PyInstaller --noconfirm --windowed --name TaiwanScanner --add-data "co
 
 [單檔] 單檔模式 (onefile) -- 一個檔好攜帶
 ------------------------------------------------------------
-python -m PyInstaller --noconfirm --onefile --windowed --name TaiwanScanner --add-data "config/scan_modes.json;config" --add-data "config/report_text.json;config" --add-data "config/twse_holidays.json;config" main_gui.py
+python -m PyInstaller --noconfirm --onefile --windowed --name TaiwanScanner --add-data "config/scan_modes.json;config" --add-data "config/report_text.json;config" --add-data "config/twse_holidays.json;config" --add-data "config/regime_text.json;config" main_gui.py
 
     產物: dist\TaiwanScanner.exe
     注意: onefile 每次執行解壓到暫存夾、結束就刪,
@@ -27,9 +27,10 @@ python -m PyInstaller --noconfirm --onefile --windowed --name TaiwanScanner --ad
 
 注意事項
 ------------------------------------------------------------
-- 三個 config 檔都要用 --add-data 帶進去 (scan_modes.json / report_text.json / twse_holidays.json):
+- 四個 config 檔都要用 --add-data 帶進去 (scan_modes.json / report_text.json / twse_holidays.json / regime_text.json):
   scan_modes.json 缺了一開就崩 (app 啟動會讀);report_text.json 缺了報告文字退回內建的英文備援;
   twse_holidays.json 缺了休市日要靠網路抓,抓不到就只看週末。
+  regime_text.json 缺了大盤橫幅退回內建英文備援。
 - .env (GROQ / FinMind 金鑰) 不會被打包,把它放在 exe 旁邊,
   或在系統設環境變數。
 - --add-data 的分隔符 Windows 是分號 ;  (別換成冒號 :)。

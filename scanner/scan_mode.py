@@ -50,8 +50,23 @@ def _safe_bool(df, col):
     s = df[col]
     if s.dtype == bool:
         return s
-    # fillna BEFORE the bool cast -- after it, the NaN is already True.
-    return s.where(s.notna(), False).astype(bool)
+    # Element by element, because `.astype(bool)` calls the string "False" and
+    # an infinity True (2026-10-09 audit D11-07): a flag that arrived as text
+    # or as a non-finite number must not pass a gate. Text counts only when it
+    # SAYS true; a number counts only when finite and non-zero.
+    return s.map(_flag).astype(bool)
+
+
+def _flag(v):
+    if v is None:
+        return False
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "t", "1", "yes", "y")
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return False
+    return f == f and f not in (_INF, -_INF) and f != 0
 
 
 def apply_scan_mode(df, selected_mode):
@@ -494,9 +509,14 @@ def add_trade_columns(df, scan_mode: str) -> "pd.DataFrame":
         dist52 = _safe_num(df, "Dist_52W_High_Pct", 999.0)
         ret5   = _safe_num(df, "Ret_5D_Pct", 999.0)
         atr    = _safe_num(df, "ATR_Pct", -1.0)
+        # An infinite feature satisfies a one-sided inequality (ATR +inf is
+        # "volatile enough", Dist_52W -inf is "close to the high"): it is a
+        # value nobody measured, so it fails (2026-10-09 audit D11-07).
+        finite = ((dist52.abs() != _INF) & (ret5.abs() != _INF)
+                  & (atr.abs() != _INF))
         df["Core_Plus"] = ((dist52 <= CORE_PLUS_DIST52_MAX)
                            & (ret5 <= CORE_PLUS_RET5_MAX)
-                           & (atr >= CORE_PLUS_ATR_MIN))
+                           & (atr >= CORE_PLUS_ATR_MIN) & finite)
         return df
 
     if scan_mode in ("mode_breakout", "mode_short_explosion",
@@ -618,7 +638,13 @@ def mark_buy_ready(df, scan_mode, session_date=None):
 
     try:
         from scanner.market_regime import get_market_regime
-        reg = get_market_regime()
+        # The regime is judged AS OF the session being scanned, not as of
+        # whatever bar happens to be newest on disk (2026-10-09 audit D1-03).
+        _reg_day = str(session_date or "")[:10]
+        if not _reg_day and "Data_Date" in df.columns:
+            _bars = df["Data_Date"].astype(str).str.slice(0, 10)
+            _reg_day = _bars[_bars != ""].max() if (_bars != "").any() else ""
+        reg = get_market_regime(_reg_day or None)
         # An unreadable regime must block, not wave through: "we do not know
         # whether the market is a tailwind" is not "it is". A regime computed
         # from a stale TAIEX cache is equally unusable (F15) -- is_current is
@@ -663,6 +689,21 @@ def mark_buy_ready(df, scan_mode, session_date=None):
     # tradable no matter how good the score is.
     integrity = (_safe_bool(df, "Integrity_OK") if "Integrity_OK" in df.columns
                  else pd.Series([False] * n, index=df.index))
+    # Two more things the bar cannot vouch for (2026-10-09 audit D11-07): a
+    # close that is not a finite positive price (every level is a multiple of
+    # it), and a Stock_ID that appears twice (two cards, two recommendations
+    # for one name). Both are data faults, so they take the 'integrity' block.
+    if "Close_Price" in df.columns:
+        px = pd.to_numeric(df["Close_Price"], errors="coerce")
+        integrity = integrity & px.notna() & (px.abs() != _INF) & (px > 0)
+    # ... and a session bar that traded nothing (D11-13): a zero-volume bar is
+    # a placeholder or a halt, not a session the rule was validated on.
+    if "Vol_Today" in df.columns:
+        vol = pd.to_numeric(df["Vol_Today"], errors="coerce")
+        integrity = integrity & vol.notna() & (vol > 0)
+    if "Stock_ID" in df.columns:
+        integrity = integrity & ~df["Stock_ID"].astype(str).str.strip().duplicated(
+            keep=False)
 
     # A fresh signal is a name that was NOT on the previous session's list
     # (holding_tracker.First_Day, the definition the rule was validated on),

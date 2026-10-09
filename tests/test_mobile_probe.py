@@ -81,6 +81,85 @@ def fee_grid(seed=20261008, prices_per_band=40, shares_per_price=12):
     return cases
 
 
+def plan_grid(seed=20261009):
+    """The BACKEND's answers, for the phone to reproduce (probe section M):
+
+      levels  [stock_id, fill_cents, key, level_cents] from
+              holding_tracker._lvl (round_to_tick of fill x (1 + pct)), both
+              ladders, every cent of 1.00-30.00 plus samples up to 3000;
+      armed   [stock_id, fill_cents, close_cents, armed] from
+              exit_rules.replay_exit, closes within three ticks of the exact
+              +2.5% threshold;
+      ride    series of closes, the market leg per date and what replay_exit
+              (hold 10, cap 20, extend_if) says. `complete` = the map carries
+              every date; otherwise some dates are unknown, which the backend
+              reads as 'off' and the phone as 'cannot prove it broke'.
+    """
+    import datetime
+    from scanner import holding_tracker as ht
+    from scanner.exit_rules import replay_exit
+    from scanner.tick import is_on_tick, round_to_tick
+
+    rnd = random.Random(seed)
+    spec = {"stop": (-ht.STOP_PCT, "down"), "lock": (ht.TRAIL_LOCK, "down"),
+            "add": (-ht.ADD_PCT, "down"), "arm": (ht.TRAIL_ARM, "up"),
+            "target": (ht.TP_PCT, "up"), "scale": (ht.SCALE_OUT_PCT, "up")}
+    levels = []
+    for sid, hi in (("6488", 100000), ("0050", 30000), ("00878", 30000)):
+        cents = list(range(100, 3001))
+        cents += rnd.sample(range(3001, hi + 1), 1500)
+        for c in cents:
+            fill = c / 100.0
+            for key, (pct, direction) in spec.items():
+                levels.append([sid, c, key,
+                               int(round(ht._lvl(fill, pct, direction, sid) * 100))])
+            levels.append([sid, c, "late", int(round(
+                round_to_tick(fill * (1 + ht.LATE_GAIN), "up", sid) * 100))])
+
+    armed = []
+    for sid in ("6488", "0050"):
+        for base in rnd.sample(range(100, 20001), 500):
+            exact = base * (1 + ht.TRAIL_ARM)
+            first = int(exact) - 6
+            for close in range(first, first + 14):
+                if close < 1 or not is_on_tick(close / 100.0, sid):
+                    continue
+                res = replay_exit([base / 100.0], [close / 100.0], [close / 100.0],
+                                  [close / 100.0])
+                armed.append([sid, base, close, bool(res["armed"])])
+
+    days = [(datetime.date(2026, 9, 1) + datetime.timedelta(days=k)).isoformat()
+            for k in range(20)]
+    ride = []
+    while len(ride) < 900:
+        n = rnd.randint(10, 20)
+        closes, c = [], 10000
+        for _ in range(n):
+            step = 0 if rnd.random() < 0.2 else rnd.randint(-80, 90)
+            c = min(max(c + step, 9300), 10095)     # under the late +1% line
+            closes.append(c)
+        opens = [10000] + closes[:-1]
+        leg = {d: rnd.random() < 0.35 for d in days[:n]}
+        complete = len(ride) % 2 == 0
+        if not complete:
+            for d in rnd.sample(days[:n], max(1, n // 4)):
+                leg.pop(d)
+        res = replay_exit([o / 100.0 for o in opens],
+                          [max(o, c) / 100.0 + 0.1 for o, c in zip(opens, closes)],
+                          [min(o, c) / 100.0 - 0.1 for o, c in zip(opens, closes)],
+                          [c / 100.0 for c in closes], dates=days[:n], hold_bars=10,
+                          ride_cap=20, extend_if=lambda i, d, m=leg: m.get(d, False))
+        if res["exited"] and res["reason"] == "time":
+            riding, exit_day = False, res["bar"] + 1
+        elif res["riding"] and not res["exited"]:
+            riding, exit_day = True, None
+        else:
+            continue
+        ride.append({"closes": closes, "dates": days[:n], "leg": leg,
+                     "complete": complete, "riding": riding, "exit_day": exit_day})
+    return {"levels": levels, "armed": armed, "ride": ride}
+
+
 class TheProbeNeedsNoLocalPayload(unittest.TestCase):
     def test_old_payload_is_a_committed_fixture(self):
         # mobile/scan_result.json is gitignored: a probe that read it would
@@ -110,15 +189,21 @@ class MobileAppRendersEveryPayload(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cases = fee_grid()
+        cls.plan = plan_grid()
         fd, cls.grid_path = tempfile.mkstemp(suffix=".json", prefix="yt_fee_grid_")
         with os.fdopen(fd, "w") as fh:
             json.dump(cls.cases, fh)
+        fd, cls.plan_path = tempfile.mkstemp(suffix=".json", prefix="yt_plan_grid_")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(cls.plan, fh)
         cls.before = _digest(SCAN)
         try:
-            cls.run_ = subprocess.run([NODE, str(PROBE), "--fee-grid", cls.grid_path],
-                                      cwd=str(ROOT), capture_output=True, timeout=180)
+            cls.run_ = subprocess.run([NODE, str(PROBE), "--fee-grid", cls.grid_path,
+                                       "--plan-grid", cls.plan_path],
+                                      cwd=str(ROOT), capture_output=True, timeout=300)
         finally:
             os.remove(cls.grid_path)
+            os.remove(cls.plan_path)
         cls.after = _digest(SCAN)
         text = cls.run_.stdout.decode("utf-8", "replace")
         cls.err = cls.run_.stderr.decode("utf-8", "replace")
@@ -141,6 +226,11 @@ class MobileAppRendersEveryPayload(unittest.TestCase):
     def test_the_fee_grid_was_checked_case_by_case(self):
         self.assertGreater(len(self.cases), 5000)
         self.assertEqual(self.out.get("grid_cases"), len(self.cases))
+
+    def test_the_plan_grid_was_checked_against_the_backend(self):
+        want = len(self.plan["levels"]) + len(self.plan["armed"]) + len(self.plan["ride"])
+        self.assertGreater(len(self.plan["levels"]), 40000)
+        self.assertEqual(self.out.get("plan_cases"), want)
 
     def test_the_local_payload_is_never_written(self):
         # gitignored, so absent in CI: both digests are then None

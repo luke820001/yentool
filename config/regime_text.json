@@ -1,0 +1,8 @@
+{
+  "_note": "Chinese banner text for scanner/market_regime.py (the .py stays ASCII). Keys: no_data, stale ({as_of} {ref}), tailwind ({dd}), neutral ({dd}), headwind ({dd}). Regime only decides whether NEW entries open; holdings always follow their own exit rules (settled 2026-07-06, docs/STRATEGY.md 3.4), so no text here may tell the owner to cut or reduce a position.",
+  "no_data": "大盤狀態：資料不足",
+  "stale": "大盤資料過期：TAIEX 最新 {as_of}，個股資料 {ref}，本次不視為順風（請先更新大盤資料）",
+  "tailwind": "大盤順風：TAIEX 站上 20/60MA，動能策略 edge 正常（60日回檔 {dd}%）",
+  "neutral": "大盤中性：TAIEX 在 60MA 上、跌破 20MA，暫停新進場，持股照原出場規則（60日回檔 {dd}%）",
+  "headwind": "大盤逆風：TAIEX 跌破 60MA，動能策略 edge 易失效，暫停新進場，持股照原出場規則（60日回檔 {dd}%）"
+}

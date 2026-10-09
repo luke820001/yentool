@@ -277,9 +277,17 @@ def _entry_opens(pairs):
 
 
 def _ledger_bar_dates(scan_mode):
-    """{stock_id: sorted list of distinct signal bar_dates} for this mode."""
+    """{stock_id: sorted list of distinct signal bar_dates} for this mode, or
+    None when the ledger cannot be read (missing file, not a database, no
+    picks table, locked).
+
+    None is not {}: "no history" would make every name a first-day signal and
+    drop the 'held' block, so a name already bought would be advertised as a
+    new buy on a FINAL list (2026-10-09 audit M-15 / D11-01). annotate_holding
+    reads None as "cannot place any trade" and leaves every status blank, which
+    mark_buy_ready blocks as 'unknown'."""
     if not SIGNAL_LEDGER_FILE.exists():
-        return {}
+        return None
     try:
         conn = sqlite3.connect(SIGNAL_LEDGER_FILE)
         try:
@@ -290,11 +298,38 @@ def _ledger_bar_dates(scan_mode):
         finally:
             conn.close()
     except Exception:
-        return {}
+        return None
     out = {}
     for sid, bd in rows:
         out.setdefault(str(sid), set()).add(str(bd)[:10])
     return {sid: sorted(s) for sid, s in out.items()}
+
+
+THIN_SESSION_RATIO = 0.5       # a list under half its usual size is not a list
+THIN_SESSION_LOOKBACK = 5      # sessions that define "usual"
+THIN_SESSION_MIN_USUAL = 10    # below this there is no "usual" to compare to
+
+
+def _thin_previous_session(led, today):
+    """The previous ledger session, when its list is far smaller than the
+    sessions before it. A depleted session (2026-08-28 holds ONE row where 49
+    are usual) makes every name look absent from yesterday's list, so
+    First_Day reads True for 49 of 50 names on the next scan (2026-10-09
+    audit D3-02). Returns (session, count, usual) or None."""
+    counts = {}
+    for ds in led.values():
+        for d in ds:
+            if d < today:
+                counts[d] = counts.get(d, 0) + 1
+    days = sorted(counts)
+    if len(days) < 3:
+        return None
+    prev = days[-1]
+    before = [counts[d] for d in days[-1 - THIN_SESSION_LOOKBACK:-1]]
+    usual = sorted(before)[len(before) // 2]
+    if usual >= THIN_SESSION_MIN_USUAL and counts[prev] < THIN_SESSION_RATIO * usual:
+        return prev, counts[prev], usual
+    return None
 
 
 def _ledger_buy_flags(scan_mode):
@@ -491,6 +526,19 @@ def annotate_holding(df, scan_mode, rec_anchors=None, add_own_bar=True):
     idx_of = {d: i for i, d in enumerate(cal)}
 
     led = _ledger_bar_dates(scan_mode)
+    ledger_down = led is None
+    if ledger_down:
+        # No history to place a trade against: every row keeps a blank
+        # status (blocked 'unknown'), and the checker raises ledger_unreadable.
+        print("  [holding] signal ledger unreadable: no row can be placed, "
+              "all statuses left blank")
+        led = {}
+    thin = _thin_previous_session(led, today)
+    if thin:
+        print("  [holding] the ledger's previous session {} holds {} names "
+              "(usually {}): First_Day cannot be judged, all statuses left "
+              "blank".format(*thin))
+        ledger_down = True
     flags = _ledger_buy_flags(scan_mode)
     extend_if = _disturbed_fn()
     rec_anchors = rec_anchors or {}
@@ -619,6 +667,11 @@ def annotate_holding(df, scan_mode, rec_anchors=None, add_own_bar=True):
     df["Hold_Cap"] = cap             # latest exit bar when riding
     for col in ("Hold_Status", "Hold_Note"):
         df[col] = plan[col]
+    if ledger_down:
+        # Whatever the replay above worked out came from a history of nothing;
+        # a blank status is the one reading mark_buy_ready refuses to buy.
+        df["Hold_Status"] = ""
+        df["Hold_Note"] = ""
     df["First_Day"] = first_days
     df["Hold_Anchor"] = [info["anchor"] or "" for info in rows]
     df["Hold_Anchor_Kind"] = [info["kind"] for info in rows]

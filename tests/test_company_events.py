@@ -641,7 +641,7 @@ def loud_events(sids):
 class EventsNeverFeedScoringOrGates(unittest.TestCase):
     def setUp(self):
         self._real = market_regime.get_market_regime
-        market_regime.get_market_regime = lambda: {
+        market_regime.get_market_regime = lambda *a, **k: {
             "ok": True, "enter_ok": True, "risk_on": True, "is_current": True}
 
     def tearDown(self):

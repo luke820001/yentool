@@ -36,6 +36,11 @@ const QUOTES_URL = "./quotes.json";
 // registered holding is missing from the list, so most sessions never pay for
 // it (owner, 2026-09-21: advice on a stock the scanner never recommended).
 const UNIVERSE_URL = "./universe.json";
+// The recommendation ledger's public export (data/recommendations.json),
+// published beside scan_result.json. Fetched lazily by the performance page
+// for the complete record of closed recommendations; a miss is a labelled
+// state, not an error.
+const RECS_URL = "./recommendations.json";
 const TZ = "Asia/Taipei";
 
 // The strategy parameters the old UI hard-coded. They are the CURRENT strategy
@@ -77,7 +82,7 @@ const MODE_CARDS = {
     body:
       "買進條件（全部成立才算可買）：大盤站上 20MA 與 60MA · 上櫃 · 出貨排名前 20 · 通過核心+ 品質閘門 · 資料完整性通過 · 當日資料 · 第一天入榜的新訊號。\n" +
       "兩種買法擇一，出場價位完全相同（都以第一筆成交價計算）：一次買滿；或先買一半、跌到成交價 -10% 再補另一半。\n" +
-      "出場計畫：災難停損 -20% · 收盤站上 +2.5% 後隔一個交易日起停損上調到 +2% · 目標 +20% · 第 8 天起收盤仍有實質獲利（+1% 以上）就隔日開盤收下 · 基本抱 10 個交易日，第 10 天收盤若仍站上自己的 5 日均價就續抱，最晚第 20 天。\n" +
+      "出場計畫：災難停損 -20% · 收盤站上 +2.5% 後隔一個交易日起停損上調到 +2% · 目標 +20% · 第 8 天起收盤仍有實質獲利（+1% 以上）就隔日開盤收下 · 基本抱 10 個交易日；第 10 天起每天收盤，只要站上自己的 5 日均價、或當天大盤正在回檔（加權指數低於 20 日均線但仍高於 60 日均線）就續抱，最晚第 20 天。\n" +
       "回測（2017-2026，556 筆，近 3 年，含手續費與證交稅）：70.8% 勝、每筆平均 +1.95%；更早的資料 69.5% / +2.04%。19 個有效季度裡沒有一季低於 60%。歷史統計，不是未來勝率。\n" +
       "這 +1.95% 是怎麼來的（2026-09-23 拆解）：獲利有 4 成來自 17% 碰到 +20% 停利的交易；鎖利出場（36%）平均只有 +1.2%；時間出場（20%）平均 −9.9%、停損（6%）−20.5%。所以勝率高不代表一直在賺——沒有大波段的那幾個月，合計就是負的（2022 年全年 −6.6%、2026-07~09 實際訊號合計為負）。固定資金分 5～8 個等權格、有訊號就買的話，到 2025 年底每年約 +12%（研究樣本）～+17%（線上訊號頻率），格數越多回撤越淺，2026 年至今是離群的一年；避開 1～3 格（BACKTEST_LOG M.4 嚴格格數；舊版引用的格數年化讓出場當天騰出的格子當天就重用，偏高，已更正）。看下面「帳本實際」那一行，那才是你這段時間真的會拿到的數字。\n" +
       "「勝」在這裡指「有賺錢」。若改用「至少賺 25% 才算贏」，這套規則只有 2.3%，因為 +20% 就停利了。那個目標有另一套規則（見回測登錄簿 G 節）可達 37.6%，但只有 54.9% 的交易賺錢、資金要卡 16 天。兩者已完整比較過，你選擇維持這一套。\n" +
@@ -495,18 +500,41 @@ const EQUITY_TICKS = [
 // characters (0050, 00878, 00663L, 00400A).
 const ETF_TICKS = [[5000, 1], [null, 5]];
 
+// A typed stock id, the way the backend keeps it (str(...).strip(), and the
+// exchange codes are upper-case): trimmed and upper-cased, so 00679b is the
+// ETF 00679B and not a different name. Returns "" for anything that is not a
+// plain half-width code -- a full-width digit, a space inside, a symbol -- so a
+// caller can reject it instead of saving an id no quote will ever match.
+// Four to seven characters: ordinary shares are 4, warrants and some listings
+// 5-6, ETFs/ETNs up to 7 (isEtfCode).
+const STOCK_ID_RE = /^[0-9A-Z]{4,7}$/;
+function normStockId(raw) {
+  const s = String(raw === null || raw === undefined ? "" : raw).trim().toUpperCase();
+  return STOCK_ID_RE.test(s) ? s : "";
+}
+
 function isEtfCode(stockId) {
   const sid = String(stockId || "").trim().toUpperCase();
   return sid.length >= 4 && sid.length <= 7 && sid.startsWith("00")
     && /^[0-9]{4}$/.test(sid.slice(0, 4));
 }
 
-function tickSize(priceCents, stockId) {
+// `scale` lets a caller pass the price in finer units than cents (planLevel
+// works in thousandths of a cent): the band bounds are scaled instead of the
+// price being divided, so the comparison stays integer.
+function tickSizeAt(price, stockId, scale) {
   const ladder = isEtfCode(stockId) ? ETF_TICKS : EQUITY_TICKS;
+  const k = scale || 1;
   for (const [upper, tick] of ladder) {
-    if (upper === null || priceCents < upper) return tick;
+    if (upper === null || price < upper * k) return tick;
   }
   return ladder[ladder.length - 1][1];
+}
+
+// The tick (in cents) for a price in cents. tests/test_audit_fixes_20260921.py
+// pins this exact signature.
+function tickSize(priceCents, stockId) {
+  return tickSizeAt(priceCents, stockId, 1);
 }
 
 // Snap a PLAN price onto the exchange ladder. Direction matters: a stop rounds
@@ -520,6 +548,38 @@ function tickRound(priceCents, dir, stockId) {
               : dir === "up" ? Math.ceil(priceCents / t)
               : divRound(priceCents, t);
   return steps * t;
+}
+
+// The strategy's percentages as integer thousandths of the fill (2.5% -> 1025),
+// so a plan level is one exact integer ratio and never a rounded float.
+// Whole tenths of a percent only: tests/test_mobile_plan_parity.py pins that.
+function milliOf(pct) { return Math.round(1000 + pct * 10); }
+const PLAN_MILLI = {
+  stop: milliOf(STRATEGY.stopPct), arm: milliOf(STRATEGY.armPct),
+  lock: milliOf(STRATEGY.lockPct), target: milliOf(STRATEGY.targetPct),
+  add: milliOf(STRATEGY.addPct), scale: milliOf(STRATEGY.scaleOutPct),
+  late: milliOf(STRATEGY.lateGainPct),
+};
+
+// One plan level on the quote ladder, rounded ONCE from the exact ratio
+// fill x milli / 1000 (scanner/tick.py round_to_tick of fill x (1 + pct)).
+// 2026-10-09: this used to round to the nearest cent first and to the tick
+// second, which put a lock or add level one tick off the backend on about one
+// in nine sub-NT$100 fills (10.05 x 1.025 = 10.30125 became 10.30, so a 10.30
+// close "armed" a lock the rule arms at 10.35). Down-levels (stop, lock, add)
+// floor, up-levels (arm, target, scale-out, late take) ceil.
+function planLevel(baseCents, milli, dir, stockId) {
+  if (!(baseCents > 0)) return null;
+  const n = baseCents * milli;                          // thousandths of a cent
+  const t = tickSizeAt(n, stockId, 1000);               // tick (cents), chosen by the raw level
+  const down = dir !== "up";
+  const steps = (x, step) => (down ? divFloor(x, step) : -divFloor(-x, step));
+  let v = steps(n, t * 1000) * t;                       // cents
+  // scanner.tick._snap: a result that crossed into the next band must still be
+  // on that band's ladder (a no-op on both ladders today, kept for parity).
+  const t2 = tickSize(v, stockId);
+  if (t2 !== t && v % t2 !== 0) v = steps(v, t2) * t2;
+  return v > 0 ? v : null;
 }
 
 /* ============================================================================
@@ -1237,12 +1297,12 @@ async function rebuildMarks() {
   // older mark for every position on plain startup -- and marks are NOT in the
   // backup, so that loss is permanent. The `if (!sessions.length) return`
   // above must stay above this: on a feed-outage day `keep` is empty.
-  const keep = new Set(fresh.map((m) => m.position_id + " " + m.session_date));
+  const keep = new Set(fresh.map((m) => m.position_id + "\u0000" + m.session_date));
   const stale = [];
   for (const pos of touched) {
     for (const m of (STATE.marksByPos[pos.position_id] || [])) {
       if (m.session_date < lo || m.session_date > hi) continue;
-      if (keep.has(pos.position_id + " " + m.session_date)) continue;
+      if (keep.has(pos.position_id + "\u0000" + m.session_date)) continue;
       stale.push([pos.position_id, m.session_date]);
     }
   }
@@ -1436,6 +1496,9 @@ const STATE = {
   tracked: [],
   universe: null,          // {stock_id: row} once fetched
   universeState: "idle",   // idle | loading | ready | missing
+  recs: null,              // recommendations.json rows once fetched
+  recsState: "idle",       // idle | loading | ready | missing
+  recOpen: {},             // {recommendation_id: true} for a day-by-day table the user opened
 
   reports: {},
   quotes: null,
@@ -1555,6 +1618,7 @@ async function loadLedger() {
 
 async function load() {
   setStatus("載入中…");
+  if (STATE.recsState !== "loading") STATE.recsState = "idle";   // re-read on the next perf render
   try {
     await loadScan();
   } catch (e) {
@@ -1634,12 +1698,12 @@ function regimeView() {
     return { tone: "on", enterOk: true, asOf, text: "大盤強順風 · 可開新倉" };
   }
   if (reg.enter_ok) {
-    return { tone: "on", enterOk: true, asOf, text: "大盤順風（20MA 上緣 <2.2%）· 可開新倉、部位減量" };
+    return { tone: "on", enterOk: true, asOf, text: "大盤順風（20MA 上緣 <2.2%）· 可開新倉，新倉部位不加大" };
   }
   if (reg.risk_on) {
-    return { tone: "mid", enterOk: false, asOf, text: "大盤中性（跌破 20MA）· 依規則暫停開新倉" };
+    return { tone: "mid", enterOk: false, asOf, text: "大盤中性（跌破 20MA）· 暫停開新倉；已持有的依各自出場規則" };
   }
-  return { tone: "off", enterOk: false, asOf, text: "大盤逆風（跌破 60MA）· 暫緩開新倉、減碼" };
+  return { tone: "off", enterOk: false, asOf, text: "大盤逆風（跌破 60MA）· 暫停開新倉；已持有的依各自出場規則，不因大盤提前賣" };
 }
 
 // F07: read the backend's verdict. The ONLY thing we may do locally is
@@ -1677,6 +1741,87 @@ function latestMark(posId) {
   return list && list.length ? list[list.length - 1] : null;
 }
 
+// The market leg of the ride, per date: meta.market_leg = {"YYYY-MM-DD": bool}
+// (scanner/market_leg.disturbed_by_date, the last ~30 sessions). true = TAIEX
+// closed below its 20-day mean and above its 60-day mean that day. A date the
+// map does not carry is UNKNOWN -- the backend treats it as "leg off" (an
+// unknown market never extends a trade) and so does the boolean below, but the
+// caller can tell "false" from "not published" and word it honestly. An older
+// payload, or a cached copy from before the field existed, has no map at all:
+// every date is then unknown and the phone behaves as it did without the leg.
+function marketLegFor(date) {
+  const map = STATE.meta && STATE.meta.market_leg;
+  if (!map || typeof map !== "object" || Array.isArray(map)) return null;
+  const v = map[String(date || "").slice(0, 10)];
+  return v === true ? true : v === false ? false : null;
+}
+
+// A 5-bar mean that is not a whole cent (sum / 5 has a tenth of a cent in it)
+// printed exactly: 8.006, not 8.01. The ride decision compares against the
+// exact mean, so the screen must not show a rounded one next to a verdict the
+// rounded one contradicts.
+function fmtMean5(sumCents) {
+  const mills = sumCents * 2;                      // sum / 5 cents, in 1/1000 TWD
+  const whole = Math.floor(mills / 1000);
+  const frac = mills % 1000;
+  const f = frac % 10 === 0 ? String(frac / 10).padStart(2, "0") : String(frac).padStart(3, "0");
+  return whole.toLocaleString("en-US") + "." + f;
+}
+
+// The ride past the time exit, bar by bar, the way scanner.exit_rules.
+// replay_exit decides it. From the time exit's close on, the position is kept
+// at EVERY close that is above its own 5-bar mean OR falls on a day the market
+// leg is on, and only until the cap; the first close that is neither ends it
+// there, whatever later closes do. Judging the latest bar alone (what this
+// used to do) says "keep riding" on day 12 about a trade the rule closed at
+// day 10's close, and "exit" on a day the market leg keeps it.
+//
+// own  = this close > the mean of the five closes ending here (exact: 5 x close
+//        against the sum), null when any of the five is unpriced;
+// mk   = marketLegFor(that session), null when unknown;
+// A bar whose verdict is unknown (null where the other leg is false) never
+// proves the ride broke: only own === false AND mk === false does.
+function rideState(pos, marks) {
+  const horizon = pos.horizon_days || STRATEGY.horizon;
+  const cap = pos.cap_days || STRATEGY.cap;
+  const legAt = (k) => {
+    const m = marks[k];
+    const win = k >= 4 ? marks.slice(k - 4, k + 1) : [];
+    const sum = win.length === 5 && win.every((x) => x.close_price !== null)
+      ? win.reduce((a, x) => a + x.close_price, 0) : null;
+    const own = sum !== null && m.close_price !== null ? m.close_price * 5 > sum : null;
+    const mk = marketLegFor(m.session_date);
+    // an unpriced close decides nothing (the backend books "na", not a ride)
+    return { own, mk, sum, keep: m.close_price !== null && (own === true || mk === true) };
+  };
+  const n = marks.length;
+  const out = {
+    horizon, cap, own: null, market: null, sum: null, riding: false, via: "",
+    broken_on: "", cap_hit: false, market_published: marketLegPublished(),
+  };
+  if (!n) return out;
+  const last = legAt(n - 1);
+  const day = marks[n - 1].day_index;
+  out.own = last.own; out.market = last.mk; out.sum = last.sum;
+  out.cap_hit = day !== null && day >= cap;
+  if (day !== null && day > horizon) {
+    for (let k = 0; k < n - 1; k++) {
+      const m = marks[k];
+      if (m.day_index === null || m.day_index < horizon) continue;
+      const e = legAt(k);
+      if (!e.keep && e.own === false && e.mk === false) { out.broken_on = m.session_date; break; }
+    }
+  }
+  out.riding = last.keep && !out.cap_hit && !out.broken_on;
+  out.via = !out.riding ? "" : last.own === true ? "own" : "market";
+  return out;
+}
+
+function marketLegPublished() {
+  const map = STATE.meta && STATE.meta.market_leg;
+  return !!map && typeof map === "object" && !Array.isArray(map);
+}
+
 function activePlan(pos) {
   // Every level is derived from the FIRST fill and stored as a strategy
   // snapshot, not from a drifting close price. Report 5.4: the protective stop
@@ -1689,10 +1834,17 @@ function activePlan(pos) {
   // Positions with one buy are unaffected: their first buy IS their average.
   if (!pos.open_shares || !pos.avg_cost) return null;
   const base = pos.first_buy_price || pos.avg_cost;
-  const stop0 = divRound(base * (100 + STRATEGY.stopPct), 100);
-  const arm = divRound(base * (100 + STRATEGY.armPct), 100);
-  const lock = divRound(base * (100 + STRATEGY.lockPct), 100);
-  const target = divRound(base * (100 + STRATEGY.targetPct), 100);
+  const sid = pos.stock_id;
+  // Each level once, from the exact ratio, already on the quote ladder: a stop,
+  // lock or add level rounds DOWN, an arm, target, scale-out or late-take level
+  // rounds UP -- "never claim a better price than is orderable".
+  const stop0 = planLevel(base, PLAN_MILLI.stop, "down", sid);
+  const arm = planLevel(base, PLAN_MILLI.arm, "up", sid);
+  const lock = planLevel(base, PLAN_MILLI.lock, "down", sid);
+  const target = planLevel(base, PLAN_MILLI.target, "up", sid);
+  const add = planLevel(base, PLAN_MILLI.add, "down", sid);
+  const scaleOut = planLevel(base, PLAN_MILLI.scale, "up", sid);
+  const late = planLevel(base, PLAN_MILLI.late, "up", sid);
   const marks = STATE.marksByPos[pos.position_id] || [];
   let high = null, highOn = "";
   for (const m of marks) {
@@ -1705,12 +1857,11 @@ function activePlan(pos) {
   // `marks` are (one close per session), so the phone and the backend read
   // the same event. 2026-09-21: the backend used to arm on the intraday high
   // and let that same bar be stopped on it; see STRATEGY.armPct.
-  const armed = high !== null && high >= arm;
+  // Decided on the EXACT threshold (close x 1000 >= fill x 1025), not on the
+  // snapped arm level: backend replay_exit compares against fill x 1.025.
+  const armed = high !== null && high * 1000 >= base * PLAN_MILLI.arm;
   // Staged entry: the second half is still outstanding while the position has
-  // had exactly one buy. A buy limit rounds DOWN to a real tick, the same
-  // "never claim a better price than is orderable" rule the stop follows.
-  const add = divRound(base * (100 + STRATEGY.addPct), 100);
-  const scaleOut = divRound(base * (100 + STRATEGY.scaleOutPct), 100);
+  // had exactly one buy.
   const staged = (pos.cycle_buys || 0) <= 1;
   // The stock's own 5-bar mean. The time exit is extended while the close is
   // above it (2026-09-21), so this has to be the SAME five sessions the
@@ -1721,28 +1872,111 @@ function activePlan(pos) {
   // sessions while the backend's spanned exactly five -- two screens, two
   // verdicts, same position. Now the last five SESSIONS are taken first, and
   // if any of them is unpriced there is no mean to show.
-  const last5marks = marks.slice(-5);
-  const last5 = last5marks.map((m) => m.close_price);
-  const ma5 = (last5.length === 5 && last5.every((v) => v !== null))
-    ? divRound(last5.reduce((a, b) => a + b, 0), 5) : null;
+  const ride = rideState(pos, marks);
   const priced = marks.filter((m) => m.close_price !== null);
   const lastClose = priced.length ? priced[priced.length - 1].close_price : null;
-  const sid = pos.stock_id;
+  const stop = armed ? Math.max(stop0, lock) : stop0;
   return {
     stock_id: sid,
-    stop: armed ? Math.max(stop0, lock) : stop0,
-    stop_orderable: tickRound(armed ? Math.max(stop0, lock) : stop0, "down", sid),
+    // every price below is on the ladder; the *_orderable names stay for callers
+    stop, stop_orderable: stop,
     initial_stop: stop0,
-    arm, lock, target,
-    target_orderable: tickRound(target, "up", sid),
-    add, add_orderable: tickRound(add, "down", sid), add_open: staged,
-    scale_out: scaleOut, scale_out_orderable: tickRound(scaleOut, "up", sid),
+    arm, lock, target, target_orderable: target,
+    add, add_orderable: add, add_open: staged,
+    scale_out: scaleOut, scale_out_orderable: scaleOut,
+    late,
     base,
     armed, armed_on: armed ? highOn : "",
     highest_close: high,
-    ma5, last_close: lastClose,
-    riding: ma5 !== null && lastClose !== null && lastClose > ma5,
+    ma5: ride.sum !== null ? divRound(ride.sum, 5) : null,
+    ma5_text: ride.sum !== null ? fmtMean5(ride.sum) : "",
+    last_close: lastClose,
+    horizon: ride.horizon, cap: ride.cap,
+    own_leg: ride.own, market_leg: ride.market, market_published: ride.market_published,
+    riding: ride.riding, ride_via: ride.via,
+    ride_broken_on: ride.broken_on, cap_hit: ride.cap_hit,
   };
+}
+
+// --- the ride, in words -----------------------------------------------------
+// ONE place decides what the ride sentence says, so the order table, the
+// position card's advice, the state chip and the to-do list cannot disagree.
+// The rule (STRATEGY.md 3.5, scanner/exit_rules.replay_exit): from the time
+// exit's close on, keep the position while the close is above the stock's own
+// 5-day mean OR the market is pulling back inside an uptrend that day (TAIEX
+// below its 20-day mean, above its 60-day mean), at most until the cap.
+const MARKET_LEG_TEXT = "加權指數收盤低於 20 日均線、仍高於 60 日均線";
+
+function rideView(plan, dayIdx, horizon) {
+  const cap = plan.cap;
+  const ma = plan.ma5 === null ? "" : plan.ma5_text;
+  const close = plan.last_close === null ? "-" : fmtPrice(plan.last_close);
+  const head = plan.ma5 === null ? "" : `目前收盤 ${close}｜5 日均價 ${ma}｜`;
+  const noMarket = plan.market_published
+    ? "這天的大盤判定還沒有" : "這份資料沒有大盤判定";
+  const pastHorizon = dayIdx !== null && dayIdx >= horizon;
+  let state;
+  if (dayIdx === null) state = "unknown";
+  else if (!pastHorizon) state = "before";
+  else if (plan.ride_broken_on) state = "broken";
+  else if (plan.cap_hit || dayIdx >= cap) state = "cap";
+  else if (plan.riding) state = plan.ride_via === "own" ? "own" : "market";
+  else if (plan.ma5 === null) state = "nodata";
+  else if (plan.market_leg === null) state = "pending";
+  else state = "exit";
+
+  const out = { state, alert: true, time: "", hint: "" };
+  switch (state) {
+    case "unknown":
+      out.time = "持有天數未知，請先確認成交日期。";
+      break;
+    case "before": {
+      out.alert = false;
+      out.time = `第 ${dayIdx}/${horizon} 天。到第 ${horizon} 天收盤出場，但當天收盤若仍站上自己的 5 日均價、` +
+        `或當天大盤正在回檔（${MARKET_LEG_TEXT}），就續抱，最晚第 ${cap} 天。`;
+      if (plan.ma5 !== null) {
+        out.hint = head + (plan.own_leg
+          ? "站上，到期可續抱"
+          : plan.market_leg === true
+            ? "跌破，但今天大盤正在回檔；到期日若仍如此，規則續抱"
+            : plan.market_leg === false
+              ? `跌破，到期就出場（到期日若大盤回檔，規則改為續抱）`
+              : `跌破；到期日若${MARKET_LEG_TEXT}，規則改為續抱（${noMarket}）`);
+      }
+      break;
+    }
+    case "own":
+      out.alert = false;
+      out.time = `第 ${dayIdx} 天（計畫 ${horizon} 天）：收盤站上自己的 5 日均價 ${ma}，規則續抱；每天收盤重新判斷，最晚第 ${cap} 天。`;
+      out.hint = head + "站上，續抱";
+      break;
+    case "market":
+      out.alert = false;
+      out.time = `第 ${dayIdx} 天（計畫 ${horizon} 天）：收盤沒有站上自己的 5 日均價 ${ma}，但當天大盤正在回檔（${MARKET_LEG_TEXT}），規則續抱；` +
+        `每天收盤重新判斷，最晚第 ${cap} 天。`;
+      out.hint = head + "跌破，但大盤回檔中，續抱";
+      break;
+    case "exit":
+      out.time = `第 ${dayIdx} 天（計畫 ${horizon} 天）：收盤沒有站上自己的 5 日均價 ${ma}，當天大盤也沒有在回檔，規則於收盤出場。`;
+      out.hint = head + "跌破，大盤也沒在回檔，到期就出場";
+      break;
+    case "pending":
+      out.time = `第 ${dayIdx} 天（計畫 ${horizon} 天）：收盤沒有站上自己的 5 日均價 ${ma}。若當天${MARKET_LEG_TEXT}，規則改為續抱——` +
+        `${noMarket}，下一次掃描會確認，確認前照期滿處理。`;
+      out.hint = head + "跌破；大盤是否回檔待確認";
+      break;
+    case "nodata":
+      out.time = `第 ${dayIdx} 天（計畫 ${horizon} 天）：自己的 5 日均價資料不足，無法判斷是否續抱；` +
+        `規則是收盤站上 5 日均價、或當天大盤回檔就續抱，請以券商行情自行確認。`;
+      break;
+    case "broken":
+      out.time = `規則在 ${mmdd(plan.ride_broken_on)} 收盤就該出場（當天收盤沒有站上自己的 5 日均價，大盤也沒有在回檔）；` +
+        `若你還持有，請依你的成交回報盡快處理。`;
+      break;
+    default:  // cap
+      out.time = `第 ${dayIdx} 天已到最晚持有日（第 ${cap} 天）：規則於今天收盤出場。`;
+  }
+  return out;
 }
 
 // --- tomorrow's orders ------------------------------------------------------
@@ -1762,14 +1996,14 @@ function tomorrowOrders(pos, plan, dayIdx, horizon) {
 
   rows.push({
     side: "sell", must: true,
-    price: plan.target_orderable,
+    price: plan.target,
     label: "全部停利",
     note: `成交價 +${STRATEGY.targetPct}%`,
   });
   if (plan.scale_out < plan.target) {
     rows.push({
       side: "sell", must: false,
-      price: plan.scale_out_orderable,
+      price: plan.scale_out,
       label: "可賣一半（選用）",
       note: `成交價 +${STRATEGY.scaleOutPct}%；回測勝率 +0.5pp、平均報酬 -0.15pp`,
     });
@@ -1777,9 +2011,9 @@ function tomorrowOrders(pos, plan, dayIdx, horizon) {
   if (!plan.armed) {
     rows.push({
       side: "watch", must: false,
-      price: tickRound(plan.arm, "up", plan.stock_id),
+      price: plan.arm,
       label: "收盤站上這裡 → 隔日起停損上調",
-      note: `收盤 ≥ 成交價 +${STRATEGY.armPct}%，隔一個交易日起停損改掛 ${fmtPrice(tickRound(plan.lock, "down", plan.stock_id))}`,
+      note: `收盤 ≥ 成交價 +${STRATEGY.armPct}%，隔一個交易日起停損改掛 ${fmtPrice(plan.lock)}`,
     });
   }
   // The late profit-take only exists once the hold is far enough along, so it
@@ -1791,26 +2025,25 @@ function tomorrowOrders(pos, plan, dayIdx, horizon) {
   // labelled MUST, so the owner would have sold at day 8's open while the
   // backend was still waiting for day 9's. Found 2026-09-21 by audit.
   if (dayIdx !== null && dayIdx >= STRATEGY.lateFrom) {
-    const lateAt = tickRound(divRound(plan.base * (100 + STRATEGY.lateGainPct), 100), "up", plan.stock_id);
     rows.push({
       side: "watch", must: true,
-      price: lateAt,
+      price: plan.late,
       label: "收盤在這之上 → 隔日開盤就收下",
       note: `第 ${STRATEGY.lateFrom} 天起，只要收盤還高於成交價 +${STRATEGY.lateGainPct}%（已蓋過手續費與證交稅）就先出場，不要把獲利帶進最後一天`,
     });
   }
   rows.push({
     side: "stop", must: true,
-    price: plan.stop_orderable,
+    price: plan.stop,
     label: plan.armed ? "跌破全部出場（鎖利價）" : "跌破全部出場（災難停損）",
     note: plan.armed
       ? `鎖利已啟動，這個價位只升不降`
-      : `成交價 ${STRATEGY.stopPct}%；這是唯一非守不可的價位`,
+      : `成交價 ${STRATEGY.stopPct}%；災難停損，最大虧損的保護價位。標「必守」的都是規則本身的出場（停損、停利、後期收利），只有加碼與賣一半是選用`,
   });
   if (plan.add_open && !past) {
     rows.push({
       side: "buy", must: false,
-      price: plan.add_orderable,
+      price: plan.add,
       label: "可加碼（選用）",
       note: `成交價 ${STRATEGY.addPct}%；先買一半的買法在此補滿。加碼會放大最大虧損，出場價位仍以第一筆成交價計算`,
     });
@@ -1819,15 +2052,8 @@ function tomorrowOrders(pos, plan, dayIdx, horizon) {
   const order = { sell: 0, watch: 1, stop: 2, buy: 3 };
   rows.sort((a, b) => (order[a.side] - order[b.side]) || (b.price - a.price));
 
-  const timeLine = dayIdx === null
-    ? "持有天數未知，請先確認成交日期。"
-    : past
-      ? `第 ${horizon} 天已到：收盤若仍站上 5 日均價 ${plan.ma5 === null ? "（資料不足）" : fmtPrice(plan.ma5)} 就續抱，否則收盤出場（最晚第 ${STRATEGY.cap} 天）。`
-      : `第 ${dayIdx}/${horizon} 天。到第 ${horizon} 天收盤出場，但當天收盤若仍站上自己的 5 日均價就續抱，最晚第 ${STRATEGY.cap} 天。`;
-
-  const ride = plan.ma5 === null ? "" :
-    `<div class="hint">目前收盤 ${fmtPrice(plan.last_close)}｜5 日均價 ${fmtPrice(plan.ma5)}｜${
-      plan.riding ? "站上，到期可續抱" : "跌破，到期就出場"}</div>`;
+  const rv = rideView(plan, dayIdx, horizon);
+  const ride = rv.hint ? `<div class="hint">${esc(rv.hint)}</div>` : "";
 
   return `<div class="sec-title">明日委託（收盤後更新，價位皆可直接掛單）</div>` +
     `<table class="tbl"><thead><tr><th>價位</th><th>動作</th><th>必守</th></tr></thead><tbody>${
@@ -1836,7 +2062,7 @@ function tomorrowOrders(pos, plan, dayIdx, horizon) {
         <td>${esc(r.label)}<br><span class="hint">${esc(r.note)}</span></td>
         <td>${r.must ? "必守" : "選用"}</td></tr>`).join("")
     }</tbody></table>` +
-    `<div class="plan">時間：${esc(timeLine)}</div>` + ride;
+    `<div class="plan">時間：${esc(rv.time)}</div>` + ride;
 }
 
 // The one place that decides what needs a human today (report 7.2).
@@ -1858,10 +2084,17 @@ function pendingItems() {
       continue;
     }
     const horizon = pos.horizon_days || STRATEGY.horizon;
+    const plan = activePlan(pos);
     if (m.day_index !== null && m.day_index >= horizon && pos.open_shares > 0) {
+      // A position the rule keeps (own 5-day mean or the market leg) is not
+      // waiting for a sell to be logged; say what it IS waiting for.
+      const keeps = plan && plan.riding;
       out.push({
         kind: "d10", pos,
-        text: `${name}：第 ${m.day_index} 個交易日已到（計畫 ${horizon} 天），尚未登錄賣出`,
+        text: keeps
+          ? `${name}：第 ${m.day_index} 個交易日已過計畫（${horizon} 天），規則續抱中（${
+            plan.ride_via === "own" ? "收盤站上自己的 5 日均價" : "大盤回檔"}），收盤後再確認`
+          : `${name}：第 ${m.day_index} 個交易日已到（計畫 ${horizon} 天），尚未登錄賣出`,
       });
     }
     if (m.data_status === "missing") {
@@ -1875,7 +2108,6 @@ function pendingItems() {
         text: `${name}：資料缺漏，損益仍以 ${m.price_source.replace("carried:", "")} 收盤估值`,
       });
     }
-    const plan = activePlan(pos);
     if (plan && plan.armed) {
       out.push({
         kind: "trail", pos,
@@ -2517,12 +2749,12 @@ const EXIT_REASON_TEXT = {
 function nameHistory(sid) {
   const rec = STATE.meta && STATE.meta.live_record;
   if (!rec) return null;
-  const id = String(sid);
+  const id = String(sid).trim().toUpperCase();
   // live_record ships {sid: [entries]}; a flat [entries with sid] list is
   // read too, so a reshaped payload degrades to "no history", never to a
   // wrong name's history.
   if (Array.isArray(rec.by_sid)) {
-    return rec.by_sid.filter((e) => e && typeof e === "object" && String(e.sid) === id)
+    return rec.by_sid.filter((e) => e && typeof e === "object" && String(e.sid).toUpperCase() === id)
       .sort((a, b) => String(a.sig).localeCompare(String(b.sig)));
   }
   if (rec.by_sid && typeof rec.by_sid === "object") {
@@ -2847,7 +3079,7 @@ function sizingStop(r, P) {
   const st = String(r.Hold_Status || "");
   const plan = cents(r.Plan_Stop);
   if (plan !== null && (!st || st === "pending")) return plan;
-  return tickRound(divRound(P * (100 + STRATEGY.stopPct), 100), "down", r.Stock_ID);
+  return planLevel(P, PLAN_MILLI.stop, "down", r.Stock_ID);
 }
 
 function sizingFor(r) {
@@ -2948,7 +3180,7 @@ function exitReminderText(r, rv) {
   return `停損 ${stop !== null ? fmtPrice(stop) : "-"} 跌破先出、停利 ${target !== null ? fmtPrice(target) : "-"}（+${STRATEGY.targetPct}%）；` +
     `收盤站上 +${STRATEGY.armPct}% 後，隔一個交易日起停損上調到 +${STRATEGY.lockPct}%；` +
     `第 ${STRATEGY.lateFrom} 天起收盤仍有 +${STRATEGY.lateGainPct}% 以上就隔日開盤收下；` +
-    `基本抱 ${STRATEGY.horizon} 個交易日，第 ${STRATEGY.horizon} 天收盤再判斷是否續抱（最晚第 ${STRATEGY.cap} 天）。賣出一律掛限價`;
+    `基本抱 ${STRATEGY.horizon} 個交易日；第 ${STRATEGY.horizon} 天起每天收盤判斷是否續抱：收盤站上自己的 5 日均價，或當天大盤正在回檔（${MARKET_LEG_TEXT}）就續抱，最晚第 ${STRATEGY.cap} 天。賣出一律掛限價`;
 }
 
 function orderGuideHtml(r, size, rv) {
@@ -2979,12 +3211,56 @@ function orderGuideHtml(r, size, rv) {
   </details>`;
 }
 
+// The hold clock the desktop prints (gui/app.py): day N of the plan, trading
+// days left to the time exit, the exit date once the calendar knows it. These
+// columns are display-only (not phone-critical in the registry), so they are
+// shown only when they agree with one another -- the identity result_checks
+// enforces (Hold_Day + Hold_Remaining == Hold_Total) -- and never guessed.
+function holdClock(r) {
+  const day = num(r.Hold_Day), rem = num(r.Hold_Remaining), total = num(r.Hold_Total);
+  if (day === null || rem === null || total === null) return null;
+  if (!Number.isInteger(day) || !Number.isInteger(rem) || !Number.isInteger(total)) return null;
+  if (day < 1 || day + rem !== total) return null;
+  const ex = String(r.Exit_Date || "").slice(0, 10);
+  const cap = num(r.Hold_Cap);
+  return {
+    day, remaining: rem, total, cap: cap !== null && Number.isInteger(cap) ? cap : STRATEGY.cap,
+    exit: /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(ex) ? ex : "",
+  };
+}
+
+function holdClockText(r) {
+  const c = holdClock(r);
+  if (!c) return "";
+  const st = String(r.Hold_Status || "");
+  if (st === "delay" || c.day > c.total) {
+    return `持有第 ${c.day} 天，已過計畫的 ${c.total} 天，續抱中，最晚第 ${c.cap} 天`;
+  }
+  if (c.remaining === 0) return `持有第 ${c.day}/${c.total} 天，今天收盤到期${c.exit ? `（${mmdd(c.exit)}）` : ""}`;
+  return `持有第 ${c.day}/${c.total} 天，還有 ${c.remaining} 個交易日${c.exit ? `，出場日 ${mmdd(c.exit)}` : ""}`;
+}
+
+// The late profit-take: from day 8, a close at or above the fill +1% is sold at
+// the NEXT open (scanner/exit_rules step 4). The backend carries the decision
+// only as the free-text Exit_Note it writes for that state
+// (holding_tracker._plan_row), so that sentence is the signal; a test pins the
+// phone's pattern to what the backend really writes.
+const LATE_DUE_NOTE = /^in profit on day [0-9]+\+: sell at the next open/;
+function lateDueNow(r) {
+  const st = String(r.Hold_Status || "");
+  if (st !== "holding" && st !== "delay") return false;
+  if (r.Exit_Signal) return false;
+  return LATE_DUE_NOTE.test(String(r.Exit_Note || ""));
+}
+
 // Hold-group cards: only the exit side -- today's action.
 function exitGuideHtml(r) {
   const st = String(r.Hold_Status || "");
   const sig = String(r.Exit_Signal || "");
   let head = "";
-  if (st === "exit_today" || exitIsToday(r)) {
+  if (lateDueNow(r)) {
+    head = `今天的動作：第 ${STRATEGY.lateFrom} 天起收盤仍有成交價 +${STRATEGY.lateGainPct}% 以上，規則在下一個交易日開盤收下（以限價賣出；要確保成交可掛低一點，成交價是開盤競價結果）`;
+  } else if (st === "exit_today" || exitIsToday(r)) {
     head = `今天的動作：已觸發「${EXIT_REASON_TEXT[sig] || "出場"}」，下一個交易日開盤以限價賣出（要確保成交可掛低一點，成交價是開盤競價結果）`;
     if (provisionalTimeExit(r)) {
       const asOf = String(((STATE.meta && STATE.meta.regime) || {}).as_of_date || "").slice(0, 10);
@@ -2993,7 +3269,7 @@ function exitGuideHtml(r) {
   } else if (st === "overdue") {
     head = `資料缺漏：超過 ${STRATEGY.cap} 天上限仍無出場紀錄，請以「持倉」頁與券商成交為準`;
   } else if (st === "delay") {
-    head = `續抱中（第 ${STRATEGY.horizon} 天後延長）：每天收盤檢查，最晚第 ${STRATEGY.cap} 天出場`;
+    head = `續抱中（第 ${STRATEGY.horizon} 天後延長：收盤站上自己的 5 日均價，或當天大盤回檔）：每天收盤檢查，最晚第 ${STRATEGY.cap} 天出場`;
   } else if (st === "holding") {
     const stop = cents(r.Plan_Stop);
     head = `續抱：停損 ${stop !== null ? fmtPrice(stop) : "-"}，跌破先出（下一個交易日開盤以限價處理）`;
@@ -3008,7 +3284,8 @@ function exitGuideHtml(r) {
     head = "這筆模擬交易已出場";
   }
   const rn = restrictionNote(r);
-  return `<div class="plan exit-guide">${esc(head)}${rn ? `<br><span class="hint">${esc(rn)}</span>` : ""}` +
+  const clock = st === "holding" || st === "delay" ? holdClockText(r) : "";
+  return `<div class="plan exit-guide">${esc(head)}${clock ? `<br><span class="hint">${esc(clock)}</span>` : ""}${rn ? `<br><span class="hint">${esc(rn)}</span>` : ""}` +
     `<br><span class="hint">賣出一律掛限價；卡片價位以整股開盤價計算，你自己的持倉以「持倉」頁為準。</span></div>`;
 }
 
@@ -3189,6 +3466,476 @@ function systemRecordHtml() {
     `</div>`;
 }
 
+/* ============================================================================
+ * 10c. Closed-trade record (2026-10-09) and the owner's own reconciliation
+ *
+ * A recommendation that closes keeps the COMPLETE trade in its `outcome`
+ * (scanner/live_record.trade_record, stored by portfolio/sync._outcome):
+ * the signal day, the rule's next-open entry, the day the exit was decided,
+ * the day and the price it was booked at and WHY that price (a level touched
+ * inside the day, a gap or next-open sale, or the close), the best/worst
+ * excursions, the costs, and one entry per held session. This file only
+ * DISPLAYS it: nothing here decides an exit, re-prices a trade or edits a
+ * record. `outcome` is an object, or JSON text in some exports; an older
+ * closed recommendation carries the eight summary keys and no `path`, and
+ * renders as a summary that says so.
+ *
+ * The reconciliation lines up the owner's OWN fills (IndexedDB, entered from
+ * that recommendation: positions[].recommendation_id) against the rule's.
+ * Those fills are private: they are read here, shown here and sent nowhere --
+ * no fetch carries them, nothing is written back, nothing is logged.
+ *
+ * Every figure goes through a strict reader first (tnum / tdate / tint): a
+ * null, a NaN, a boolean or a malformed string becomes null and renders as a
+ * dash, never as "NaN", "undefined" or a silent 0.
+ * ==========================================================================*/
+
+const TR_BASIS_TEXT = {
+  level: "盤中觸價",
+  open: "開盤跳空或隔日開盤賣",
+  close: "收盤價",
+};
+const TR_STATUS_TEXT = {
+  holding: "持有",
+  armed: "鎖利啟動",
+  sell_next_open: "收盤達標，隔日開盤收下",
+};
+const TR_ISSUE_TEXT = {
+  bars_vs_path: "持有天數與逐日路徑筆數不同",
+  entry_vs_path: "進場日不是路徑的第一天",
+  exit_vs_path: "出場成交日不是路徑的最後一天",
+  ret_vs_prices: "毛報酬與進出場價對不上",
+  path_order: "逐日路徑日期沒有由小到大",
+  planned_entry: "預定進場日與實際進場日不同",
+};
+const TR_RECORDS_KEPT = 20;     // most recent closed recommendations listed
+
+function own(map, key) {
+  return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined;
+}
+
+// Strict readers. A string that is not a number, a boolean, an array or a
+// non-finite number is null; -0 is 0.
+function tnum(v) {
+  let n = v;
+  if (typeof n === "string") {
+    if (!n.trim()) return null;
+    n = Number(n);
+  } else if (typeof n !== "number") {
+    return null;
+  }
+  if (!Number.isFinite(n)) return null;
+  return n === 0 ? 0 : n;
+}
+
+function tint(v) {
+  const n = tnum(v);
+  return n !== null && Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+// "YYYY-MM-DD" (a longer timestamp is cut to its date) that is a real
+// calendar day, else null.
+function tdate(v) {
+  if (typeof v !== "string") return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(v);
+  if (!m) return null;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return d.getUTCFullYear() === Number(m[1]) && d.getUTCMonth() === Number(m[2]) - 1 &&
+    d.getUTCDate() === Number(m[3]) ? v.slice(0, 10) : null;
+}
+
+const dashText = (s) => (s === null || s === undefined || s === "" ? "-" : String(s));
+const trPrice = (v) => (tnum(v) === null ? "-" : tnum(v).toFixed(2));
+const trPct = (v) => (tnum(v) === null ? "-" : fmtSigned(tnum(v), 2) + "%");
+const trPlain = (v) => (tnum(v) === null ? "-" : tnum(v).toFixed(2) + "%");
+
+function recOutcome(rec) {
+  if (!rec || typeof rec !== "object") return null;
+  let o = rec.outcome;
+  if (typeof o === "string") {
+    if (!o.trim()) return null;
+    try { o = JSON.parse(o); } catch (e) { return null; }
+  }
+  return o && typeof o === "object" && !Array.isArray(o) ? o : null;
+}
+
+function trReasonText(code) {
+  const s = typeof code === "string" ? code : "";
+  if (!s) return "";
+  return own(EXIT_REASON_TEXT, s) || own(REC_REASON_TEXT, s) || s;
+}
+
+function trStatusText(status) {
+  const s = typeof status === "string" ? status : "";
+  if (!s) return "-";
+  if (own(TR_STATUS_TEXT, s)) return own(TR_STATUS_TEXT, s);
+  if (s.indexOf("exit_") === 0 && s.length > 5) return "出場：" + trReasonText(s.slice(5));
+  return s;
+}
+
+// The day-by-day path of an outcome: {state, rows, dropped}. state is 'none'
+// (an older record), 'malformed' (not a list), 'empty' (nothing readable) or
+// 'ok'. A row that is not an object, or has neither a date nor a close, is
+// dropped and counted; a row with some fields missing is kept, dashes there.
+function recPath(o) {
+  if (!o || o.path === undefined || o.path === null) return { state: "none", rows: [], dropped: 0 };
+  if (!Array.isArray(o.path)) return { state: "malformed", rows: [], dropped: 0 };
+  const rows = [];
+  let dropped = 0;
+  for (const p of o.path) {
+    if (!p || typeof p !== "object" || Array.isArray(p)) { dropped++; continue; }
+    const row = {
+      date: tdate(p.date), open: tnum(p.open), high: tnum(p.high), low: tnum(p.low),
+      close: tnum(p.close), ret: tnum(p.close_ret_pct),
+      status: typeof p.status === "string" ? p.status : "",
+      stop: tnum(p.stop), day: tint(p.day), ride: p.ride === true,
+    };
+    if (row.date === null && row.close === null) { dropped++; continue; }
+    rows.push(row);
+  }
+  return { state: rows.length ? "ok" : "empty", rows, dropped };
+}
+
+function dayGap(from, to) {
+  const a = dayNum(tdate(from)), b = dayNum(tdate(to));
+  return a === null || b === null ? null : b - a;
+}
+
+// The view of one closed recommendation: every field the record page prints,
+// already read strictly. `rec` is a row of recommendations.json.
+function tradeRecordView(rec) {
+  const r0 = rec && typeof rec === "object" ? rec : {};
+  const o = recOutcome(r0);
+  const g = o || {};
+  const sid = String(r0.stock_id === null || r0.stock_id === undefined ? "" : r0.stock_id).trim();
+  let name = r0.stock_name ? String(r0.stock_name) : "";
+  if (!name && sid) name = stockName(sid);
+  const p = recPath(g);
+  const v = {
+    rid: typeof r0.recommendation_id === "string" ? r0.recommendation_id : "",
+    sid, name: name || sid,
+    has_outcome: !!o,
+    schema: tint(g.record_schema),
+    path_state: p.state, path: p.rows, path_dropped: p.dropped,
+    // the older summary keeps no signal day of its own; the recommendation row
+    // does (portfolio/sync passes first_qualified_session as the signal)
+    signal_session: tdate(g.signal_session) || tdate(r0.first_qualified_session),
+    planned_entry_session: tdate(g.planned_entry_session) || tdate(r0.valid_until_session),
+    entry_date: tdate(g.entry_date), entry_price: tnum(g.entry_price),
+    exit_decision_date: tdate(g.exit_decision_date),
+    exit_fill_date: tdate(g.exit_fill_date) || tdate(g.exit_date),
+    exit_price: tnum(g.exit_price),
+    exit_basis: typeof g.exit_basis === "string" ? g.exit_basis : "",
+    reason: (typeof g.reason === "string" && g.reason) ? g.reason
+      : (typeof r0.status_reason === "string" ? r0.status_reason : ""),
+    bars: tint(g.bars),
+    ret_gross: tnum(g.ret_gross_pct), ret_net: tnum(g.ret_net_pct),
+    mfe: tnum(g.mfe_pct), mae: tnum(g.mae_pct),
+    live_fill_date: tdate(g.live_fill_date), live_fill_price: tnum(g.live_fill_price),
+  };
+  v.basis_text = own(TR_BASIS_TEXT, v.exit_basis) || "";
+  v.reason_text = trReasonText(v.reason);
+  v.calendar_days = tint(g.calendar_days);
+  if (v.calendar_days === null) v.calendar_days = dayGap(v.entry_date, v.exit_fill_date);
+  v.cost = tnum(g.cost_pct);
+  if (v.cost === null && v.ret_gross !== null && v.ret_net !== null) {
+    v.cost = Math.round((v.ret_gross - v.ret_net) * 100) / 100;
+  }
+  // The booked close of a time exit is not what the evening order gets: the
+  // order placed that night fills at the NEXT open (live_fill_*).
+  v.live_expected = v.reason === "time";
+  v.live_gap_pct = v.live_fill_price !== null && v.exit_price ? Math.round((v.live_fill_price / v.exit_price - 1) * 10000) / 100 : null;
+  v.ride_days = v.path.filter((q) => q.ride).length;
+  v.issues = tradeRecordIssues(v);
+  return v;
+}
+
+// Self-checks of a stored record against itself. They only LABEL a record
+// that disagrees with itself; the numbers shown are always the stored ones.
+function tradeRecordIssues(v) {
+  const bad = [];
+  const path = v.path;
+  if (v.path_state === "ok") {
+    if (v.bars !== null && v.bars !== path.length) bad.push("bars_vs_path");
+    if (v.entry_date && path[0].date && v.entry_date !== path[0].date) bad.push("entry_vs_path");
+    if (v.exit_fill_date && path[path.length - 1].date && v.exit_fill_date !== path[path.length - 1].date) bad.push("exit_vs_path");
+    const ds = path.map((q) => q.date);
+    if (ds.every((d) => d !== null) && ds.some((d, i) => i > 0 && !(d > ds[i - 1]))) bad.push("path_order");
+  }
+  if (v.entry_price && v.exit_price !== null && v.ret_gross !== null &&
+      Math.abs((v.exit_price / v.entry_price - 1) * 100 - v.ret_gross) > 0.03) bad.push("ret_vs_prices");
+  if (v.planned_entry_session && v.entry_date && v.planned_entry_session !== v.entry_date) bad.push("planned_entry");
+  return bad;
+}
+
+// Closed recommendations, newest exit first.
+function closedRecords(recs) {
+  const list = (Array.isArray(recs) ? recs : []).filter((q) => q && typeof q === "object" && q.status === "closed");
+  const key = (q) => {
+    const o = recOutcome(q) || {};
+    return tdate(o.exit_fill_date) || tdate(o.exit_date) || tdate(q.status_session) || "";
+  };
+  return list.slice().sort((a, b) => key(b).localeCompare(key(a)) ||
+    String(a.recommendation_id || "").localeCompare(String(b.recommendation_id || "")));
+}
+
+// --- the owner's fills against the rule's -----------------------------------
+// Sessions between two dates on the first calendar that knows both (the
+// app's trading calendar, or the trade's own path), else null; days is the
+// plain calendar difference. mine minus the rule's: positive = later.
+function sessionGap(from, to, calendars) {
+  const a = tdate(from), b = tdate(to);
+  if (!a || !b) return { sessions: null, days: null };
+  let sessions = null;
+  for (const cal of Array.isArray(calendars) ? calendars : []) {
+    if (!Array.isArray(cal)) continue;
+    const i = cal.indexOf(a), j = cal.indexOf(b);
+    if (i >= 0 && j >= 0) { sessions = j - i; break; }
+  }
+  return { sessions, days: dayGap(a, b) };
+}
+
+function gapText(gap) {
+  if (!gap) return "";
+  if (gap.sessions !== null) {
+    return gap.sessions === 0 ? "同一個交易日"
+      : gap.sessions > 0 ? `晚 ${gap.sessions} 個交易日` : `早 ${-gap.sessions} 個交易日`;
+  }
+  if (gap.days !== null) {
+    return gap.days === 0 ? "同一天"
+      : gap.days > 0 ? `晚 ${gap.days} 日曆天` : `早 ${-gap.days} 日曆天`;
+  }
+  return "";
+}
+
+function priceDiffPct(mineCents, ruleCents) {
+  if (!Number.isInteger(mineCents) || !Number.isInteger(ruleCents) || ruleCents <= 0) return null;
+  return pctOf(mineCents - ruleCents, ruleCents);
+}
+
+// `execs` are the owner's CURRENT executions for one recommendation; null
+// when there is no buy among them (nothing to reconcile, nothing shown).
+function reconcileTrade(v, execs, calendars) {
+  if (!v || !v.has_outcome || !Array.isArray(execs)) return null;
+  const good = execs.filter((e) => e && typeof e === "object" && (e.side === "BUY" || e.side === "SELL") &&
+    e.is_current !== 0 && tdate(e.session_date) !== null &&
+    Number.isInteger(e.price_cents) && e.price_cents > 0 && Number.isInteger(e.shares) && e.shares > 0);
+  const list = sortExecutions(good);
+  const buys = list.filter((e) => e.side === "BUY");
+  const sells = list.filter((e) => e.side === "SELL");
+  if (!buys.length) return null;
+  const cal = Array.isArray(calendars) ? calendars : [];
+  const avg = (rows) => divRound(rows.reduce((a, e) => a + e.price_cents * e.shares, 0),
+                                 rows.reduce((a, e) => a + e.shares, 0));
+  const ruleEntry = v.entry_price !== null ? Math.round(v.entry_price * 100) : null;
+  const ruleExit = v.exit_price !== null ? Math.round(v.exit_price * 100) : null;
+  const fold = replay(list, null);
+  const out = {
+    n_buys: buys.length, n_sells: sells.length, open_shares: fold.shares,
+    buy: {
+      date: buys[0].session_date, price_cents: buys[0].price_cents, avg_cents: avg(buys),
+      rule_date: v.entry_date, rule_price_cents: ruleEntry,
+      gap: sessionGap(v.entry_date, buys[0].session_date, cal),
+      diff_pct: priceDiffPct(buys[0].price_cents, ruleEntry),
+    },
+    sell: null, result: null,
+  };
+  if (!sells.length || fold.shares > 0) return out;
+  const last = sells[sells.length - 1];
+  const px = avg(sells);
+  out.sell = {
+    date: last.session_date, price_cents: px,
+    rule_date: v.exit_fill_date, rule_price_cents: ruleExit,
+    gap: sessionGap(v.exit_fill_date, last.session_date, cal),
+    diff_pct: priceDiffPct(px, ruleExit),
+    live: null,
+  };
+  if (v.live_expected && v.live_fill_date && v.live_fill_price !== null) {
+    const lp = Math.round(v.live_fill_price * 100);
+    out.sell.live = {
+      date: v.live_fill_date, price_cents: lp,
+      gap: sessionGap(v.live_fill_date, last.session_date, cal),
+      diff_pct: priceDiffPct(px, lp),
+    };
+  }
+  // The result needs every fee the ledger would have booked; a fill without
+  // them gives no honest percentage.
+  const feesOk = list.every((e) => Number.isInteger(e.fee_cents) && (e.side === "BUY" || Number.isInteger(e.tax_cents)));
+  if (feesOk) {
+    const cost = buys.reduce((a, e) => a + e.price_cents * e.shares + e.fee_cents, 0);
+    const pct = pctOf(fold.realized_net, cost);
+    out.result = {
+      net_cents: fold.realized_net, cost_cents: cost, net_pct: pct,
+      rule_net_pct: v.ret_net,
+      delta_pp: pct !== null && v.ret_net !== null ? Math.round((pct - v.ret_net) * 100) / 100 : null,
+    };
+  }
+  return out;
+}
+
+function recExecsFor(rid) {
+  if (!rid || typeof rid !== "string") return [];
+  const out = [];
+  for (const pos of STATE.positions || []) {
+    if (!pos || pos.recommendation_id !== rid || pos.status === "void") continue;
+    for (const e of currentExecutions((STATE.execsByPos || {})[pos.position_id] || [])) out.push(e);
+  }
+  return out;
+}
+
+function recCalendars(v) {
+  const ownDays = v.path.map((q) => q.date).filter((d) => d !== null);
+  return [CAL, ownDays];
+}
+
+// --- html --------------------------------------------------------------------
+function signedWord(n, up, down, same) {
+  return n === null ? "" : n > 0 ? up : n < 0 ? down : same;
+}
+
+function reconcileHtml(rc) {
+  if (!rc) return "";
+  const b = rc.buy;
+  const lines = [];
+  const priceLine = (who, price, rulePrice, diff, up, down, same) =>
+    `${who} ${esc(fmtPrice(price))}｜規則 ${rulePrice === null ? "-" : esc(fmtPrice(rulePrice))}｜價差 ${
+      diff === null ? "-" : esc(fmtPct(diff))}${diff === null ? "" : "（" + signedWord(diff, up, down, same) + "）"}`;
+  lines.push(drow("買進",
+    `${esc(dashText(b.date))}（規則 ${esc(dashText(b.rule_date))}，${esc(gapText(b.gap) || "-")}）<br>` +
+    priceLine("你", b.price_cents, b.rule_price_cents, b.diff_pct, "買得比規則貴", "買得比規則便宜", "同價") +
+    (rc.n_buys > 1 ? `<br><span class="sm">共 ${rc.n_buys} 筆買進，日期與價格以第一筆為準（加權均價 ${esc(fmtPrice(b.avg_cents))}）</span>` : "")));
+  if (rc.sell) {
+    const s = rc.sell;
+    lines.push(drow("賣出",
+      `${esc(dashText(s.date))}（規則成交 ${esc(dashText(s.rule_date))}，${esc(gapText(s.gap) || "-")}）<br>` +
+      priceLine("你", s.price_cents, s.rule_price_cents, s.diff_pct, "賣得比規則高", "賣得比規則低", "同價") +
+      (s.live ? `<br><span class="sm">對照實盤隔日開盤 ${esc(s.live.date)} 約 ${esc(fmtPrice(s.live.price_cents))}：${
+        esc(gapText(s.live.gap) || "-")}，價差 ${s.live.diff_pct === null ? "-" : esc(fmtPct(s.live.diff_pct))}</span>` : "") +
+      (rc.n_sells > 1 ? `<br><span class="sm">共 ${rc.n_sells} 筆賣出，日期取最後一筆、價格為加權均價</span>` : "")));
+    if (rc.result) {
+      const z = rc.result;
+      lines.push(drow("實際結果",
+        `你的淨報酬 <b class="${signClass(z.net_pct)}">${esc(z.net_pct === null ? "-" : fmtPct(z.net_pct))}</b>（${esc(fmtPnl(z.net_cents))}）<br>` +
+        `規則淨 ${esc(trPct(z.rule_net_pct))}｜差 ${z.delta_pp === null ? "-" : esc(fmtSigned(z.delta_pp, 2))} 個百分點`));
+    } else {
+      lines.push(drow("實際結果", `<span class="sm">成交缺少手續費或交易稅，算不出淨報酬</span>`));
+    }
+  } else {
+    lines.push(drow("賣出", `<span class="sm">你還有 ${esc(rc.open_shares.toLocaleString("en-US"))} 股沒賣，尚未結案，不比較結果</span>`));
+  }
+  return `<div class="sub-h">對帳：你的成交 vs 規則</div>${lines.join("")}` +
+    `<div class="hint">你的成交只存在這支手機，對帳只比較、不改任何紀錄。</div>`;
+}
+
+function pathTableHtml(v) {
+  const rows = v.path.map((q) => {
+    const exit = q.status.indexOf("exit_") === 0;
+    const st = trStatusText(q.status) + (q.ride ? "・期滿後續抱" : "");
+    return `<tr${exit ? ' class="hl"' : ""}>` +
+      `<td>${q.day === null ? "-" : "D" + esc(q.day)}<br><span class="sm">${esc(dashText(q.date))}</span></td>` +
+      `<td>開 ${esc(trPrice(q.open))} 高 ${esc(trPrice(q.high))}<br>低 ${esc(trPrice(q.low))} 收 ${esc(trPrice(q.close))}</td>` +
+      `<td class="${signClass(q.ret)}">${esc(trPct(q.ret))}</td>` +
+      `<td>${esc(st)}<br><span class="sm">停損 ${esc(trPrice(q.stop))}</span></td></tr>`;
+  }).join("");
+  return `<table class="tbl"><thead><tr><th>日</th><th>開高低收</th><th>收盤報酬</th><th>狀態・收盤後的停損單</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function tradeRecordHtml(v, recon, isOpen) {
+  if (!v.has_outcome) {
+    return `<article class="card state-closed" data-rid="${esc(v.rid)}"><div class="card-head">` +
+      `<span class="name">${esc(v.name)}</span><span class="code">${esc(v.sid)}</span>` +
+      `<span class="tag">${esc(v.reason_text || "已結案")}</span></div>` +
+      `<div class="hint">這筆已結案，但紀錄裡沒有成交摘要，無法顯示明細。</div></article>`;
+  }
+  const entry = `${esc(dashText(v.entry_date))}｜開盤 ${esc(trPrice(v.entry_price))}`;
+  const exitLine = `${esc(dashText(v.exit_fill_date))}｜${esc(trPrice(v.exit_price))}｜${
+    esc(v.basis_text || "價格依據未記錄")}`;
+  const hold = `${v.bars === null ? "-" : esc(v.bars)} 個交易日 / ${v.calendar_days === null ? "-" : esc(v.calendar_days)} 日曆天`;
+  const chain =
+    drow("訊號日", esc(dashText(v.signal_session))) +
+    drow("規則進場", entry) +
+    drow("出場判定日", esc(dashText(v.exit_decision_date))) +
+    drow("出場成交", exitLine) +
+    drow("出場原因", esc(dashText(v.reason_text))) +
+    drow("持有", hold);
+  const nums = `<div class="kv2">` +
+    kv("毛報酬", esc(trPct(v.ret_gross)), signClass(v.ret_gross)) +
+    kv("淨報酬", esc(trPct(v.ret_net)), signClass(v.ret_net), "已扣手續費與證交稅") +
+    kv("成本", esc(trPlain(v.cost)), "", "來回手續費與賣出稅") +
+    kv("最高（MFE）", esc(trPct(v.mfe)), signClass(v.mfe), "持有期間盤中最高，對進場價") +
+    kv("最低（MAE）", esc(trPct(v.mae)), signClass(v.mae), "持有期間盤中最低，對進場價") +
+    `</div>`;
+  let live = "";
+  if (v.live_expected) {
+    live = v.live_fill_date && v.live_fill_price !== null
+      ? `<div class="plan alert">實盤：當晚下單，隔日開盤 ${esc(v.live_fill_date)} 約 ${esc(trPrice(v.live_fill_price))}` +
+        `（帳上是收盤價 ${esc(trPrice(v.exit_price))}，差 ${esc(trPct(v.live_gap_pct))}）</div>`
+      : `<div class="plan">實盤：當晚下單，隔日開盤成交；隔日行情還沒有，價格待補。帳上是收盤價 ${esc(trPrice(v.exit_price))}。</div>`;
+  }
+  let pathBlock;
+  if (v.path_state === "ok") {
+    pathBlock = `<details class="strategy dim" data-trec="${esc(v.rid)}"${isOpen ? " open" : ""}>` +
+      `<summary>逐日明細（${v.path.length} 個交易日）</summary>${pathTableHtml(v)}` +
+      (v.path_dropped ? `<div class="hint">有 ${esc(v.path_dropped)} 筆格式不符的日資料已略過</div>` : "") +
+      `</details>`;
+  } else if (v.path_state === "none") {
+    pathBlock = `<div class="hint">早期紀錄，沒有逐日路徑。</div>`;
+  } else if (v.path_state === "empty") {
+    pathBlock = `<div class="hint">逐日路徑是空的，無法顯示。</div>`;
+  } else {
+    pathBlock = `<div class="hint">逐日路徑格式不符，無法顯示。</div>`;
+  }
+  const issues = v.issues.length
+    ? `<div class="notice warn">這筆紀錄自己對不上：${esc(v.issues.map((k) => own(TR_ISSUE_TEXT, k) || k).join("；"))}</div>` : "";
+  return `<article class="card state-closed" data-rid="${esc(v.rid)}">` +
+    `<div class="card-head"><span class="name">${esc(v.name)}</span><span class="code">${esc(v.sid)}</span>` +
+    `<span class="tag">${esc(v.reason_text || "已結案")}</span>` +
+    `<span class="${signClass(v.ret_net)}">${esc(trPct(v.ret_net))}</span></div>` +
+    issues + chain + nums + live + pathBlock + reconcileHtml(recon) + `</article>`;
+}
+
+function recordsSectionHtml() {
+  const head = `<div class="sec trec"><h2>已結案建議的完整紀錄</h2>`;
+  if (!STATE.recs) {
+    return head + (STATE.recsState === "missing"
+      ? `<div class="hint">這次部署沒有 recommendations.json，看不到建議的逐日出場紀錄。</div>`
+      : `<div class="hint">讀取建議紀錄中…</div>`) + `</div>`;
+  }
+  const all = closedRecords(STATE.recs);
+  if (!all.length) return head + `<div class="hint">目前沒有已結案的建議。</div></div>`;
+  const cards = all.slice(0, TR_RECORDS_KEPT).map((q) => {
+    const v = tradeRecordView(q);
+    return tradeRecordHtml(v, reconcileTrade(v, recExecsFor(v.rid), recCalendars(v)), STATE.recOpen[v.rid] === true);
+  }).join("");
+  return head +
+    (STATE.recsState === "missing" ? `<div class="notice warn">更新失敗，顯示的是上次讀到的內容</div>` : "") +
+    `<div class="hint">規則的進場、出場與逐日路徑都是系統當時存下的紀錄，這裡只顯示、不重算。` +
+    `期滿出場的帳上價格是收盤價，實盤要等隔日開盤才賣得到，兩者的差距另列。` +
+    (all.length > TR_RECORDS_KEPT ? `只列最近 ${TR_RECORDS_KEPT} 筆（共 ${all.length} 筆）。` : "") + `</div>` +
+    cards + `</div>`;
+}
+
+async function loadRecs() {
+  STATE.recsState = "loading";
+  try {
+    const d = await fetchJson(RECS_URL);
+    const list = Array.isArray(d) ? d : (d && Array.isArray(d.recommendations) ? d.recommendations : null);
+    if (!list) throw new Error("格式不符");
+    if (STATE.recsState !== "loading") return;     // superseded by a newer load
+    STATE.recs = list.filter((q) => q && typeof q === "object" && !Array.isArray(q));
+    STATE.recsState = "ready";
+  } catch (e) {
+    if (STATE.recsState !== "loading") return;
+    STATE.recsState = "missing";
+  }
+  if (STATE.page === "perf") render();
+}
+
+function ensureRecs() {
+  if (STATE.recsState !== "idle") return;
+  loadRecs().catch(() => {});
+}
+
 // --- research-page lines for the new meta blocks ----------------------------
 function recMetaText(rec) {
   if (!rec || typeof rec !== "object") return "本次掃描未提供";
@@ -3267,7 +4014,7 @@ function renderPicks() {
     `<div class="funnel">${esc(picksSummaryText(g))}</div>` +
     `<div class="notice ${reg.enterOk ? "ok" : "warn"}">${esc(reg.text)}${
       reg.asOf ? esc(` · 判定資料日 ${reg.asOf}`) : ""}</div>` +
-    `<div class="hint">買進資格由後端 Buy_Ready / Buy_Block 決定，本畫面只會把過期資料降級，不會把「不可買」改成「可買」。每張卡片的「停損（跌破先出）」是唯一要盯的價位。</div>`;
+    `<div class="hint">買進資格由後端 Buy_Ready / Buy_Block 決定，本畫面只會把過期資料降級，不會把「不可買」改成「可買」。每張卡片的「停損（跌破先出）」是最先要盯的價位。</div>`;
 
   const ai = aiReportView(STATE.market);
   const aiHtml = `<details class="strategy dim"><summary>AI 報告${ai.key === "ALL" ? "" : "（" + esc(ai.key) + "）"}${
@@ -3312,7 +4059,8 @@ function viewRows(list) {
   if (STATE.market !== "ALL") rows = rows.filter((r) => String(r.Market) === STATE.market);
   const q = STATE.query.trim().toLowerCase();
   if (q) {
-    rows = rows.filter((r) => String(r.Stock_ID).includes(q) ||
+    const qid = q.toUpperCase();
+    rows = rows.filter((r) => String(r.Stock_ID).toUpperCase().includes(qid) ||
       String(r.Stock_Name || "").toLowerCase().includes(q));
   }
   const [, key, dir] = SORTS[STATE.sortIndex];
@@ -3443,7 +4191,7 @@ function trackedStale() {
 // The name of a stock, wherever it is known from: today's list, the recent
 // recommendations, the whole-market file, or the quote feed's name map.
 function stockName(stockId) {
-  const id = String(stockId || "").trim();
+  const id = String(stockId || "").trim().toUpperCase();
   if (!id) return "";
   const r = rowFor(id);
   if (r && r.Stock_Name) return String(r.Stock_Name);
@@ -3510,6 +4258,25 @@ function exitSignalSummary(rows) {
     `⚠ ${hit.length} 檔已觸發出場訊號（停損/鎖利 ${stops}、目標/期滿 ${hit.length - stops}）· 若持有請先出場，卡片上有日期與價位`);
 }
 
+// The optional sell-half level. Before a fill it is the close-based reference;
+// once the row is entered it must be the FILL-based one (Fill_Scale_Out_Price),
+// the same basis as the stop and target next to it -- the close-based number
+// keeps moving with each scan and no longer belongs to the position. An
+// entered row with no fill-based value prints nothing rather than the wrong one.
+function scaleOutKv(r, hidden, entered) {
+  if (hidden) return "";
+  if (entered) {
+    const fill = cents(r.Fill_Scale_Out_Price);
+    if (fill === null) return "";
+    return kv("可賣一半（選用）", esc(fmtPrice(fill)), "",
+      `推估成交價 ${fmtPrice(cents(r.Entry_Open))} +${STRATEGY.scaleOutPct}%；選用，會降低平均報酬`);
+  }
+  const ref = cents(r.Scale_Out_Price);
+  if (ref === null) return "";
+  return kv("可賣一半（選用）", esc(fmtPrice(ref)), "",
+    `參考價；成交後改以成交價 +${STRATEGY.scaleOutPct}% 為準；選用，會降低平均報酬`);
+}
+
 function pickCard(r, group) {
   const grp = group || pickGroup(r, heldIds());
   const v = buyVerdict(r);
@@ -3560,9 +4327,7 @@ function pickCard(r, group) {
     stopKv +
     (stale || useRec ? "" : planAddKv(r)) +
     targetKv +
-    (stale || useRec || cents(r.Scale_Out_Price) === null ? "" :
-      kv("可賣一半（選用）", esc(fmtPrice(cents(r.Scale_Out_Price))), "",
-         "成交後改以成交價 +15% 為準；選用，會降低平均報酬")) +
+    scaleOutKv(r, stale || useRec, entered) +
     kv(sc.label, esc(fmt(r[sc.key], 1)), "", "規則分數，不是上漲機率") +
     chipKv(r);
 
@@ -3704,6 +4469,11 @@ function positionCard(pos, pinned) {
     : dayIndexBetween(pos.opened_session, sessionOnOrBefore(taipeiDate(new Date())), CAL);
   let stateText, stateCls;
   if (dayIdx === null) { stateText = "持有中 · 天數未知（日期不在已知交易日曆內）"; stateCls = "attention"; }
+  else if (dayIdx >= horizon && plan && plan.riding) {
+    // the rule keeps it (own 5-day mean or the market leg): not "sell now"
+    stateText = dayIdx === horizon ? `第 ${horizon} 天已到 · 規則續抱` : `已超過計畫 · D${dayIdx} / ${horizon} · 規則續抱`;
+    stateCls = "holding";
+  }
   else if (dayIdx > horizon) { stateText = `已超過計畫 · D${dayIdx} / ${horizon}`; stateCls = "overdue"; }
   else if (dayIdx === horizon) { stateText = `第 ${horizon} 天已到 · 待登錄賣出`; stateCls = "exit"; }
   else { stateText = `持有中 · D${dayIdx} / ${horizon}`; stateCls = "holding"; }
@@ -3739,15 +4509,15 @@ function positionCard(pos, pinned) {
        m ? `${m.session_date}｜${DATA_STATUS_TEXT[m.data_status] || m.data_status}` : "無報價") +
     kv("首日建議價", pos.initial_buy_price ? esc(fmtPrice(pos.initial_buy_price)) : "-", "",
        pos.initial_buy_price ? "固定，不隨掃描改動" : "此持倉未連結固定建議") +
-    kv("有效停損", plan ? esc(fmtPrice(plan.stop_orderable)) : "-", "",
+    kv("有效停損", plan ? esc(fmtPrice(plan.stop)) : "-", "",
        plan ? `可直接掛單（已對齊升降單位）` : "") +
-    kv("加碼價（分批買法）", plan && plan.add_open ? esc(fmtPrice(plan.add_orderable)) : "-", "",
+    kv("加碼價（分批買法）", plan && plan.add_open ? esc(fmtPrice(plan.add)) : "-", "",
        plan
          ? (plan.add_open
              ? `第一筆成交價 ${fmtPrice(plan.base)} × 0.90，已對齊升降單位；一次買滿就不用`
              : "此筆已有兩次以上買進，不再加碼")
          : "") +
-    kv("停利目標", plan ? esc(fmtPrice(plan.target_orderable)) : "-", "gold",
+    kv("停利目標", plan ? esc(fmtPrice(plan.target)) : "-", "gold",
        plan ? "條件價 · 已對齊升降單位" : "") +
     kv("已實現淨損益", esc(fmtPnl(pos.realized_net)), signClass(pos.realized_net), "已扣實際費稅") +
     kv("若今日全數賣出", m && m.net_if_liquidated !== null ? esc(fmtPnl(m.net_if_liquidated)) : "-",
@@ -3758,17 +4528,17 @@ function positionCard(pos, pinned) {
   // CONDITION, and armed / not-armed must look obviously different.
   const trail = plan
     ? (plan.armed
-        ? `<div class="plan armed">鎖利：已啟動（收盤曾達 ${esc(fmtPrice(plan.highest_close))}，${esc(plan.armed_on)}）· 有效停損已上調至 ${esc(fmtPrice(plan.stop_orderable))}，只升不降</div>`
-        : `<div class="plan">鎖利：尚未啟動；需要<b>收盤</b>站上 ${esc(fmtPrice(tickRound(plan.arm, "up", plan.stock_id)))}（條件，非已達成），隔一個交易日起生效 · 未啟動前停損維持 ${esc(fmtPrice(tickRound(plan.initial_stop, "down", plan.stock_id)))}</div>`)
+        ? `<div class="plan armed">鎖利：已啟動（收盤曾達 ${esc(fmtPrice(plan.highest_close))}，${esc(plan.armed_on)}）· 有效停損已上調至 ${esc(fmtPrice(plan.stop))}，只升不降</div>`
+        : `<div class="plan">鎖利：尚未啟動；需要<b>收盤</b>站上 ${esc(fmtPrice(plan.arm))}（條件，非已達成），隔一個交易日起生效 · 未啟動前停損維持 ${esc(fmtPrice(plan.initial_stop))}</div>`)
     : "";
 
   // "續抱" on its own is what the 2026-09-17 complaint was about: a position
   // 10% under water read exactly like one 10% up. The prices that decide what
   // to do next belong in the sentence.
   const holdLine = plan
-    ? `建議（以你登錄的成交價 ${fmtPrice(plan.base)} 計算）：續抱。跌破 ${fmtPrice(plan.stop_orderable)} 先出場${
-        plan.add_open ? `；分批買法可在 ${fmtPrice(plan.add_orderable)} 補另一半` : ""
-      }；${plan.armed ? "鎖利已啟動" : `收盤站上 ${fmtPrice(tickRound(plan.arm, "up", plan.stock_id))} 後，隔一個交易日起停損上調到 ${fmtPrice(tickRound(plan.lock, "down", plan.stock_id))}`}。`
+    ? `建議（以你登錄的成交價 ${fmtPrice(plan.base)} 計算）：續抱。跌破 ${fmtPrice(plan.stop)} 先出場${
+        plan.add_open ? `；分批買法可在 ${fmtPrice(plan.add)} 補另一半` : ""
+      }；${plan.armed ? "鎖利已啟動" : `收盤站上 ${fmtPrice(plan.arm)} 後，隔一個交易日起停損上調到 ${fmtPrice(plan.lock)}`}。`
     : "建議：續抱，下一個交易日重新評估（收盤後更新）。";
   // Everything above is computed from what YOU registered -- your fill price,
   // your fill date -- and the market data is only used to say where the stock
@@ -3780,7 +4550,9 @@ function positionCard(pos, pinned) {
     const bits = [];
     if (close !== null) bits.push(`收盤 ${fmtPrice(close)}（資料日 ${esc(String(mkt.Data_Date || "").slice(5, 10))}）`);
     if (ma5 !== null && close !== null) {
-      bits.push(`5 日均價 ${fmtPrice(ma5)}，${close > ma5 ? "站上（到期可續抱）" : "跌破（到期就出場）"}`);
+      bits.push(`5 日均價 ${fmtPrice(ma5)}，${close > ma5
+        ? "站上（個股這一關過，到期可續抱）"
+        : "跌破（個股這一關沒過，到期要看當天大盤是否回檔）"}`);
     } else if (num(mkt.Bars) !== null && num(mkt.Bars) < 5) {
       // A newly covered instrument (every ETF, the day whole-market storage
       // began) has a price but not yet an average. Say which, rather than
@@ -3793,10 +4565,13 @@ function positionCard(pos, pinned) {
       ? `<div class="plan dim">個股現況：${esc(bits.join(" · "))}</div>` : "";
   })();
 
+  const rideNow = plan ? rideView(plan, dayIdx, horizon) : null;
   const advice = dayIdx === null
     ? `<div class="plan">建議：無法計算持有天數，請確認成交日期。</div>`
     : dayIdx >= horizon
-      ? `<div class="plan alert">建議：第 ${horizon} 個交易日已到。收盤若仍站上自己的 5 日均價就續抱（最晚第 ${STRATEGY.cap} 天），否則依策略於收盤出場；實際賣出以你的成交回報為準。</div>`
+      ? (rideNow
+        ? `<div class="plan${rideNow.alert ? " alert" : ""}">建議：${esc(rideNow.time)}實際賣出以你的成交回報為準。</div>`
+        : `<div class="plan alert">建議：第 ${horizon} 個交易日已到。收盤若仍站上自己的 5 日均價、或當天大盤正在回檔（${MARKET_LEG_TEXT}），就續抱（最晚第 ${STRATEGY.cap} 天），否則依策略於收盤出場；實際賣出以你的成交回報為準。</div>`)
       : `<div class="plan">${esc(holdLine)}</div>`;
 
   return `<article class="card pos state-${stateCls}${pinned ? " pin" : ""}">
@@ -3875,8 +4650,10 @@ function renderPerf() {
     : `<div class="notice warn">估值不完整：${esc(s.stale.map((x) =>
         `${x.pos.stock_id}${x.as_of ? "（沿用 " + x.as_of + "）" : "（無估值）"}`).join("、"))}</div>`;
 
+  ensureRecs();
   document.getElementById("page-perf").innerHTML =
     systemRecordHtml() +
+    recordsSectionHtml() +
     gapNote +
     `<div class="sec"><h2>已凍結的十日成果</h2>${cycleRows}</div>` +
     `<div class="sec"><h2>已平倉／封存</h2>${closedRows}` +
@@ -4175,7 +4952,7 @@ function renderResearch() {
     ["加碼價（分批買法）", "第一筆成交價 × 0.90。只有「先買一半」的買法要用；一次買滿就忽略"],
     ["明日委託", "收盤後就把隔天要掛的單算好：停利、選用的賣一半、鎖利啟動門檻、停損、選用的加碼。每個價位都已對齊台股升降單位，可以直接掛"],
     ["鎖利啟動", "要「收盤」站上成交價 +2.5%，而且是隔一個交易日才生效——因為你收盤後才看得到，隔天才下得了單"],
-    ["續抱（到期不賣）", "第 10 天收盤若仍站上自己的 5 日均價就續抱，最晚第 20 天"],
+    ["續抱（到期不賣）", "第 10 天起每天收盤：站上自己的 5 日均價，或當天大盤正在回檔（加權指數低於 20 日均線、仍高於 60 日均線）就續抱，最晚第 20 天"],
     ["後期收下獲利", "第 8 天起，收盤只要還高於成交價 +1%（扣掉費稅後仍為正）就隔日開盤出場。實測：期滿才出場的那一群平均 -6.9%，是整套規則唯一的虧損來源"],
     ["20日平均日振幅%", "20日平均 (最高-最低)/收盤，未含前收跳空，故不等於標準 ATR"],
     ["通道上緣接近", "壓縮區間且收盤接近前40日高的97%，不一定真的突破"],
@@ -4322,7 +5099,7 @@ async function openExecutionForm(cfg) {
   const manual = !pos && !row;
   const body = `
     ${stockLine ? `<div class="form-title">${esc(stockLine)}</div>` : ""}
-    ${manual ? field("stock_id", "股票代號", "", { inputmode: "numeric", hint: "例如 3088" }) +
+    ${manual ? field("stock_id", "股票代號", "", { inputmode: "text", hint: "半形英數字，例如 3088、00878、00679B（英文字母會自動轉大寫）" }) +
                field("stock_name", "股票名稱（可留空）", "") : ""}
     ${refNote.length ? `<div class="hint">參考價：${esc(refNote.join("｜"))}。這些只是參考，系統不會替你填成交價。</div>` : ""}
     ${field("session_date", "成交日期", defDate, { type: "date",
@@ -4410,9 +5187,8 @@ async function saveExecution(data) {
 
   // A manual entry needs a stock id before anything else can be validated.
   if (!pos && !row) {
-    const sid = String(v.stock_id || "").trim();
-    if (!/^[0-9A-Za-z]{2,8}$/.test(sid)) {
-      showErrors(modal, { stock_id: "請填有效的股票代號" });
+    if (!normStockId(v.stock_id)) {
+      showErrors(modal, { stock_id: "請填有效的股票代號：4～7 碼半形英數字（例如 3088、00878、00679B），不接受全形字" });
       return;
     }
   }
@@ -4464,7 +5240,7 @@ async function saveExecution(data) {
   showErrors(modal, {});
 
   if (!pos) {
-    const sid = row ? String(row.Stock_ID) : String(v.stock_id || "").trim();
+    const sid = row ? String(row.Stock_ID) : normStockId(v.stock_id);
     // Never open a second automatic cycle while one is still in flight
     // (ledger._open_cycle's rule): reuse the open position for this name.
     pos = STATE.positions.find((p) => p.stock_id === sid && p.status === "open" && !p.needs_shares) || null;
@@ -4959,6 +5735,8 @@ document.addEventListener("toggle", (ev) => {
     if (!el.hasAttribute("data-forced")) STATE.refOpen = el.open;
   } else if (el.matches("details.order[data-order]")) {
     STATE.orderOpen[el.getAttribute("data-order")] = el.open;
+  } else if (el.matches("details[data-trec]")) {
+    STATE.recOpen[el.getAttribute("data-trec")] = el.open;
   }
 }, true);
 
@@ -5063,5 +5841,15 @@ window.YT = {
   eventsLine, aiReportView, systemRecordHtml, equitySvg, pickCard, render, renderPicks,
   renderToday, renderPerf, renderResearch, openDetail, listRowFor,
   exitGuideHtml, reportSourcesText, provisionalTimeExit,
+  // 2026-10-09 conformance fixes (tests/mobile_probe.js sections G-L)
+  activePlan, tomorrowOrders, positionCard, marketLegFor, planLevel, tickSize, rideState, rideView,
+  normStockId, scaleOutKv, holdClock, holdClockText, lateDueNow, regimeView, viewRows, sizingStop, PLAN_MILLI,
+  expectedSession, dataIsStale, AUTO_MAX_PER_SESSION, AUTO_GAP_MS, POLL_LIMIT_MS,
   BLOCK_TEXT, RESTRICT_TEXT, RESTRICT_NOTE, ORDER_RULES, STRATEGY, SLOT_GUIDANCE,
+  // 2026-10-09 complete record of a closed recommendation + reconciliation
+  // (tests/mobile_probe.js sections O-P)
+  recOutcome, tradeRecordView, tradeRecordHtml, tradeRecordIssues, closedRecords, recordsSectionHtml,
+  reconcileTrade, reconcileHtml, sessionGap, gapText, recExecsFor, recCalendars, recPath, pathTableHtml,
+  tnum, tint, tdate, trStatusText, trReasonText, loadRecs, ensureRecs,
+  TR_BASIS_TEXT, TR_STATUS_TEXT, TR_ISSUE_TEXT, TR_RECORDS_KEPT,
 };

@@ -192,6 +192,18 @@ jobs:
       # would have replaced the phone's data with nothing. Skipping the upload
       # leaves the previous deployment in place, which is what "previous data
       # kept" is supposed to mean.
+      # The closed recommendations' complete trade records (2026-10-09): the
+      # phone's performance page reads ./recommendations.json. It is the same
+      # file this workflow already commits (built from the recommendations
+      # table alone, no positions); this copy only rides into the Pages
+      # artifact and is ignored by git like scan_result.json.
+      - name: Publish recommendations.json next to the phone data
+        if: steps.scan.outputs.published == 'true'
+        run: |
+          if [ -f data/recommendations.json ]; then
+            cp data/recommendations.json mobile/recommendations.json
+          fi
+
       - name: Upload Pages artifact (mobile/ with fresh scan_result.json)
         if: steps.scan.outputs.published == 'true'
         uses: actions/upload-pages-artifact@v3

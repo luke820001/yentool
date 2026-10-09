@@ -62,13 +62,15 @@ python main_gui.py                        # 桌面介面
 python mobile/serve.py                    # 本機預覽手機版
 ```
 
-`scan_headless.py` 的離開碼是有意義的，CI 依此區分三種結果：
+`scan_headless.py` 的離開碼是有意義的，CI 依此區分五種結果（3 / 4 於 2026-10-09 補列，程式早已存在）：
 
 | 碼 | 意思 |
 |---:|---|
 | 0 | 掃描完成並已發布 —— **包含「今天沒有任何標的合格」這種正常結果** |
 | 1 | 抓不到行情，沒有東西可發布，保留前一次資料 |
 | 2 | 掃描本身出錯 |
+| 3 | 該交易日名單已定稿（`final-once-v1`），不重掃、不重發布；不是錯誤 |
+| 4 | 同 3，但晚間處置/限制名單改變了已發布的限制欄位，修正後的 payload 要重新部署 |
 
 ## 測試
 
@@ -82,7 +84,10 @@ python -m unittest discover -s tests -v
 
 ## 部署
 
-`.github/workflows/scan.yml` 於台灣時間 14:30 / 17:00 / 18:00 執行，然後：
+`.github/workflows/scan-timer.yml` 在台灣時間 06:00 / 10:00 的早 cron（GitHub cron 會晚數小時，沒關係）
+等到 15:00 後 dispatch `.github/workflows/scan.yml`，名單於 15:00 後**只定稿一次**（`final-once-v1`，見
+[`docs/排程與即時行情.md`](docs/排程與即時行情.md)）。`scan.yml` 本身的 14:30 / 17:00 / 18:00 cron（2026-10-09 前
+本節誤把它當主排程）只是備援，之後的觸發會因名單已定稿而離開碼 3 / 4 結束。執行內容：
 
 1. 發布 `mobile/` 到 GitHub Pages（含 `scan_result.json` 與 `quotes.json`）。
 2. 只提交會累積的小檔案：兩本帳本、股名快取、名單留榜狀態。
@@ -110,7 +115,10 @@ python -m unittest discover -s tests -v
   勝率高不等於一直在賺：獲利四成來自 17% 碰到停利的交易，沒有大波段的期間就是小賠
   （2022 年 −6.6%/筆）。掃描器每天把**自己實際發出的訊號**重放一次，結果在手機策略卡
   「帳本實際」那一行（`meta.live_record`），跟回測並排。細節見回測登錄簿 K 節。
-  規則的單一權威是 `scanner/exit_rules.DEFAULT_RULE`；完整敘述見
+  規則的單一權威是 `scanner/exit_rules.DEFAULT_RULE`（出場引擎的唯一來源；2026-10-09 補註：同樣的數字另有**鏡像副本**——
+  `scanner/scan_mode.py` 的 `PRELAUNCH_*`、`scanner/holding_tracker.py` 的逐模式表、`result_checks.py` 的備援 tuple、
+  `mobile/app.js` 的 `STRATEGY`、`gui/app.py` 的規則卡與 `or 10` / `or 20` 預設、`config/report_text.json`。
+  目前逐一核對相等，但並非全部有測試釘住，改規則時要一起改）；完整敘述見
   [`docs/STRATEGY.md`](docs/STRATEGY.md) §3.5，每一組測過的組合見
   [`docs/BACKTEST_LOG.md`](docs/BACKTEST_LOG.md)。
 - **價格基準未分離（F08）。** `price_volume.db` 混有 yfinance 還原價與交易所未還原價，

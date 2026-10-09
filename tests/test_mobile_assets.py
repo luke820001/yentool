@@ -56,5 +56,26 @@ class AssetVersions(unittest.TestCase):
         self.assertIn("search", text)
 
 
+class TheSourcesAreText(unittest.TestCase):
+    """Two raw NUL bytes sat in mobile/app.js (a map-key separator typed as a
+    real control character instead of an escape), which made grep report
+    "binary file matches" and made the version control system store the file
+    as binary -- no readable diff for the one file the owner's phone runs on.
+    Found 2026-10-09 by audit (M-27)."""
+
+    def test_no_phone_source_contains_a_nul_byte(self):
+        for name in ("app.js", "sw.js", "index.html", "styles.css", "README.md"):
+            data = (MOBILE / name).read_bytes()
+            self.assertNotIn(
+                b"\x00", data,
+                "%s has a raw NUL byte at offset %d -- write the escape \\u0000 "
+                "instead" % (name, data.find(b"\x00")))
+
+    def test_the_separator_is_the_escape(self):
+        text = (MOBILE / "app.js").read_text(encoding="utf-8")
+        self.assertIn('m.position_id + "\\u0000" + m.session_date', text)
+        self.assertIn('pos.position_id + "\\u0000" + m.session_date', text)
+
+
 if __name__ == "__main__":
     unittest.main()

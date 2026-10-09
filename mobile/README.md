@@ -43,7 +43,9 @@
 
 * **`scan_result.json`** = `{meta, rows}`。`meta` 帶模式、策略版本、掃描時間、
   行情日期、`calendar_tail`（真實交易日）、`regime`（大盤判定，含 `as_of_date`
-  與 `is_current`）、`quality`、`degraded`、`reports`（AI 報告，`{市場: 文字}`）、
+  與 `is_current`）、`market_leg`（`{日期: true|false}`：該日加權指數收盤低於 20 日均線、仍高於 60 日均線，
+  用來決定第 10 天之後是否因大盤續抱；沒有的日期＝未知＝視為關閉，與後端重放相同，
+  整個欄位缺少時手機只看個股自己的 5 日均線）、`quality`、`degraded`、`reports`（AI 報告，`{市場: 文字}`）、
   `report_sources`（每份報告的來源 `{市場: {source, model, attempts, seconds, error}}`，
   `source` 為 `gemini` / `groq` / `template`；`template` 表示 AI 沒有回應、
   內容是本機依規則產生的模板，畫面應標示「模板·非 AI」。舊檔沒有這個欄位時，
@@ -204,3 +206,31 @@ Service Worker 走 network-first：有網路一定看到最新的掃描與最新
   `tests/fixtures/mobile/scan_2026-10-07.json`，以及一份合成的新欄位資料。`mobile/scan_result.json` 不進 git，
   測試不讀它。`tests/test_mobile_probe.py` 另外用 `portfolio/money.py` 產生約 5,800 筆手續費／證交稅格點，
   以 `--fee-grid` 交給 probe 逐筆比對；沒有安裝 node 時跳過。
+
+## 已結案建議的完整紀錄（2026-10-09，v33）
+
+績效頁在「系統訊號紀錄」下面，列出每一筆已結案的建議（最近 20 筆，新的在前），順序固定是：
+訊號日 → 規則進場日與開盤價 → 出場判定日 → 出場成交日、價格與價格依據 → 出場原因 → 持有幾個交易日／日曆天
+→ 毛報酬、淨報酬、成本 → 最高（MFE）與最低（MAE）。期滿出場另列一行「實盤：當晚下單，隔日開盤 … 約 …」，
+因為帳上記的是收盤價，實盤要到隔日開盤才賣得到。「逐日明細」可展開，每個持有的交易日一列。
+手機只顯示後端存下的紀錄，不重算、不改寫；紀錄自己對不上（天數與路徑筆數不同、毛報酬與進出場價不符等）時會標出來，數字仍照原樣。
+
+- **資料來源**：`recommendations.json`（後端 `data/recommendations.json` 的公開匯出），只在開績效頁時讀一次，
+  不帶任何參數。這支手機目前只部署 `mobile/`，所以發布流程要把這個檔放進去；沒有時畫面顯示
+  「這次部署沒有 recommendations.json」，其他頁不受影響。Service Worker 與 scan_result.json 一樣 network-first。
+- **`outcome` 合約**：每筆建議的 `outcome` 是物件，有些匯出是 JSON 文字，兩種都讀。
+  `record_schema` 1 的完整紀錄有 `signal_session`、`planned_entry_session`、`entry_date`、`entry_price`、
+  `exit_decision_date`、`exit_fill_date`、`exit_price`、`exit_basis`（`level` 盤中觸價／`open` 開盤跳空或隔日開盤賣／`close` 收盤價）、
+  `reason`、`bars`、`calendar_days`、`ret_gross_pct`、`ret_net_pct`、`cost_pct`、`mfe_pct`、`mae_pct`、
+  `live_fill_date`、`live_fill_price`（只有期滿出場有）和 `path`。後期收下的判定日是成交日的前一個交易日。
+  `path` 每列是 `{date, open, high, low, close, close_ret_pct, status, stop, day, ride}`，
+  `status` 是 `holding`、`armed`、`sell_next_open` 或 `exit_<原因>`，`ride` 為真表示第 10 天之後續抱。
+- **舊紀錄**：沒有 `record_schema`、`path` 的只有八個摘要鍵，顯示成摘要並註明「早期紀錄，沒有逐日路徑」；
+  缺的數字一律是破折號，不會變成 NaN、undefined 或 0。`path` 不是清單、是空的或有壞列時，各自有說明，壞列略過並計數。
+- **對帳**：這筆建議如果有你登錄的成交（持倉的 `recommendation_id` 對到這筆建議，已撤銷的不算），
+  就多一塊「你的成交 vs 規則」：買進比規則晚幾個交易日、價差百分比；賣出日與價格對規則的出場成交
+  （期滿出場另對照隔日開盤的實盤價）；你的淨報酬對規則淨報酬差幾個百分點。沒有成交就什麼都不多顯示。
+  你的成交只存在這支手機的 IndexedDB：只在畫面上比較，不送出、不寫檔、不寫回帳本，也沒有任何請求帶著它。
+- **驗證**：`tests/mobile_probe.js` 的 O 節用凍結的後端紀錄（停損、停利、後期收下、期滿加實盤成交、續抱、舊紀錄、
+  JSON 文字、壞資料、對帳算術）逐行比對畫面；P 節（`--trade-grid`）由 `tests/test_mobile_trade_record.py`
+  用真正的 `replay_trade` 與 `trade_record` 現場產生紀錄，再與手機畫出的數字比對。

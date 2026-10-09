@@ -20,7 +20,7 @@ from scanner.result_checks import (
 )
 from scanner.scan_mode import (
     PRELAUNCH_ADD_PCT, PRELAUNCH_SCALE_OUT_PCT, PRELAUNCH_STOP_PCT,
-    PRELAUNCH_TP_PCT, PRELAUNCH_TRAIL_ARM, PRELAUNCH_TRAIL_LOCK,
+    PRELAUNCH_TP_PCT, PRELAUNCH_TRAIL_ARM, PRELAUNCH_TRAIL_LOCK, STRATEGY_VERSION,
 )
 
 DATE = "2026-09-14"
@@ -145,7 +145,7 @@ def clean_payload(rows=None):
     rows = rows if rows is not None else [clean_row()]
     return {
         "meta": {
-            "mode": "mode_prelaunch", "strategy_version": "prelaunch-2026-09-20",
+            "mode": "mode_prelaunch", "strategy_version": STRATEGY_VERSION,
             "scan_time": DATE + " 15:05:00", "session_date": DATE,
             "data_date": DATE, "count": len(rows), "empty_ok": not rows,
             "regime": {"ok": True, "risk_on": True, "enter_ok": False,
@@ -268,6 +268,28 @@ class RowIdentities(unittest.TestCase):
 
     def test_stop_pct_drift(self):
         self.assertIn("stop_pct_mismatch", codes(self._broken(Strict_Stop_Loss=280.0), "error"))
+
+    def test_trail_pair_drift(self):
+        # 2026-10-09 audit D10-18: the pair had only an ordering check, so a
+        # +3% arm (or a wrong lock) published without a word
+        close = clean_row()["Close_Price"]
+        rep = self._broken(Trail_Arm_Price=lvl(close, 0.03, "up"))
+        self.assertIn("trail_arm_pct_mismatch", codes(rep, "error"))
+        rep = self._broken(Trail_Lock_Price=lvl(close, 0.015, "down"))
+        self.assertIn("trail_lock_pct_mismatch", codes(rep, "error"))
+        rep = self._broken()
+        self.assertNotIn("trail_arm_pct_mismatch", codes(rep))
+        self.assertNotIn("trail_lock_pct_mismatch", codes(rep))
+
+    def test_strategy_version_must_be_the_producers(self):
+        p = clean_payload()
+        p["meta"]["strategy_version"] = "prelaunch-1999-01-01"
+        rep = check_payload(p, quotes=clean_quotes(p["rows"]))
+        self.assertIn("strategy_version_mismatch", codes(rep, "warn"))
+        self.assertEqual(rep["errors"], 0, format_report(rep))
+        p["meta"]["strategy_version"] = STRATEGY_VERSION
+        rep = check_payload(p, quotes=clean_quotes(p["rows"]))
+        self.assertNotIn("strategy_version_mismatch", codes(rep))
 
     def test_core_plus_mismatch(self):
         # ATR below the CORE+ floor but flagged True
@@ -420,9 +442,34 @@ class RowIdentities(unittest.TestCase):
         rep = self._broken(Buy_Ready=True, Buy_Block="", Market="TSE")
         self.assertIn("buy_ready_violates_gate", codes(rep, "error"))
 
+    def _buyable(self, **regime):
+        row = clean_row()
+        row.update(Buy_Ready=True, Buy_Block="")
+        p = clean_payload([row])
+        p["meta"]["regime"].update(enter_ok=True, above20=True)
+        p["meta"]["regime"].update(regime)
+        return check_payload(p, quotes=clean_quotes(p["rows"]))
+
     def test_buy_ready_consistent_passes(self):
-        rep = self._broken(Buy_Ready=True, Buy_Block="")
+        rep = self._buyable()
         self.assertEqual(rep["status"], "ok", format_report(rep))
+
+    def test_buy_ready_needs_the_lists_own_market_gate(self):
+        """2026-10-09 audit M-25: the list carries the regime it was judged on,
+        and a buyable row is only consistent with a current tailwind."""
+        self.assertNotIn("buy_ready_without_regime", codes(self._buyable()))
+        for change in ({"enter_ok": False}, {"enter_ok": None}, {"ok": False},
+                       {"is_current": False}):
+            rep = self._buyable(**change)
+            self.assertIn("buy_ready_without_regime", codes(rep, "error"), change)
+            self.assertEqual(rep["status"], "fail", change)
+
+    def test_a_blocked_row_on_a_headwind_day_is_fine(self):
+        row = clean_row()                    # Buy_Ready False / Buy_Block regime
+        p = clean_payload([row])
+        self.assertFalse(p["meta"]["regime"]["enter_ok"])
+        rep = check_payload(p, quotes=clean_quotes(p["rows"]))
+        self.assertNotIn("buy_ready_without_regime", codes(rep))
 
     def test_stale_row_warns_and_stale_buy_fails(self):
         rep = self._broken(Data_Date="2026-09-11")
@@ -613,7 +660,7 @@ def rec_item(row, **changes):
     item = {"recommendation_id": row["Recommendation_ID"],
             "stock_id": row["Stock_ID"], "stock_name": row["Stock_Name"],
             "strategy": "mode_prelaunch",
-            "strategy_version": "prelaunch-2026-09-20",
+            "strategy_version": STRATEGY_VERSION,
             "first_qualified_session": row["Recommended_On"],
             "valid_until_session": row["Rec_Valid_Until"],
             "status": row["Rec_Status"], "status_reason": None,
@@ -763,7 +810,7 @@ class RecLifecycleRules(unittest.TestCase):
     def _item(self, sid="9999", **changes):
         it = {"recommendation_id": "rec-{}-mode_prelaunch-1".format(sid),
               "stock_id": sid, "stock_name": "Other", "strategy": "mode_prelaunch",
-              "strategy_version": "prelaunch-2026-09-20",
+              "strategy_version": STRATEGY_VERSION,
               "first_qualified_session": "2026-09-11",
               "valid_until_session": DATE, "status": "active",
               "status_reason": None, "status_session": None, "outcome": None}
@@ -980,16 +1027,23 @@ class RestrictionRules(unittest.TestCase):
         self.assertIn("restrictions_feed_failed", codes(rep, "warn"))
         self.assertEqual(rep["errors"], 0, format_report(rep))
 
-    def test_fallback_and_best_effort_lists_are_info(self):
+    def test_fallback_and_attention_lists_are_info(self):
         r = clean_restrictions()
         r["boards"]["OTC"]["source"] = "web"
         r["attention_ok"]["TSE"] = False
-        r["altered_ok"]["OTC"] = False
         rep = self._meta(r)
         self.assertIn("restrictions_fallback", codes(rep, "info"))
         self.assertIn("attention_feed_failed", codes(rep, "info"))
-        self.assertIn("altered_feed_failed", codes(rep, "info"))
         self.assertEqual(rep["warnings"], 0, format_report(rep))
+
+    def test_altered_list_down_is_a_warning(self):
+        # 'suspended' (the one blocking kind) comes from the altered / halt
+        # feeds, so an outage there is no longer a quiet info item
+        r = clean_restrictions()
+        r["altered_ok"]["OTC"] = False
+        rep = self._meta(r)
+        self.assertIn("altered_feed_failed", codes(rep, "warn"))
+        self.assertEqual(rep["errors"], 0, format_report(rep))
 
     def test_list_older_than_previous_session_warns(self):
         r = clean_restrictions()

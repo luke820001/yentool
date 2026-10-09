@@ -26,6 +26,7 @@ covering the whole universe: make the property structural, not vigilant.
 The database stays local and stays ignored. CI rebuilds it from the JSON.
 """
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -58,13 +59,50 @@ def _cell(value):
     return value
 
 
+class ExportRefused(RuntimeError):
+    """The published file is not something to overwrite."""
+
+
+def _existing_ids(out_path):
+    """Recommendation ids already published at `out_path`, or None when there
+    is no file. Raises ExportRefused when the file is there but is not a
+    readable export: it holds history this run cannot rebuild, and replacing
+    it with whatever the (possibly empty) ledger holds would destroy it
+    (2026-10-09 audit D11-03). The bad file is kept beside it as `.bad`."""
+    if not out_path.exists():
+        return None
+    try:
+        with open(out_path, encoding="utf-8") as f:
+            data = json.load(f)
+        recs = data["recommendations"]
+        if not isinstance(recs, list):
+            raise ValueError("recommendations is not a list")
+        return {str(r.get("recommendation_id")) for r in recs
+                if isinstance(r, dict) and r.get("recommendation_id")}
+    except Exception as e:
+        try:
+            bad = out_path.with_name(out_path.name + ".bad")
+            if not bad.exists():
+                bad.write_bytes(out_path.read_bytes())
+        except OSError:
+            pass
+        raise ExportRefused("{} is not a readable export ({}); left as it "
+                            "is".format(out_path.name, str(e)[:80]))
+
+
 def export_recommendations(ledger_path, out_path):
     """Write the recommendation ledger to `out_path` as JSON. Returns the count.
 
     Reads `recommendations` and nothing else. Safe to run against a ledger that
     holds real positions: they are not selected, so they are not written.
+
+    The history only grows: when the published file already names a
+    recommendation the ledger no longer holds, the export is refused rather
+    than written (a ledger rebuilt from a damaged file would otherwise erase
+    them), and the write itself is atomic (temp file, then replace).
     """
     ledger_path, out_path = Path(ledger_path), Path(out_path)
+    before = _existing_ids(out_path)
     rows = []
     if ledger_path.exists():
         conn = sqlite3.connect(str(ledger_path))
@@ -84,13 +122,24 @@ def export_recommendations(ledger_path, out_path):
         finally:
             conn.close()
 
+    if before:
+        lost = before - {str(r.get("recommendation_id")) for r in rows}
+        if lost:
+            raise ExportRefused(
+                "{} recommendation(s) in {} are missing from the ledger ({}"
+                "{}); not overwriting".format(
+                    len(lost), out_path.name, ", ".join(sorted(lost)[:3]),
+                    ", ..." if len(lost) > 3 else ""))
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
+    tmp = out_path.with_name(out_path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"format_version": FORMAT_VERSION,
                    "table": "recommendations",
                    "count": len(rows),
                    "recommendations": rows},
                   f, ensure_ascii=False, indent=1, sort_keys=True)
+    os.replace(tmp, out_path)
     return len(rows)
 
 

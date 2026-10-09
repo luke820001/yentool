@@ -48,6 +48,12 @@ class MarketIndexFetcher(BaseFetcher):
     def _cache(self, df: pd.DataFrame) -> None:
         if df.empty:
             return
+        # Keep non-session and implausible bars OUT of the store (2026-10-09
+        # audit: a Sunday bar from yfinance sat in the cloud table for weeks).
+        from scanner.index_clean import clean_closes
+        df, _dropped = clean_closes(df)
+        if df.empty:
+            return
         upsert_and_trim(
             file_path=TAIEX_FILE,
             sheet_name="TAIEX",

@@ -119,11 +119,13 @@ EXHAUSTION_VOLUME_LOOKBACK = 20
 LARGE_HOLDER_WEEKS = 3
 
 # Cond_B uses FinMind shareholding data: weekly, optional, and throttled to
-# ~1 request / 1.5s. Fetching it for every full-market candidate (100-250
-# stocks) serially adds minutes to a scan, so it is OFF by default -- the scan
-# uses whatever chip data is already cached and never blocks on the network.
-# Populate the cache out of band (e.g. main.py on the watchlist) or export
-# CHIP_FETCH_IN_SCAN=1 to fetch inline.
+# ~1 request / 1.5s. The scan never fetches it: it uses whatever chip data is
+# already cached and never blocks on the network (the buy rule does not use
+# chips at all, see docs/BACKTEST_LOG.md). NOTE (2026-10-09 audit D8-08): the
+# switch below is imported by scanner/chip_verifier.py but NOT READ anywhere,
+# so exporting CHIP_FETCH_IN_SCAN=1 changes nothing today, and there is no
+# main.py. Kept only so the import keeps working; wire it up before relying
+# on it.
 CHIP_FETCH_IN_SCAN = os.environ.get("CHIP_FETCH_IN_SCAN", "0") == "1"
 
 # --- Signal Thresholds: Condition C ---

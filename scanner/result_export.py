@@ -29,6 +29,9 @@ from config.settings import (
 )
 
 
+MARKET_LEG_DAYS = 30        # sessions of meta.market_leg the phone can look back over
+
+
 def export_scan_result(df, scan_mode="", reports=None, degraded=None,
                        session_date=None, strategy_version="",
                        quality=None, quotes_meta=None, tracked=None,
@@ -69,21 +72,27 @@ def export_scan_result(df, scan_mode="", reports=None, degraded=None,
                                 rec_stats=rec_stats, events_meta=events_meta,
                                 report_sources=report_sources)
     except Exception as e:
-        # A mobile-feed hiccup must never break the primary CSV export.
+        # The CSV above is already written, so a mobile-feed hiccup never
+        # costs the primary export. But it must not read as success either: a
+        # caller that goes on to check and freeze would be judging the PREVIOUS
+        # payload still on disk (2026-10-09 audit D11-09). Say so, then raise.
         print("  [export] mobile json failed: {}".format(e))
+        raise RuntimeError("mobile json not written (csv was): {}".format(e))
 
     return str(SCAN_RESULT_FILE)
 
 
-def _regime():
+def _regime(data_date=None):
     """Market regime for the phone's entry gate, with its own freshness.
 
     Failing closed matters here: the phone draws the "new positions allowed"
     banner from this, and an unreadable regime is not a tailwind (F15).
+    `data_date` is the bar date the exported rows carry, so the regime is the
+    one the list was judged on rather than the newest bar on disk.
     """
     try:
         from scanner.market_regime import get_market_regime
-        return get_market_regime() or {}
+        return get_market_regime(data_date or None) or {}
     except Exception:
         return {}
 
@@ -200,7 +209,6 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
             names = {str(a).strip(): str(b) for a, b
                      in zip(df["Stock_ID"], df["Stock_Name"])}
 
-    reg = _regime()
     quotes = {}
     try:
         quotes = _publish_quotes(df, names=names)
@@ -215,6 +223,10 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
         dates = [str(r.get("Data_Date") or "")[:10] for r in rows]
         dates = [d for d in dates if d]
         data_date = max(dates) if dates else ""
+
+    # The regime is the one the exported list was judged on: a zero-pick day has
+    # no rows to read a date from, so the session date stands in for it.
+    reg = _regime(data_date or str(session_date or "")[:10] or None)
 
     payload = {
         "meta": {
@@ -297,6 +309,18 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
             pass
     if isinstance(rec_stats, dict):
         payload["meta"]["rec"] = rec_stats
+    # The market leg of the ride, per date, so the phone applies the same rule
+    # the backend replays with (2026-10-09 audit M-04). Absent when the TAIEX
+    # history cannot be read: the phone then says "not published" rather than
+    # "market not disturbed", and result_checks reports it (info).
+    try:
+        from scanner.market_leg import disturbed_by_date
+        _leg = disturbed_by_date()
+        if _leg:
+            payload["meta"]["market_leg"] = {
+                d: bool(_leg[d]) for d in sorted(_leg)[-MARKET_LEG_DAYS:]}
+    except Exception as e:
+        print("  [export] market leg not published: {}".format(str(e)[:80]))
     if isinstance(live_record, dict) and live_record:
         payload["meta"]["live_record"] = live_record
     else:
@@ -323,6 +347,7 @@ def export_scan_result_json(df, scan_mode="", scan_time="", reports=None,
             pass
     if quotes_meta:
         payload["meta"]["quotes"].update(quotes_meta)
+    from scanner.json_safe import dump_strict
     with open(MOBILE_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+        dump_strict(payload, f, ensure_ascii=False, separators=(",", ":"))
     return str(MOBILE_DATA_FILE)

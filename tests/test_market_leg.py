@@ -18,6 +18,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -136,11 +137,16 @@ class ExtendIf(unittest.TestCase):
             self.assertEqual((p["reason"], p["bar"]), ("time", 9))
 
 
-def taiex_db(path, closes, start="2026-01-01"):
+def taiex_db(path, closes, start="2026-01-05"):
+    """Write `closes` on consecutive TRADING sessions from `start`: the
+    index reader (scanner/index_clean) drops weekend and closure bars."""
     from datetime import date, timedelta
+    from scanner.index_clean import _is_session
     d = date.fromisoformat(start)
     rows = []
     for c in closes:
+        while d.weekday() >= 5 or _is_session(d.isoformat()) is False:
+            d += timedelta(days=1)
         rows.append((d.isoformat(), c))
         d += timedelta(days=1)
     conn = sqlite3.connect(str(path))
@@ -161,8 +167,10 @@ class MarketLeg(unittest.TestCase):
     def _series(self):
         # 70 days of a steady uptrend, then a 3-day pullback that stays above
         # the 60-day mean, then a fall through it
+        # (every step stays inside the 10 pct exchange limit, or the reader
+        # would throw the bar away as a bad print)
         up = [100.0 + i for i in range(70)]
-        return up + [155.0, 153.0, 152.0] + [100.0, 95.0]
+        return up + [155.0, 153.0, 152.0] + [140.0, 128.0, 118.0, 108.0, 100.0]
 
     def test_pullback_inside_an_uptrend_is_disturbed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -172,7 +180,7 @@ class MarketLeg(unittest.TestCase):
             self.assertFalse(table[dates[69]])          # at the high
             for d in dates[70:73]:                       # below 20MA, above 60MA
                 self.assertTrue(table[d], d)
-            self.assertFalse(table[dates[74]])          # broke the 60MA: a bear
+            self.assertFalse(table[dates[75]])          # broke the 60MA: a bear
             self.assertTrue(market_leg.is_disturbed(dates[71], db))
             fn = market_leg.make_disturbed_fn(db)
             self.assertTrue(fn(9, dates[71]))
@@ -200,13 +208,14 @@ class MarketLeg(unittest.TestCase):
             dates = taiex_db(db, series[:70])
             first = market_leg.disturbed_by_date(db)
             self.assertIs(market_leg.disturbed_by_date(db), first)   # cached
-            self.assertNotIn("2026-03-12", first)
             later = time.time() + 5
-            taiex_db(db, series[70:73], start="2026-03-12")
+            nxt = date.fromisoformat(dates[-1]) + timedelta(days=1)
+            more = taiex_db(db, series[70:73], start=nxt.isoformat())
             os.utime(db, (later, later))
             second = market_leg.disturbed_by_date(db)
             self.assertIsNot(second, first)
-            self.assertTrue(second["2026-03-12"])
+            self.assertNotIn(more[0], first)
+            self.assertTrue(second[more[0]])
 
     def test_the_default_file_is_the_configured_one(self):
         with tempfile.TemporaryDirectory() as tmp:
