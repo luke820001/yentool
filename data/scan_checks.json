@@ -2,20 +2,6 @@
  "version": 1,
  "runs": [
   {
-   "checked_at": "2026-09-22 21:56:33",
-   "session_date": "2026-09-22",
-   "scan_time": "2026-09-22 21:56:33",
-   "status": "warn",
-   "rows": 41,
-   "errors": 0,
-   "warnings": 4,
-   "codes": [
-    "tracked_null",
-    "tracked_range_high",
-    "tracked_range_low"
-   ]
-  },
-  {
    "checked_at": "2026-09-22 22:38:06",
    "session_date": "2026-09-22",
    "scan_time": "2026-09-22 22:38:05",
@@ -760,6 +746,22 @@
     "OTC": "template",
     "ALL": "template",
     "TSE": "template"
+   }
+  },
+  {
+   "checked_at": "2026-10-13 15:05:33",
+   "session_date": "2026-10-13",
+   "scan_time": "2026-10-13 15:05:32",
+   "status": "warn",
+   "rows": 37,
+   "errors": 0,
+   "warnings": 1,
+   "codes": [
+    "feed_degraded"
+   ],
+   "report_sources": {
+    "ALL": "gemini",
+    "TSE": "gemini"
    }
   }
  ]
