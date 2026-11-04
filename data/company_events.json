@@ -2348,13 +2348,13 @@
     "conf_mops_tse": {"as_of":"2026-11-05","attempted_at":"2026-11-05 00:43","error":null,"fetched_at":"2026-11-05 00:43","ok":true,"optional":true,"rows":132,"stale":false},
     "exdiv_otc": {"as_of":"2026-11-05","attempted_at":"2026-11-05 00:43","error":null,"fetched_at":"2026-11-05 00:43","ok":true,"optional":false,"rows":69,"stale":false},
     "exdiv_tse": {"as_of":"2026-11-05","attempted_at":"2026-11-05 00:43","error":null,"fetched_at":"2026-11-05 00:43","ok":true,"optional":false,"rows":53,"stale":false},
-    "news_otc": {"as_of":"2026-11-03","attempted_at":"2026-11-05 00:43","error":null,"fetched_at":"2026-11-05 00:43","ok":true,"optional":false,"rows":9,"stale":false},
-    "news_tse": {"as_of":"2026-11-03","attempted_at":"2026-11-05 00:43","error":null,"fetched_at":"2026-11-05 00:43","ok":true,"optional":false,"rows":24,"stale":false},
+    "news_otc": {"as_of":"2026-11-03","attempted_at":"2026-11-05 01:54","error":null,"fetched_at":"2026-11-05 01:54","ok":true,"optional":false,"rows":9,"stale":false},
+    "news_tse": {"as_of":"2026-11-03","attempted_at":"2026-11-05 01:54","error":null,"fetched_at":"2026-11-05 01:54","ok":true,"optional":false,"rows":24,"stale":false},
     "revenue_mops_otc": {"as_of":"2026-11-05","attempted_at":"2026-11-05 00:43","error":null,"fetched_at":"2026-11-05 00:43","ok":true,"optional":true,"rows":52,"stale":false},
-    "revenue_mops_tse": {"as_of":"2026-10-08","attempted_at":"2026-11-05 00:43","error":"RuntimeError: 46 rows < floor 50","fetched_at":"2026-10-30 15:02","ok":false,"optional":true,"rows":0,"stale":false},
+    "revenue_mops_tse": {"as_of":"2026-10-08","attempted_at":"2026-11-05 01:54","error":"RuntimeError: 46 rows < floor 50","fetched_at":"2026-10-30 15:02","ok":false,"optional":true,"rows":0,"stale":false},
     "revenue_otc": {"as_of":"2026-10-17","attempted_at":"2026-11-05 00:43","error":null,"fetched_at":"2026-11-05 00:43","ok":true,"optional":false,"rows":893,"stale":false},
     "revenue_tse": {"as_of":"2026-10-17","attempted_at":"2026-11-05 00:43","error":null,"fetched_at":"2026-11-05 00:43","ok":true,"optional":false,"rows":1088,"stale":false}
   },
-  "updated_at": "2026-11-05 00:43",
+  "updated_at": "2026-11-05 01:54",
   "version": 1
 }
