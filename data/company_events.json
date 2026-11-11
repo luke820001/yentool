@@ -3371,13 +3371,13 @@
     "conf_mops_tse": {"as_of":"2026-11-11","attempted_at":"2026-11-11 16:49","error":null,"fetched_at":"2026-11-11 16:49","ok":true,"optional":true,"rows":260,"stale":false},
     "exdiv_otc": {"as_of":"2026-11-11","attempted_at":"2026-11-11 15:05","error":null,"fetched_at":"2026-11-11 15:05","ok":true,"optional":false,"rows":65,"stale":false},
     "exdiv_tse": {"as_of":"2026-11-11","attempted_at":"2026-11-11 15:05","error":null,"fetched_at":"2026-11-11 15:05","ok":true,"optional":false,"rows":48,"stale":false},
-    "news_otc": {"as_of":"2026-11-10","attempted_at":"2026-11-11 19:29","error":null,"fetched_at":"2026-11-11 19:29","ok":true,"optional":false,"rows":9,"stale":false},
-    "news_tse": {"as_of":"2026-11-10","attempted_at":"2026-11-11 19:29","error":null,"fetched_at":"2026-11-11 19:29","ok":true,"optional":false,"rows":32,"stale":false},
-    "revenue_mops_otc": {"as_of":"2026-11-10","attempted_at":"2026-11-11 19:29","error":null,"fetched_at":"2026-11-11 19:29","ok":true,"optional":true,"rows":0,"skipped":"openapi current","stale":false},
+    "news_otc": {"as_of":"2026-11-10","attempted_at":"2026-11-11 19:33","error":null,"fetched_at":"2026-11-11 19:33","ok":true,"optional":false,"rows":9,"stale":false},
+    "news_tse": {"as_of":"2026-11-10","attempted_at":"2026-11-11 19:33","error":null,"fetched_at":"2026-11-11 19:33","ok":true,"optional":false,"rows":32,"stale":false},
+    "revenue_mops_otc": {"as_of":"2026-11-10","attempted_at":"2026-11-11 19:33","error":null,"fetched_at":"2026-11-11 19:33","ok":true,"optional":true,"rows":0,"skipped":"openapi current","stale":false},
     "revenue_mops_tse": {"as_of":"2026-11-11","attempted_at":"2026-11-11 15:28","error":null,"fetched_at":"2026-11-11 15:28","ok":true,"optional":true,"rows":982,"stale":false},
     "revenue_otc": {"as_of":"2026-11-11","attempted_at":"2026-11-11 15:05","error":null,"fetched_at":"2026-11-11 15:05","ok":true,"optional":false,"rows":897,"stale":false},
     "revenue_tse": {"as_of":"2026-10-17","attempted_at":"2026-11-11 15:05","error":null,"fetched_at":"2026-11-11 15:05","ok":true,"optional":false,"rows":1088,"stale":false}
   },
-  "updated_at": "2026-11-11 19:29",
+  "updated_at": "2026-11-11 19:33",
   "version": 1
 }
