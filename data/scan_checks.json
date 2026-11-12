@@ -2,23 +2,6 @@
  "version": 1,
  "runs": [
   {
-   "checked_at": "2026-10-13 17:58:03",
-   "session_date": "2026-10-13",
-   "scan_time": "2026-10-13 17:58:02",
-   "status": "warn",
-   "rows": 45,
-   "errors": 0,
-   "warnings": 1,
-   "codes": [
-    "tracked_null"
-   ],
-   "report_sources": {
-    "OTC": "gemini",
-    "ALL": "gemini",
-    "TSE": "gemini"
-   }
-  },
-  {
    "checked_at": "2026-10-14 15:07:15",
    "session_date": "2026-10-14",
    "scan_time": "2026-10-14 15:07:15",
@@ -1002,6 +985,23 @@
    "checked_at": "2026-11-13 01:19:02",
    "session_date": "2026-11-12",
    "scan_time": "2026-11-13 01:19:01",
+   "status": "fail",
+   "rows": 42,
+   "errors": 1,
+   "warnings": 0,
+   "codes": [
+    "sup_gap_mismatch"
+   ],
+   "report_sources": {
+    "OTC": "gemini",
+    "ALL": "gemini",
+    "TSE": "template"
+   }
+  },
+  {
+   "checked_at": "2026-11-13 02:05:22",
+   "session_date": "2026-11-12",
+   "scan_time": "2026-11-13 02:05:21",
    "status": "fail",
    "rows": 42,
    "errors": 1,
