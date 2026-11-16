@@ -2,23 +2,6 @@
  "version": 1,
  "runs": [
   {
-   "checked_at": "2026-10-20 19:04:28",
-   "session_date": "2026-10-20",
-   "scan_time": "2026-10-20 19:04:27",
-   "status": "fail",
-   "rows": 35,
-   "errors": 1,
-   "warnings": 1,
-   "codes": [
-    "close_outside_range",
-    "feed_degraded"
-   ],
-   "report_sources": {
-    "ALL": "gemini",
-    "TSE": "gemini"
-   }
-  },
-  {
    "checked_at": "2026-10-20 19:08:10",
    "session_date": "2026-10-20",
    "scan_time": "2026-10-20 19:08:09",
@@ -1013,6 +996,23 @@
    "codes": [
     "close_outside_range",
     "tracked_close_outside_range"
+   ],
+   "report_sources": {
+    "OTC": "gemini",
+    "ALL": "gemini",
+    "TSE": "gemini"
+   }
+  },
+  {
+   "checked_at": "2026-11-16 16:50:38",
+   "session_date": "2026-11-16",
+   "scan_time": "2026-11-16 16:50:38",
+   "status": "fail",
+   "rows": 43,
+   "errors": 1,
+   "warnings": 0,
+   "codes": [
+    "close_outside_range"
    ],
    "report_sources": {
     "OTC": "gemini",
