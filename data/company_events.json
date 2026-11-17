@@ -2472,13 +2472,13 @@
     "conf_mops_tse": {"as_of":"2026-11-18","attempted_at":"2026-11-18 00:24","error":null,"fetched_at":"2026-11-18 00:24","ok":true,"optional":true,"rows":387,"stale":false},
     "exdiv_otc": {"as_of":"2026-11-18","attempted_at":"2026-11-18 00:24","error":null,"fetched_at":"2026-11-18 00:24","ok":true,"optional":false,"rows":59,"stale":false},
     "exdiv_tse": {"as_of":"2026-11-18","attempted_at":"2026-11-18 00:24","error":null,"fetched_at":"2026-11-18 00:24","ok":true,"optional":false,"rows":56,"stale":false},
-    "news_otc": {"as_of":"2026-11-16","attempted_at":"2026-11-18 02:01","error":null,"fetched_at":"2026-11-18 02:01","ok":true,"optional":false,"rows":14,"stale":false},
-    "news_tse": {"as_of":"2026-11-16","attempted_at":"2026-11-18 02:01","error":null,"fetched_at":"2026-11-18 02:01","ok":true,"optional":false,"rows":26,"stale":false},
-    "revenue_mops_otc": {"as_of":"2026-11-10","attempted_at":"2026-11-18 02:01","error":null,"fetched_at":"2026-11-18 02:01","ok":true,"optional":true,"rows":0,"skipped":"openapi current","stale":false},
-    "revenue_mops_tse": {"as_of":"2026-11-11","attempted_at":"2026-11-18 02:01","error":null,"fetched_at":"2026-11-18 02:01","ok":true,"optional":true,"rows":0,"skipped":"openapi current","stale":false},
+    "news_otc": {"as_of":"2026-11-16","attempted_at":"2026-11-18 03:02","error":null,"fetched_at":"2026-11-18 03:02","ok":true,"optional":false,"rows":14,"stale":false},
+    "news_tse": {"as_of":"2026-11-16","attempted_at":"2026-11-18 03:02","error":null,"fetched_at":"2026-11-18 03:02","ok":true,"optional":false,"rows":26,"stale":false},
+    "revenue_mops_otc": {"as_of":"2026-11-10","attempted_at":"2026-11-18 03:02","error":null,"fetched_at":"2026-11-18 03:02","ok":true,"optional":true,"rows":0,"skipped":"openapi current","stale":false},
+    "revenue_mops_tse": {"as_of":"2026-11-11","attempted_at":"2026-11-18 03:02","error":null,"fetched_at":"2026-11-18 03:02","ok":true,"optional":true,"rows":0,"skipped":"openapi current","stale":false},
     "revenue_otc": {"as_of":"2026-11-17","attempted_at":"2026-11-18 00:24","error":null,"fetched_at":"2026-11-18 00:24","ok":true,"optional":false,"rows":898,"stale":false},
     "revenue_tse": {"as_of":"2026-11-16","attempted_at":"2026-11-18 00:24","error":null,"fetched_at":"2026-11-18 00:24","ok":true,"optional":false,"rows":1085,"stale":false}
   },
-  "updated_at": "2026-11-18 02:01",
+  "updated_at": "2026-11-18 03:02",
   "version": 1
 }
