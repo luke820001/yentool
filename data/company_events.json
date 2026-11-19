@@ -2508,17 +2508,17 @@
     }
   },
   "sources": {
-    "conf_mops_otc": {"as_of":"2026-11-18","attempted_at":"2026-11-19 16:34","error":"time budget spent","fetched_at":"2026-11-18 00:24","ok":false,"optional":true,"rows":199,"stale":false},
-    "conf_mops_tse": {"as_of":"2026-11-18","attempted_at":"2026-11-19 16:34","error":"RuntimeError: time budget spent","fetched_at":"2026-11-18 00:24","ok":false,"optional":true,"rows":387,"stale":false},
+    "conf_mops_otc": {"as_of":"2026-11-18","attempted_at":"2026-11-19 16:49","error":"time budget spent","fetched_at":"2026-11-18 00:24","ok":false,"optional":true,"rows":199,"stale":false},
+    "conf_mops_tse": {"as_of":"2026-11-18","attempted_at":"2026-11-19 16:49","error":"RuntimeError: time budget spent","fetched_at":"2026-11-18 00:24","ok":false,"optional":true,"rows":387,"stale":false},
     "exdiv_otc": {"as_of":"2026-11-19","attempted_at":"2026-11-19 15:09","error":null,"fetched_at":"2026-11-19 15:09","ok":true,"optional":false,"rows":64,"stale":false},
     "exdiv_tse": {"as_of":"2026-11-19","attempted_at":"2026-11-19 15:09","error":null,"fetched_at":"2026-11-19 15:09","ok":true,"optional":false,"rows":57,"stale":false},
-    "news_otc": {"as_of":"2026-11-18","attempted_at":"2026-11-19 16:34","error":null,"fetched_at":"2026-11-19 16:34","ok":true,"optional":false,"rows":21,"stale":false},
-    "news_tse": {"as_of":"2026-11-18","attempted_at":"2026-11-19 16:34","error":null,"fetched_at":"2026-11-19 16:34","ok":true,"optional":false,"rows":26,"stale":false},
-    "revenue_mops_otc": {"as_of":"2026-11-10","attempted_at":"2026-11-19 16:34","error":null,"fetched_at":"2026-11-19 16:34","ok":true,"optional":true,"rows":0,"skipped":"openapi current","stale":false},
-    "revenue_mops_tse": {"as_of":"2026-11-11","attempted_at":"2026-11-19 16:34","error":null,"fetched_at":"2026-11-19 16:34","ok":true,"optional":true,"rows":0,"skipped":"openapi current","stale":false},
+    "news_otc": {"as_of":"2026-11-18","attempted_at":"2026-11-19 16:49","error":null,"fetched_at":"2026-11-19 16:49","ok":true,"optional":false,"rows":21,"stale":false},
+    "news_tse": {"as_of":"2026-11-18","attempted_at":"2026-11-19 16:49","error":null,"fetched_at":"2026-11-19 16:49","ok":true,"optional":false,"rows":26,"stale":false},
+    "revenue_mops_otc": {"as_of":"2026-11-10","attempted_at":"2026-11-19 16:49","error":null,"fetched_at":"2026-11-19 16:49","ok":true,"optional":true,"rows":0,"skipped":"openapi current","stale":false},
+    "revenue_mops_tse": {"as_of":"2026-11-11","attempted_at":"2026-11-19 16:49","error":null,"fetched_at":"2026-11-19 16:49","ok":true,"optional":true,"rows":0,"skipped":"openapi current","stale":false},
     "revenue_otc": {"as_of":"2026-11-17","attempted_at":"2026-11-19 15:09","error":null,"fetched_at":"2026-11-19 15:09","ok":true,"optional":false,"rows":898,"stale":false},
     "revenue_tse": {"as_of":"2026-11-17","attempted_at":"2026-11-19 15:09","error":null,"fetched_at":"2026-11-19 15:09","ok":true,"optional":false,"rows":1091,"stale":false}
   },
-  "updated_at": "2026-11-19 16:34",
+  "updated_at": "2026-11-19 16:49",
   "version": 1
 }
